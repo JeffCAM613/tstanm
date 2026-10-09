@@ -1,0 +1,593 @@
+====================================================================
+KTP OP Anonymization (v4)
+====================================================================
+
+=== Metadata schema (anon_meta) ===
+user anon_meta already exists - kept
+anon_meta.code_map already exists - PRESERVED
+anon_meta.code_map_any already exists
+anon_meta.anon_inventory already exists
+cleared anon_meta.anon_inventory (579 rows)
+anon_meta.anon_run already exists
+anon_meta.anon_step_log already exists
+anon_meta.verify_result already exists
+=== Metadata schema ready ===
+
+Connected as OP on TANM7881 (session 379)
+No errors.
+No errors.
+
+Inventory file: C:\Users\u735031\AppData\Local\Temp\anon_inventory_9492.sql
+loaded ............ 579 items
+shipped ......... 561
+site-specific ... 18
+
+NULL_OUT       NONE              92
+CODE           ANY              391
+CODE           BANK_ACCOUNT      71
+DESCRIPTION    ANY                2
+DESCRIPTION    BANK_ACCOUNT       1
+SELF_CODE      ANY                5
+SELF_CODE      BANK_ACCOUNT       3
+SELF_CODE      COUNTERPARTY       4
+SELF_CODE      ENTITY             5
+SELF_CODE      PORTFOLIO          5
+
+Run id .............. 3
+Mode ................ DRYRUN   (no changes will be made)
+Categories .......... ENTITY,PORTFOLIO,COUNTERPARTY,BANK_ACCOUNT
+Descriptions ........ ENTITY,PORTFOLIO,COUNTERPARTY,BANK_ACCOUNT
+PII attributes ...... ENTITY,PORTFOLIO,COUNTERPARTY,BANK_ACCOUNT
+Parallel degree ..... 4
+--- Preflight -------------------------------------------------
+CHECKBOX    ventiler_corresp_bqe.tiers_entite  (VARCHAR2(1)) - will be left alone
+CHECKBOX    val_ssi_account.tiers_entite  (VARCHAR2(1)) - will be left alone
+CHECKBOX    val_ssi_corresp.tiers_entite  (VARCHAR2(1)) - will be left alone
+NOT NULL    histo_pricing_groupe.description  (cannot be emptied)
+CHECKBOX    tiers.flag_pp  (VARCHAR2(1)) - will be left alone
+resolved .......... 427
+missing tables .... 68
+missing columns ... 79
+checkbox columns .. 4   (left alone)
+too narrow ........ 0
+wrong type ........ 0
+not nullable ...... 1
+1 free-text column(s) are NOT NULL and will be left as they
+are. Change their rule to SELF_CODE in the inventory if the value
+must be overwritten rather than emptied.
+
+------------------------------------------------------------------- PROMPT  Live progress is written to anon_meta.anon_step_log as it happens.
+The output below appears only once each phase finishes, so to watch
+a long run open a second session and use:
+tests\manual\monitor_op_progress.sql
+-------------------------------------------------------------------
+--- Identifier mapping ----------------------------------------
+ENTITY                                                REUSED    76 existing mappings
+PORTFOLIO                                             REUSED    32 existing mappings
+COUNTERPARTY                                          REUSED    761 existing mappings
+BANK_ACCOUNT                                          REUSED    2,016 existing mappings
+--- Free text and PII -----------------------------------------
+histo_reglement.[description,groupe_1,groupe_2,group  DRYRUN    0 rows would change
+histo_operation.[description,groupe_1,groupe_2,group  DRYRUN    0 rows would change
+histo_flux.[description,groupe_1,groupe_2,groupe_3]   DRYRUN    0 rows would change
+histo_livraison.[description,groupe_1,groupe_2,group  DRYRUN    0 rows would change
+histo_mouvement.[description,libelle]                 DRYRUN    0 rows would change
+histo_mouvement_intraday.[description,libelle]        DRYRUN    0 rows would change
+histo_compta.[description]                            DRYRUN    0 rows would change
+histo_compta_man.[description]                        DRYRUN    0 rows would change
+histo_facture.[description]                           DRYRUN    0 rows would change
+histo_matiere.[description]                           DRYRUN    0 rows would change
+histo_parapheur.[description]                         DRYRUN    0 rows would change
+import_operation.[tiers_libelle,description]          DRYRUN    0 rows would change
+utilisateur.[description]                             DRYRUN    0 rows would change
+val_security_account.[numero_compte,groupe_1,groupe_  DRYRUN    0 rows would change
+val_user.[description]                                DRYRUN    0 rows would change
+cm_deal_deal.*                                        SKIPPED
+cm_fli_flow.[group1,group2,group3]                    DRYRUN    0 rows would change
+cm_payt_payment.*                                     SKIPPED
+tp_business_profile.[description]                     DRYRUN    0 rows would change
+uaa_users.[description,firstname,lastname,email,phon  DRYRUN    0 rows would change
+--- Identifiers -----------------------------------------------
+structure.code                                        DRYRUN    0 rows would change
+structure.pere                                        DRYRUN    0 rows would change
+tiers.code                                            DRYRUN    0 rows would change
+tiers.entite_pere                                     DRYRUN    0 rows would change
+tiers.entite_fifo                                     DRYRUN    0 rows would change
+tiers.tiers_conso                                     DRYRUN    0 rows would change
+tiers.tiers_federateur                                DRYRUN    0 rows would change
+tiers.tiers_conso2                                    DRYRUN    0 rows would change
+tiers.tiers_conso3                                    DRYRUN    0 rows would change
+compte_banque.code                                    DRYRUN    0 rows would change
+compte_banque.code_bban                               DRYRUN    0 rows would change
+compte_banque.agence                                  DRYRUN    0 rows would change
+compte_banque.banque                                  DRYRUN    0 rows would change
+compte_banque.entite                                  DRYRUN    0 rows would change
+compte_banque.portefeuille_defaut                     DRYRUN    0 rows would change
+compte_banque.compte_previs_glob                      DRYRUN    0 rows would change
+param_marge_titre.entite                              DRYRUN    0 rows would change
+ccp_breakdown.clearing_member                         DRYRUN    0 rows would change
+clearing_member_breakdown.clearing_member             DRYRUN    0 rows would change
+budget_filtre.entite                                  DRYRUN    0 rows would change
+budget_regle.entite                                   DRYRUN    0 rows would change
+compte_devise.entite                                  DRYRUN    0 rows would change
+compte_devise.compte                                  DRYRUN    0 rows would change
+compte_filiale.filiale                                DRYRUN    0 rows would change
+compte_filiale.entite                                 DRYRUN    0 rows would change
+compte_filiale.compte                                 DRYRUN    0 rows would change
+compte_regle.contrepartie                             DRYRUN    0 rows would change
+compte_regle.entite                                   DRYRUN    0 rows would change
+compte_regle.portefeuille                             DRYRUN    0 rows would change
+compte_regle.depositaire                              DRYRUN    0 rows would change
+compte_regle.compte                                   DRYRUN    0 rows would change
+compte_regle_bqe.correspondant                        DRYRUN    0 rows would change
+compte_regle_bqe.contrepartie                         DRYRUN    0 rows would change
+compte_regle_bqe.portefeuille                         DRYRUN    0 rows would change
+compte_regle_bqe.depositaire                          DRYRUN    0 rows would change
+compte_regle_bqe.entite                               DRYRUN    0 rows would change
+compte_regle_bqe.compte                               DRYRUN    0 rows would change
+compte_regle_liv.contrepartie                         DRYRUN    0 rows would change
+compte_regle_liv.entite                               DRYRUN    0 rows would change
+compte_regle_liv.portefeuille                         DRYRUN    0 rows would change
+compte_regle_liv.depositaire                          DRYRUN    0 rows would change
+compte_regle_liv.compte                               DRYRUN    0 rows would change
+compte_titre.depositaire                              DRYRUN    0 rows would change
+compte_titre.entite                                   DRYRUN    0 rows would change
+contrat.emetteur                                      DRYRUN    0 rows would change
+contrat_cadre.entite                                  DRYRUN    0 rows would change
+contrat_cadre.federateur                              DRYRUN    0 rows would change
+contrat_cadre.compte_echelle                          DRYRUN    0 rows would change
+contrat_instrument.entite                             DRYRUN    0 rows would change
+contrat_instrument.federateur                         DRYRUN    0 rows would change
+ctpyrating.counterparty                               DRYRUN    0 rows would change
+deposit_fils.portefeuille                             DRYRUN    0 rows would change
+deposit_fils.portefeuille_pere                        DRYRUN    0 rows would change
+deposit_pere.portefeuille                             DRYRUN    0 rows would change
+deposit_pere.portefeuille_depo                        DRYRUN    0 rows would change
+echelle.entite_mere                                   DRYRUN    0 rows would change
+echelle.portefeuille_mere                             DRYRUN    0 rows would change
+echelle.compte_reglement                              DRYRUN    0 rows would change
+echelle_condition.code                                DRYRUN    0 rows would change
+echelle_cond_date.condition                           DRYRUN    0 rows would change
+echelle_compte.compte                                 DRYRUN    0 rows would change
+echelle_marge.condition                               DRYRUN    0 rows would change
+fifo_solde_depo.compensateur                          DRYRUN    0 rows would change
+fifo_solde_depo.depositaire                           DRYRUN    0 rows would change
+fifo_solde_depo.portefeuille                          DRYRUN    0 rows would change
+frais_gestion.portefeuille                            DRYRUN    0 rows would change
+groupe_detail.portefeuille                            DRYRUN    0 rows would change
+groupe_provision.entite                               DRYRUN    0 rows would change
+decouvert_compte.compte                               DRYRUN    0 rows would change
+marge_compte_de.contrepartie                          DRYRUN    0 rows would change
+marge_regle.contrepartie                              DRYRUN    0 rows would change
+marge_regle.entite                                    DRYRUN    0 rows would change
+param_arrete.entite                                   DRYRUN    0 rows would change
+param_bafi_cpt.entite                                 DRYRUN    0 rows would change
+param_clonage.por_maitre                              DRYRUN    0 rows would change
+param_clonage.por_clone                               DRYRUN    0 rows would change
+param_cpta_reg_gen.portefeuille                       DRYRUN    0 rows would change
+param_cpta_reg_ven.banque                             DRYRUN    0 rows would change
+param_cpta_reg_ven.entite                             DRYRUN    0 rows would change
+param_cpta_reg_ven.portefeuille                       DRYRUN    0 rows would change
+param_cpta_reg_ven.compte                             DRYRUN    0 rows would change
+param_date.portefeuille                               DRYRUN    0 rows would change
+param_date.contrepartie                               DRYRUN    0 rows would change
+param_effet_paye.compte                               DRYRUN    0 rows would change
+param_effet_recu.compte                               DRYRUN    0 rows would change
+param_fiche_val_detail.code                           DRYRUN    0 rows would change
+param_garanti_taux.assureur                           DRYRUN    0 rows would change
+param_net_reg.compte_comp                             DRYRUN    0 rows would change
+param_net_reg.compte_pivot                            DRYRUN    0 rows would change
+param_ope_bloc.portefeuille_pere                      DRYRUN    0 rows would change
+param_ope_bloc.portefeuille_fils                      DRYRUN    0 rows would change
+param_parapheur_det.filiale                           DRYRUN    0 rows would change
+param_rappro_stock.depositaire                        DRYRUN    0 rows would change
+param_sign_user.filiale                               DRYRUN    0 rows would change
+photo.entite                                          DRYRUN    0 rows would change
+photo_budget.entite                                   DRYRUN    0 rows would change
+photo_flux.entite                                     DRYRUN    0 rows would change
+prevision_param.entite                                DRYRUN    0 rows would change
+prevision_param.compte                                DRYRUN    0 rows would change
+regle_rappro_auto.banque                              DRYRUN    0 rows would change
+regle_rappro_auto.entite                              DRYRUN    0 rows would change
+regle_rappro_auto.compte                              DRYRUN    0 rows would change
+reglement_decalage.banque                             DRYRUN    0 rows would change
+reglement_decalage.compte                             DRYRUN    0 rows would change
+reglement_flux.entite                                 DRYRUN    0 rows would change
+reglement_flux.tiers                                  DRYRUN    0 rows would change
+reglement_flux.compte                                 DRYRUN    0 rows would change
+reglement_regle.banque                                DRYRUN    0 rows would change
+reglement_regle.compte                                DRYRUN    0 rows would change
+spread_breakdown.portfolio                            DRYRUN    0 rows would change
+spread_breakdown.entity                               DRYRUN    0 rows would change
+spread_breakdown.issuer                               DRYRUN    0 rows would change
+stress_results.portefeuille                           DRYRUN    0 rows would change
+tiers_compteur.tiers                                  DRYRUN    0 rows would change
+tiers_foyer.foyer                                     DRYRUN    0 rows would change
+tiers_foyer.foyer_appartenance                        DRYRUN    0 rows would change
+tiers_limite.tiers                                    DRYRUN    0 rows would change
+tiers_limite.entite                                   DRYRUN    0 rows would change
+titre.emetteur                                        DRYRUN    0 rows would change
+titre.bafi_garant                                     DRYRUN    0 rows would change
+titre.depositaire                                     DRYRUN    0 rows would change
+titre.domiciliataire                                  DRYRUN    0 rows would change
+val_bank_account.code                                 DRYRUN    0 rows would change
+val_affilied_code.code_ref                            DRYRUN    0 rows would change
+val_third_party.adresse1                              DRYRUN    0 rows would change
+val_third_party.code                                  DRYRUN    0 rows would change
+val_third_party.tiers_conso                           DRYRUN    0 rows would change
+val_table_security.code                               DRYRUN    0 rows would change
+valo_ccy_volat_rule.portfolio                         DRYRUN    0 rows would change
+valo_ccy_volat_rule.entity                            DRYRUN    0 rows would change
+valo_regle.portefeuille                               DRYRUN    0 rows would change
+valo_regle.entite                                     DRYRUN    0 rows would change
+ventiler_contrat_cadre.entite                         DRYRUN    0 rows would change
+ventiler_contrat_cadre.tiers                          DRYRUN    0 rows would change
+ventiler_corresp.banque                               DRYRUN    0 rows would change
+ventiler_corresp.contrepartie                         DRYRUN    0 rows would change
+ventiler_corresp.correspondant_1                      DRYRUN    0 rows would change
+ventiler_corresp.correspondant_2                      DRYRUN    0 rows would change
+ventiler_corresp_bqe.tiers_entite                     CHECKBOX
+ventiler_corresp_bqe.contrepartie                     DRYRUN    0 rows would change
+ventiler_corresp_bqe.correspondant_1                  DRYRUN    0 rows would change
+ventiler_corresp_bqe.correspondant_2                  DRYRUN    0 rows would change
+ventiler_corresp_bqe.banque                           DRYRUN    0 rows would change
+ventiler_portef.contrepartie                          DRYRUN    0 rows would change
+ventiler_portef.portefeuille                          DRYRUN    0 rows would change
+ventiler_reg_liv.depositaire                          DRYRUN    0 rows would change
+ventiler_reg_liv.contrepartie                         DRYRUN    0 rows would change
+ventiler_reg_liv.portefeuille                         DRYRUN    0 rows would change
+vue_affilie_tiers.code_ref                            DRYRUN    0 rows would change
+vue_affilie_compte.code_ref                           DRYRUN    0 rows would change
+ventiler_compte.valeur_1                              DRYRUN    0 rows would change
+ventiler_compte.valeur_2                              DRYRUN    0 rows would change
+ventiler_compte.valeur_3                              DRYRUN    0 rows would change
+ventiler_compte.valeur_4                              DRYRUN    0 rows would change
+virement_compte.compte                                DRYRUN    0 rows would change
+histo_budget.entite                                   DRYRUN    0 rows would change
+histo_compta.tiers                                    DRYRUN    0 rows would change
+histo_compta.entite                                   DRYRUN    0 rows would change
+histo_compta.portefeuille                             DRYRUN    0 rows would change
+histo_compta_solde.entite                             DRYRUN    0 rows would change
+histo_courtage.tiers                                  DRYRUN    0 rows would change
+histo_couverture.tiers_deposit                        DRYRUN    0 rows would change
+histo_couverture.tiers_reception                      DRYRUN    0 rows would change
+histo_deposit.depositaire                             DRYRUN    0 rows would change
+histo_deposit.portefeuille                            DRYRUN    0 rows would change
+histo_detenteur.ancien_detenteur                      DRYRUN    0 rows would change
+histo_detenteur.nouveau_detenteur                     DRYRUN    0 rows would change
+histo_effet.compte                                    DRYRUN    0 rows would change
+histo_effet.compte_effet                              DRYRUN    0 rows would change
+histo_evenement.entite                                DRYRUN    0 rows would change
+histo_evenement.contrepartie                          DRYRUN    0 rows would change
+histo_evenement.depositaire                           DRYRUN    0 rows would change
+histo_evenement.entity_corresp1                       DRYRUN    0 rows would change
+histo_evenement.entity_corresp2                       DRYRUN    0 rows would change
+histo_facture.entite                                  DRYRUN    0 rows would change
+histo_facture.tiers                                   DRYRUN    0 rows would change
+histo_fifo_solde.portefeuille                         DRYRUN    0 rows would change
+histo_fifo_solde.compensateur                         DRYRUN    0 rows would change
+histo_fiscalite.entite                                DRYRUN    0 rows would change
+histo_fiscalite.foyer                                 DRYRUN    0 rows would change
+histo_fiscalite.compte_fiscal                         DRYRUN    0 rows would change
+histo_flux.entite                                     DRYRUN    0 rows would change
+histo_flux.portefeuille                               DRYRUN    0 rows would change
+histo_flux.tiers                                      DRYRUN    0 rows would change
+histo_limite_tr.entite                                DRYRUN    0 rows would change
+histo_limite_tr.tiers                                 DRYRUN    0 rows would change
+histo_ligne.compte                                    DRYRUN    0 rows would change
+histo_liv_solde.entite                                DRYRUN    0 rows would change
+histo_livraison.entite                                DRYRUN    0 rows would change
+histo_livraison.tiers                                 DRYRUN    0 rows would change
+histo_livraison.portefeuille                          DRYRUN    0 rows would change
+histo_matiere.entite                                  DRYRUN    0 rows would change
+histo_matiere.tiers                                   DRYRUN    0 rows would change
+histo_matiere.portefeuille                            DRYRUN    0 rows would change
+histo_mouv_solde.compte                               DRYRUN    0 rows would change
+histo_mouv_titre_solde.compensateur                   DRYRUN    0 rows would change
+histo_mouvement.entite                                DRYRUN    0 rows would change
+histo_mouvement.compte                                DRYRUN    0 rows would change
+histo_mouvement.compte_contrepartie                   DRYRUN    0 rows would change
+histo_operation.clearing_member                       DRYRUN    0 rows would change
+histo_operation.entite                                DRYRUN    0 rows would change
+histo_operation.contrepartie                          DRYRUN    0 rows would change
+histo_operation.compensateur                          DRYRUN    0 rows would change
+histo_operation.filiale                               DRYRUN    0 rows would change
+histo_operation.intermediaire                         DRYRUN    0 rows would change
+histo_operation.portefeuille                          DRYRUN    0 rows would change
+histo_operation.portefeuille_tiers                    DRYRUN    0 rows would change
+histo_operation.depositaire                           DRYRUN    0 rows would change
+histo_operation.depositaire_2                         DRYRUN    0 rows would change
+histo_operation.emetteur                              DRYRUN    0 rows would change
+histo_operation.corresp_receiver1                     DRYRUN    0 rows would change
+histo_operation.corresp_receiver2                     DRYRUN    0 rows would change
+histo_operation.corresp_sender1                       DRYRUN    0 rows would change
+histo_operation.corresp_sender2                       DRYRUN    0 rows would change
+histo_operation.portefeuille_deposit                  DRYRUN    0 rows would change
+histo_operation.tiers_domicile                        DRYRUN    0 rows would change
+histo_operation.compte_entite                         DRYRUN    0 rows would change
+histo_operation.compte_tiers                          DRYRUN    0 rows would change
+histo_operation.compte_filiale                        DRYRUN    0 rows would change
+histo_operation.compte_tiers_2                        DRYRUN    0 rows would change
+histo_operation.compte_entite_2                       DRYRUN    0 rows would change
+histo_operation.tiers_iban_compte                     DRYRUN    0 rows would change
+histo_parapheur.filiale                               DRYRUN    0 rows would change
+histo_parapheur_det.filiale                           DRYRUN    0 rows would change
+histo_position_tr.entite                              DRYRUN    0 rows would change
+histo_prevision.compte                                DRYRUN    0 rows would change
+histo_pricing_detail.entite                           DRYRUN    0 rows would change
+histo_pricing_detail.portefeuille                     DRYRUN    0 rows would change
+histo_pricing_detail.portefeuille_tiers               DRYRUN    0 rows would change
+histo_reg_conso.compte                                DRYRUN    0 rows would change
+histo_reg_releve.entite                               DRYRUN    0 rows would change
+histo_reg_releve.compte                               DRYRUN    0 rows would change
+histo_reg_solde.entite                                DRYRUN    0 rows would change
+histo_reg_solde.portefeuille                          DRYRUN    0 rows would change
+histo_reg_solde.compte                                DRYRUN    0 rows would change
+histo_reglement.entite                                DRYRUN    0 rows would change
+histo_reglement.tiers                                 DRYRUN    0 rows would change
+histo_reglement.corresp_receiver1                     DRYRUN    0 rows would change
+histo_reglement.corresp_receiver2                     DRYRUN    0 rows would change
+histo_reglement.corresp_sender1                       DRYRUN    0 rows would change
+histo_reglement.corresp_sender2                       DRYRUN    0 rows would change
+histo_reglement.portefeuille                          DRYRUN    0 rows would change
+histo_reglement.compte                                DRYRUN    0 rows would change
+histo_reglement.cpty_account                          DRYRUN    0 rows would change
+histo_titre_solde.compensateur                        DRYRUN    0 rows would change
+histo_titre_solde.portefeuille                        DRYRUN    0 rows would change
+import_evenement.contrepartie                         DRYRUN    0 rows would change
+import_evenement.entite                               DRYRUN    0 rows would change
+import_evenement.cpty_account                         DRYRUN    0 rows would change
+import_evenement.entity_account                       DRYRUN    0 rows would change
+import_evenement.cpty_corresp1                        DRYRUN    0 rows would change
+import_evenement.cpty_corresp2                        DRYRUN    0 rows would change
+import_evenement.entity_corresp1                      DRYRUN    0 rows would change
+import_evenement.entity_corresp2                      DRYRUN    0 rows would change
+import_operation.clearing_member                      DRYRUN    0 rows would change
+import_operation.entite                               DRYRUN    0 rows would change
+import_operation.contrepartie                         DRYRUN    0 rows would change
+import_operation.compensateur                         DRYRUN    0 rows would change
+import_operation.filiale                              DRYRUN    0 rows would change
+import_operation.intermediaire                        DRYRUN    0 rows would change
+import_operation.portefeuille                         DRYRUN    0 rows would change
+import_operation.portefeuille_tiers                   DRYRUN    0 rows would change
+import_operation.depositaire                          DRYRUN    0 rows would change
+import_operation.depositaire_2                        DRYRUN    0 rows would change
+import_operation.emetteur                             DRYRUN    0 rows would change
+import_operation.corresp_receiver1                    DRYRUN    0 rows would change
+import_operation.corresp_receiver2                    DRYRUN    0 rows would change
+import_operation.corresp_sender1                      DRYRUN    0 rows would change
+import_operation.corresp_sender2                      DRYRUN    0 rows would change
+import_operation.portefeuille_deposit                 DRYRUN    0 rows would change
+import_operation.tiers_domicile                       DRYRUN    0 rows would change
+import_operation.compte_entite                        DRYRUN    0 rows would change
+import_operation.compte_tiers                         DRYRUN    0 rows would change
+import_operation.compte_filiale                       DRYRUN    0 rows would change
+import_operation.compte_tiers_2                       DRYRUN    0 rows would change
+import_operation.groupe_1                             DRYRUN    0 rows would change
+import_operation.groupe_2                             DRYRUN    0 rows would change
+import_operation.groupe_3                             DRYRUN    0 rows would change
+zba_breakdown.centralizer_account                     DRYRUN    0 rows would change
+zba_payment_breakdown.entity                          DRYRUN    0 rows would change
+zba_payment_breakdown.portfolio                       DRYRUN    0 rows would change
+zba_payment_breakdown.mirrored_entity                 DRYRUN    0 rows would change
+zba_payment_breakdown.mirrored_portfolio              DRYRUN    0 rows would change
+zba_payment_breakdown.centralizer_account             DRYRUN    0 rows would change
+zba_payment_breakdown.current_account                 DRYRUN    0 rows would change
+zba_payment_breakdown.mirrored_current_account        DRYRUN    0 rows would change
+zba_transfer_breakdown.entity                         DRYRUN    0 rows would change
+zba_transfer_breakdown.portfolio                      DRYRUN    0 rows would change
+zba_transfer_breakdown.counterparty                   DRYRUN    0 rows would change
+zba_transfer_breakdown.centralizer_account            DRYRUN    0 rows would change
+zba_transfer_breakdown.counterparty_account           DRYRUN    0 rows would change
+zba_transfer_breakdown.entity_account                 DRYRUN    0 rows would change
+charge_contract_criteria.entity                       DRYRUN    0 rows would change
+charge_contract_criteria.bank                         DRYRUN    0 rows would change
+charge_contract_criteria.account                      DRYRUN    0 rows would change
+charge_contract_process.entity                        DRYRUN    0 rows would change
+charge_contract_process.bank                          DRYRUN    0 rows would change
+charge_contract_process.account                       DRYRUN    0 rows would change
+charge_missing_process.entity                         DRYRUN    0 rows would change
+charge_missing_process.bank                           DRYRUN    0 rows would change
+charge_missing_process.account                        DRYRUN    0 rows would change
+mpm_file_bkd.entity                                   DRYRUN    0 rows would change
+mpm_file_bkd.counterparty                             DRYRUN    0 rows would change
+mpm_file_bkd.account                                  DRYRUN    0 rows would change
+trade_repository_breakdown.entity                     DRYRUN    0 rows would change
+val_cptyrating.counterparty                           SKIPPED
+val_currency_account.entity                           SKIPPED
+val_currency_account.compte                           DRYRUN    0 rows would change
+val_security_account.entite                           DRYRUN    0 rows would change
+val_security_account.depositaire                      DRYRUN    0 rows would change
+val_security_account.correspondant                    SKIPPED
+val_security_account.contrepartie                     SKIPPED
+val_ssi_account.portefeuille                          DRYRUN    0 rows would change
+val_ssi_account.depositaire                           DRYRUN    0 rows would change
+val_ssi_account.compte                                DRYRUN    0 rows would change
+val_ssi_account.tiers_entite                          CHECKBOX
+val_ssi_corresp.banque                                DRYRUN    0 rows would change
+val_ssi_corresp.contrepartie                          DRYRUN    0 rows would change
+val_ssi_corresp.correspondant_1                       DRYRUN    0 rows would change
+val_ssi_corresp.correspondant_2                       DRYRUN    0 rows would change
+val_ssi_corresp.tiers_entite                          CHECKBOX
+val_third_party_limit.entite                          DRYRUN    0 rows would change
+val_third_party_limit.tiers                           DRYRUN    0 rows would change
+cm_account_of_bkstmt_file.entity                      DRYRUN    0 rows would change
+cm_account_of_bkstmt_file.account                     DRYRUN    0 rows would change
+cm_account_of_bkstmt_file.bank                        DRYRUN    0 rows would change
+cm_archived_forecast.entity                           DRYRUN    0 rows would change
+cm_archived_forecast.bank                             DRYRUN    0 rows would change
+cm_bkstmt_file_config.collator                        DRYRUN    0 rows would change
+cm_bkstmt_file_config.bank                            DRYRUN    0 rows would change
+cm_bsi_bank_statement.entity                          DRYRUN    0 rows would change
+cm_bsi_bank_statement.bank_account                    DRYRUN    0 rows would change
+cm_cash_concent_accounts.entity                       DRYRUN    0 rows would change
+cm_cash_concent_accounts.account                      DRYRUN    0 rows would change
+cm_cash_concent_accounts.bank                         DRYRUN    0 rows would change
+cm_cash_concent_header.master_account                 DRYRUN    0 rows would change
+cm_cash_concent_header.compte_tiers                   SKIPPED
+cm_cash_concent_header.compte_entite                  SKIPPED
+cm_cash_concent_header.compte_filiale                 SKIPPED
+cm_cash_concent_header.entity                         DRYRUN    0 rows would change
+cm_cash_concent_header.filiale                        SKIPPED
+cm_cash_concent_header.intermediaire                  SKIPPED
+cm_cash_concent_header.portefeuille                   SKIPPED
+cm_cash_concent_header.contrepartie                   SKIPPED
+cm_cash_concent_header.correspondant_1                SKIPPED
+cm_cash_concent_header.correspondant_2                SKIPPED
+cm_cash_concent_header.correspondant_3                SKIPPED
+cm_cash_concent_header.correspondant_4                SKIPPED
+cm_cash_concent_header.correspondant_5                SKIPPED
+cm_cash_concent_header.portefeuille_tiers             SKIPPED
+cm_cash_concent_header.depositaire                    SKIPPED
+cm_cash_concent_header.depositaire_2                  SKIPPED
+cm_cash_concent_header.emetteur                       SKIPPED
+cm_cash_concent_header.correspondant_sender1          SKIPPED
+cm_cash_concent_header.correspondant_sender2          SKIPPED
+cm_cash_concent_header.correspondant_receiver1        SKIPPED
+cm_cash_concent_header.correspondant_receiver2        SKIPPED
+cm_deal_deal.compte_tiers                             SKIPPED
+cm_deal_deal.compte_entite                            SKIPPED
+cm_deal_deal.compte_filiale                           SKIPPED
+cm_deal_deal.compte_tiers_2                           SKIPPED
+cm_deal_deal.entity                                   SKIPPED
+cm_deal_deal.filiale                                  SKIPPED
+cm_deal_deal.intermediaire                            SKIPPED
+cm_deal_deal.portefeuille                             SKIPPED
+cm_deal_deal.portefeuille_deposit                     SKIPPED
+cm_deal_deal.contrepartie                             SKIPPED
+cm_deal_deal.correspondant_1                          SKIPPED
+cm_deal_deal.correspondant_2                          SKIPPED
+cm_deal_deal.correspondant_3                          SKIPPED
+cm_deal_deal.correspondant_4                          SKIPPED
+cm_deal_deal.correspondant_5                          SKIPPED
+cm_deal_deal.correspondant_6                          SKIPPED
+cm_deal_deal.correspondant_7                          SKIPPED
+cm_deal_deal.correspondant_8                          SKIPPED
+cm_deal_deal.correspondant_9                          SKIPPED
+cm_deal_deal.correspondant_10                         SKIPPED
+cm_deal_deal.portefeuille_tiers                       SKIPPED
+cm_deal_deal.depositaire                              SKIPPED
+cm_deal_deal.depositaire_2                            SKIPPED
+cm_deal_deal.emetteur                                 SKIPPED
+cm_deal_deal.correspondant_sender1                    SKIPPED
+cm_deal_deal.correspondant_sender2                    SKIPPED
+cm_deal_deal.correspondant_receiver1                  SKIPPED
+cm_deal_deal.correspondant_receiver2                  SKIPPED
+cm_deal_deal.compensateur                             SKIPPED
+cm_deal_deal.depositaire_bis                          SKIPPED
+cm_deal_deal.depositaire_2_bis                        SKIPPED
+cm_deal_deal.corresp_inter_sender1                    SKIPPED
+cm_deal_deal.corresp_inter_sender2                    SKIPPED
+cm_deal_deal.corresp_inter_receiver1                  SKIPPED
+cm_deal_deal.corresp_inter_receiver2                  SKIPPED
+cm_deal_deal.clearing_member                          SKIPPED
+cm_fli_flow.entity                                    DRYRUN    0 rows would change
+cm_fli_flow.portfolio                                 DRYRUN    0 rows would change
+cm_fli_flow.account                                   SKIPPED
+cm_fli_flow.counterparty                              DRYRUN    0 rows would change
+cm_flow_to_pay_rules.entity                           DRYRUN    0 rows would change
+cm_flow_to_pay_rules.bank                             SKIPPED
+cm_foi_forecast.entity                                DRYRUN    0 rows would change
+cm_foi_forecast.bank                                  DRYRUN    0 rows would change
+cm_forecast.entity                                    DRYRUN    0 rows would change
+cm_forecast.portfolio                                 SKIPPED
+cm_forecast.bank                                      DRYRUN    0 rows would change
+cm_forecast.branch                                    SKIPPED
+cm_forecast.subsidiary_cpty                           SKIPPED
+cm_forecast.corresp_receiver1                         SKIPPED
+cm_forecast.corresp_receiver2                         SKIPPED
+cm_forecast.corresp_sender1                           SKIPPED
+cm_forecast.corresp_sender2                           SKIPPED
+cm_payt_payment.portfolio                             SKIPPED
+cm_payt_payment.cpty_account_code                     SKIPPED
+cm_payt_payment.corresp_receiver1                     SKIPPED
+cm_payt_payment.corresp_receiver2                     SKIPPED
+cm_payt_payment.corresp_sender1                       SKIPPED
+cm_payt_payment.corresp_sender2                       SKIPPED
+cm_pooling_convention.entity                          SKIPPED
+cm_pooling_convention.counterparty                    SKIPPED
+cm_process.entity                                     DRYRUN    0 rows would change
+cms_file_bkd.entity                                   DRYRUN    0 rows would change
+cms_file_bkd.counterparty                             DRYRUN    0 rows would change
+cm_cms_exceptions.entity                              SKIPPED
+cm_cms_exceptions.portfolio                           SKIPPED
+cm_cms_exceptions.counterparty                        SKIPPED
+cm_cms_exceptions.issuer                              SKIPPED
+dm_hedge_request.entity                               DRYRUN    0 rows would change
+dm_hedge_request.portfolio                            DRYRUN    0 rows would change
+dm_hedge_request.counterparty                         DRYRUN    0 rows would change
+dm_hr_autovalid_bkd.entity                            DRYRUN    0 rows would change
+dm_hr_ctrp_map.counterparty                           DRYRUN    0 rows would change
+dm_hr_cutoff_bkd.entity                               DRYRUN    0 rows would change
+dm_hr_cutoff_bkd.portfolio                            SKIPPED
+dm_hr_cutoff_bkd.counterparty                         DRYRUN    0 rows would change
+dm_hr_limit_bkd.entity                                DRYRUN    0 rows would change
+dm_hr_limit_bkd.portfolio                             SKIPPED
+dm_hr_ptf_bkd.issuer                                  SKIPPED
+dm_hr_ptf_bkd.cts_counterparty                        SKIPPED
+dm_hr_quotation.entity                                SKIPPED
+dm_hr_quotation.account                               SKIPPED
+dm_hr_quotation.bank                                  SKIPPED
+tp_comm_entity_dim.entity                             DRYRUN    0 rows would change
+tp_comm_entity_dim.account                            DRYRUN    0 rows would change
+tp_comm_entity_dim.bank                               SKIPPED
+tp_contact.entity                                     SKIPPED
+tp_contact.bank_account                               SKIPPED
+tp_data_profile_bankaccount.counterparty              SKIPPED
+tp_data_profile_ctrp.entity                           SKIPPED
+tp_data_profile_entity.portfolio                      SKIPPED
+tp_data_profile_ptf.account                           SKIPPED
+tp_data_profile_ptf.bank                              SKIPPED
+tp_pos_snapshot.entity                                DRYRUN    0 rows would change
+tp_pos_snapshot.account                               DRYRUN    0 rows would change
+tp_pos_snapshot_results.entity                        DRYRUN    0 rows would change
+tp_pos_snapshot_results.account                       DRYRUN    0 rows would change
+tp_tenant_entity.entity                               DRYRUN    0 rows would change
+tp_users.entity                                       SKIPPED
+tp_users.counterparty                                 SKIPPED
+tp_wv_mailing_rule.entity                             DRYRUN    0 rows would change
+tp_wv_mailing_rule.counterparty                       DRYRUN    0 rows would change
+tp_wv_transition_rule.entity                          DRYRUN    0 rows would change
+tp_wv_transition_rule.counterparty                    SKIPPED
+param_cpta_reg_gen.compte_ana                         DRYRUN    5 rows would change
+--- Labels and entity attributes ------------------------------
+structure.[description]                               DRYRUN    0 rows would change
+tiers.[description]                                   DRYRUN    0 rows would change
+compte_banque.[description]                           DRYRUN    0 rows would change
+tiers.[adresse1,adresse2,adresse3,adresse4,adresse5]  DRYRUN    0 rows would change
+tiers.[telephone,fax,email_adress,nom_pp,prenom_pp]   DRYRUN    0 rows would change
+tiers.[groupe_1,groupe_2,groupe_3,dpt_naissance]      DRYRUN    0 rows would change
+tiers.[sector,seniority,telex,type_interne]           DRYRUN    0 rows would change
+compte_banque.[groupe_1,groupe_2,groupe_3]            DRYRUN    0 rows would change
+==============================================================
+Run 3 summary (DRYRUN)
+==============================================================
+applied ........... 0
+no rows matched ... 4
+skipped ........... 304   (not present on this instance)
+disabled .......... 0   (excluded by configuration)
+errors ............ 0
+rows affected ..... 2,890
+step time ......... 28s
+==============================================================
+4 item(s) matched no rows. That is expected for a
+column that was already clean, but on a column you expected to
+change it means the name is wrong or the mapping is empty:
+SELECT object_name FROM anon_meta.anon_step_log
+WHERE run_id = 3 AND status = 'NOOP';
+
+====================================================================
+Complete
+====================================================================
+
+Next: verify the result.
+sqlplus op/<password>@<TNS> @verify\verify_op_coverage.sql
+
+Disconnected from Oracle Database 19c Enterprise Edition Release 19.0.0.0.0 - Production
+Version 19.24.0.0.0
+
+====================================================================
+ DRY RUN COMPLETE - no changes were made.
+ Re-run without /dryrun to execute.
+ Full output: logs\
+====================================================================

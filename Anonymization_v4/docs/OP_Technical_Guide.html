@@ -1,0 +1,1081 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OP Anonymization — Technical Guide</title>
+<style>
+:root{--ink:#1a1d21;--ink-2:#41484f;--ink-3:#6d757e;--line:#e2e5ea;--line-2:#eef0f3;
+--bg:#fff;--soft:#f7f8fa;--accent:#1d4ed8;--quote:#8a6100;--quote-bg:#fdf8ec}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+.wrap{max-width:860px;margin:0 auto;padding:48px 28px 96px}
+h1{font-size:32px;line-height:1.25;letter-spacing:-.02em;margin:0 0 8px}
+h2{font-size:22px;letter-spacing:-.01em;margin:44px 0 12px;padding-bottom:8px;
+border-bottom:1px solid var(--line)}
+h3{font-size:17.5px;margin:30px 0 8px}
+h4{font-size:15.5px;margin:22px 0 6px;color:var(--ink-2)}
+p{margin:0 0 14px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+code,pre{font-family:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace}
+code{font-size:.88em;background:var(--soft);border:1px solid var(--line-2);
+border-radius:4px;padding:.1em .38em}
+pre{background:var(--soft);border:1px solid var(--line);border-radius:8px;
+padding:14px 16px;overflow-x:auto;margin:0 0 18px;font-size:13px;line-height:1.5}
+pre code{background:none;border:0;padding:0;font-size:inherit}
+blockquote{margin:0 0 18px;padding:14px 18px;background:var(--quote-bg);
+border-left:3px solid var(--quote);border-radius:0 6px 6px 0}
+blockquote>:last-child{margin-bottom:0}
+blockquote h3{margin-top:0;color:var(--quote)}
+ul,ol{margin:0 0 16px;padding-left:26px}
+li{margin-bottom:5px}
+ul.task{list-style:none;padding-left:4px}
+.tw{overflow-x:auto;margin:0 0 20px}
+table{width:100%;border-collapse:collapse;font-size:14.5px}
+th{background:var(--soft);text-align:left;font-weight:600;font-size:12.5px;
+text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3);
+padding:9px 12px;border-bottom:2px solid var(--line);white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid var(--line-2);vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+@media print{.wrap{max-width:none;padding:0}pre,table{break-inside:avoid}}
+@media (prefers-color-scheme:dark){
+:root{--ink:#e6e8eb;--ink-2:#b3b9c0;--ink-3:#8b929a;--line:#2c3138;--line-2:#242830;
+--bg:#15181c;--soft:#1c2026;--accent:#7aa2f7;--quote:#d9a441;--quote-bg:#241f13}}
+</style>
+</head><body><div class="wrap">
+<h1 id="op-anonymization-technical-guide">OP Anonymization — Technical Guide</h1>
+<p><strong>KTP Payment Factory · OP schema · version 4</strong></p>
+<p>Everything needed to understand, operate, maintain and extend the tool. For the shorter run-it-and-go instructions, read the <em>OP Anonymization — User Guide</em>.</p>
+<hr>
+<h2 id="contents">Contents</h2>
+<ol>
+<li><a href="#1-purpose-and-scope">Purpose and scope</a></li>
+<li><a href="#2-the-design-principle-one-inventory-drives-everything">The design principle</a></li>
+<li><a href="#3-the-inventory">The inventory</a></li>
+<li><a href="#4-configuration-flags">Configuration flags</a></li>
+<li><a href="#5-identifier-generation">Identifier generation</a></li>
+<li><a href="#6-run-lifecycle">Run lifecycle</a></li>
+<li><a href="#7-restartability">Restartability</a></li>
+<li><a href="#8-logging">Logging</a></li>
+<li><a href="#9-the-dry-run">The dry run</a></li>
+<li><a href="#10-verification">Verification</a></li>
+<li><a href="#11-the-html-report">The HTML report</a></li>
+<li><a href="#12-metadata-schema-reference">Metadata schema reference</a></li>
+<li><a href="#13-extending-coverage">Extending coverage</a></li>
+<li><a href="#14-version-compatibility">Version compatibility</a></li>
+<li><a href="#15-naming-and-vocabulary">Naming and vocabulary</a></li>
+<li><a href="#16-file-reference">File reference</a></li>
+<li><a href="#17-error-codes">Error codes</a></li>
+<li><a href="#18-known-limitations">Known limitations</a></li>
+<li><a href="#19-history">History</a></li>
+</ol>
+<hr>
+<h2 id="1-purpose-and-scope">1. Purpose and scope</h2>
+<p>The tool removes client data from a restored copy of a KTP Payment Factory database so the copy can be used for development, testing and support.</p>
+<p>Two schemas are in scope for the product as a whole:</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Schema</th>
+<th style="text-align:left">Holds</th>
+<th style="text-align:left">Status</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><strong>OP</strong></td>
+<td style="text-align:left">Core treasury — entities, portfolios, counterparties, bank accounts, and around 60 <code>histo_*</code> history tables</td>
+<td style="text-align:left"><strong>This tool. Complete and tested.</strong></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>EPF</strong> (<code>OPPAYMENTS</code>)</td>
+<td style="text-align:left">Payment factory — payments, bulk payments, users, SWIFT/BIC data, audit trail</td>
+<td style="text-align:left">Not yet ported to v4. The previous-generation scripts remain in <code>Anonymization_EPF/</code>.</td>
+</tr>
+</tbody></table></div>
+<p>v4 covers <strong>580 columns across 167 tables</strong>: 562 shipped plus 18 site-specific.</p>
+<h3 id="what-anonymized-means-here">What "anonymized" means here</h3>
+<p>Four treatments, declared per column:</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Rule</th>
+<th style="text-align:left">Effect</th>
+<th style="text-align:left">Typical use</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left">The value is looked up in the mapping and replaced with its generated equivalent</td>
+<td style="text-align:left">Any column holding an entity, portfolio, counterparty or bank account code</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>NULL_OUT</code></td>
+<td style="text-align:left">Set to <code>NULL</code>. Where the column is <code>NOT NULL</code>, overwritten with the marker <code>ANONYMIZED</code> truncated to the column width</td>
+<td style="text-align:left">Free text and PII — names, addresses, phone, email, IBAN and RIB fragments</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>DESCRIPTION</code></td>
+<td style="text-align:left">Overwritten with the anonymized code of the row itself</td>
+<td style="text-align:left">Label columns, so screens stay readable: a counterparty shows as <code>T_0000412</code> rather than blank</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left">Overwritten with the anonymized code of the row itself</td>
+<td style="text-align:left">A PII attribute that must stay populated because it is <code>NOT NULL</code> or subject to a format check</td>
+</tr>
+</tbody></table></div>
+<h3 id="what-is-deliberately-not-anonymized">What is deliberately not anonymized</h3>
+<ul>
+<li><strong>Amounts, dates, currencies, product and system codes.</strong> They carry no client identity and changing them would break reconciliation and reporting.</li>
+<li><strong>One-character columns.</strong> A single character is a checkbox state (<code>O</code>, <code>x</code>, <code>N</code>) far more often than a client identifier, and substituting it would rewrite every matching flag in the schema. Governed by <code>MIN_CODE_LENGTH</code>, default 2.</li>
+<li><strong>Structural referential data</strong> that has no client content.</li>
+</ul>
+<hr>
+<h2 id="2-the-design-principle-one-inventory-drives-everything">2. The design principle: one inventory drives everything</h2>
+<p>Every <code>(table, column, rule, category)</code> pair is declared <strong>once</strong>, in a CSV. That one declaration drives four separate things:</p>
+<pre><code>                     config/inventory_op.csv
+                   + config/inventory_op_custom.csv
+                              │
+                              ▼
+                   anon_meta.anon_inventory
+                              │
+        ┌─────────────┬───────┴────────┬─────────────────┐
+        ▼             ▼                ▼                 ▼
+    the engine    the dry run      the verifier    the coverage doc</code></pre>
+<p>Coverage drift becomes structurally impossible: the script that changes the data, the check that proves it changed, and the document that describes it cannot disagree, because they read the same rows.</p>
+<p>This is the central fix over v3, where the anonymization scripts and the verification script each maintained their own hand-edited table list. By the time v4 was written the two lists had already drifted apart, and the documentation described a third list that matched neither.</p>
+<p>A second consequence: <strong>custom inclusions stop being a special case.</strong> They are simply additional rows from a second CSV, parsed by the same loader and treated identically downstream.</p>
+<hr>
+<h2 id="3-the-inventory">3. The inventory</h2>
+<h3 id="format">Format</h3>
+<pre><code>table_name,column_name,rule,category,source,notes
+structure,code,CODE,ANY,BASE,
+prevision_param,compte,CODE,BANK_ACCOUNT,BASE,
+cm_pooling_convention,value_1,NULL_OUT,NONE,BASE,</code></pre>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Field</th>
+<th style="text-align:left">Meaning</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>table_name</code></td>
+<td style="text-align:left">Table in the OP schema</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>column_name</code></td>
+<td style="text-align:left">Column to anonymize</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rule</code></td>
+<td style="text-align:left"><code>CODE</code> · <code>NULL_OUT</code> · <code>DESCRIPTION</code> · <code>SELF_CODE</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>category</code></td>
+<td style="text-align:left"><code>ENTITY</code> · <code>PORTFOLIO</code> · <code>COUNTERPARTY</code> · <code>BANK_ACCOUNT</code> · <code>ANY</code> · <code>NONE</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>source</code></td>
+<td style="text-align:left"><code>BASE</code> (shipped) or <code>CUSTOM</code> (site file)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>notes</code></td>
+<td style="text-align:left">Documentation only, never interpreted. <strong>No commas.</strong></td>
+</tr>
+</tbody></table></div>
+<p>Lines starting with <code>#</code> are ignored. Blank lines are ignored. Values are case-insensitive.</p>
+<h3 id="what-category-means-per-rule">What <code>category</code> means, per rule</h3>
+<ul>
+<li>On <strong>`CODE`</strong> it says which slice of the mapping may apply.</li>
+<li><code>BANK_ACCOUNT</code> restricts lookups to bank-account codes. This is necessary because a <code>compte_banque.code</code> can be textually identical to a <code>tiers.code</code>; without the restriction a column referencing one would be rewritten using the other's mapping.</li>
+<li><code>ANY</code> means the column may hold an entity, portfolio or counterparty code, and the mapping is searched unrestricted.</li>
+<li>On <strong>`DESCRIPTION`</strong> and <strong>`SELF_CODE`</strong> it says which entity type owns the row, so the correct per-category configuration flag gates it.</li>
+<li>On <strong>`NULL_OUT`</strong> it is always <code>NONE</code>. Free text is never category-dependent.</li>
+</ul>
+<blockquote><p><strong>`BANK_ACCOUNT` is a narrowing, and narrowing can be wrong.</strong> A column classified <code>CODE,BANK_ACCOUNT</code> that actually holds another category's codes will be under-anonymized, and the engine will not notice. This happened in testing: <code>param_cpta_reg_gen.compte_ana</code> — <em>compte analytique</em>, an analytical account — was classified <code>BANK_ACCOUNT</code> purely because its name contains <code>compte</code>, and five rows of live client data survived a run that reported success. See <a href="#10-verification">§10</a> for what changed as a result.</p></blockquote>
+<h3 id="current-composition">Current composition</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Rule</th>
+<th style="text-align:left">Category</th>
+<th style="text-align:right">Shipped</th>
+<th style="text-align:right">Custom</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left"><code>ANY</code></td>
+<td style="text-align:right">390</td>
+<td style="text-align:right">1</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left"><code>BANK_ACCOUNT</code></td>
+<td style="text-align:right">72</td>
+<td style="text-align:right">—</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>NULL_OUT</code></td>
+<td style="text-align:left"><code>NONE</code></td>
+<td style="text-align:right">92</td>
+<td style="text-align:right">—</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>DESCRIPTION</code></td>
+<td style="text-align:left"><code>ANY</code></td>
+<td style="text-align:right">2</td>
+<td style="text-align:right">—</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>DESCRIPTION</code></td>
+<td style="text-align:left"><code>BANK_ACCOUNT</code></td>
+<td style="text-align:right">1</td>
+<td style="text-align:right">—</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left"><code>ANY</code></td>
+<td style="text-align:right">5</td>
+<td style="text-align:right">—</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left"><code>ENTITY</code></td>
+<td style="text-align:right">—</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left"><code>PORTFOLIO</code></td>
+<td style="text-align:right">—</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left"><code>COUNTERPARTY</code></td>
+<td style="text-align:right">—</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left"><code>BANK_ACCOUNT</code></td>
+<td style="text-align:right">—</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td style="text-align:left"></td>
+<td style="text-align:left"><strong>Total</strong></td>
+<td style="text-align:right"><strong>562</strong></td>
+<td style="text-align:right"><strong>18</strong></td>
+</tr>
+</tbody></table></div>
+<p>580 rows in the files; <strong>579 loaded</strong>, because one custom row (<code>param_cpta_reg_gen.compte_ana</code>) overrides a shipped row rather than adding to it.</p>
+<h3 id="overrides">Overrides</h3>
+<p>The two files are parsed in order, base then custom. For each custom row the loader emits a <code>DELETE</code> before its <code>INSERT</code>, so a row in the custom file <strong>replaces</strong> the shipped row for the same <code>(table, column)</code>.</p>
+<p>That is how a wrong classification in the shipped inventory gets corrected at a site without editing a file that will be overwritten by the next release. The primary key on <code>(table_name, column_name)</code> makes the delete necessary — without it a second row for the same column raises <code>ORA-00001</code>.</p>
+<h3 id="how-the-csvs-reach-the-database">How the CSVs reach the database</h3>
+<p>The CSVs live on the client, not necessarily on the database server, so they cannot be read as external tables. <code>run_op_anonymization.bat</code> parses them and writes a temporary SQL file of <code>INSERT</code> statements, which the orchestrator runs. On failure that file is <strong>kept</strong> and its path printed — which is the only reason a batch quoting defect that had corrupted roughly 500 of 579 statements was ever found.</p>
+<hr>
+<h2 id="4-configuration-flags">4. Configuration flags</h2>
+<h3 id="where-they-take-effect">Where they take effect</h3>
+<p>Configuration says which categories to anonymize. v4 enforces that <strong>at mapping generation, not at each column</strong>:</p>
+<pre><code>ANONYMIZE_COUNTERPARTY=n
+   └─ no COUNTERPARTY rows are generated in anon_meta.code_map
+        └─ every CODE column finds no match for counterparty values
+             └─ counterparty codes are left alone, everywhere, automatically</code></pre>
+<p>This is why v4 has no per-column conditionals. v3 needed roughly 200 <code>IF flag = 'y' THEN … ELSE …</code> blocks to achieve the same thing in two of its scripts, and got it wrong in a third, which ignored the flags entirely while documenting that it honoured them.</p>
+<h3 id="the-mental-model-to-correct">The mental model to correct</h3>
+<p><strong>Disabling a category does not remove columns from the run.</strong> Every column is still visited and its <code>UPDATE</code> still executes. What changes is what is in the mapping — and a value that is not in the mapping is left alone. So one column can be <em>partly</em> anonymized:</p>
+<pre><code>ANONYMIZE_COUNTERPARTY=n
+   └─ the UPDATE on histo_flux.tiers still runs
+        ├─ rows holding a counterparty code:  no match, left as-is
+        └─ rows holding an entity code:       still replaced</code></pre>
+<p>The consequence: <strong>a flat covered/skipped list cannot be produced from the CSV alone.</strong> For a <code>CODE,ANY</code> column the answer depends on what values the column actually holds on a given instance.</p>
+<p>The exception is <code>CODE,BANK_ACCOUNT</code>. Those only ever look at bank-account codes, so the flag genuinely is a whole-column on/off switch and the answer <em>is</em> knowable in advance.</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:right">Rows</th>
+<th style="text-align:left">Rule + category</th>
+<th style="text-align:left">Governed by</th>
+<th style="text-align:left">Predictable from the CSV alone?</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:right">72</td>
+<td style="text-align:left"><code>CODE</code> + <code>BANK_ACCOUNT</code></td>
+<td style="text-align:left"><code>ANONYMIZE_BANK_ACCOUNT</code></td>
+<td style="text-align:left"><strong>Yes — off means the column is 100% untouched</strong></td>
+</tr>
+<tr>
+<td style="text-align:right">391</td>
+<td style="text-align:left"><code>CODE</code> + <code>ANY</code></td>
+<td style="text-align:left">all four category flags, per value</td>
+<td style="text-align:left">No — depends on instance data</td>
+</tr>
+<tr>
+<td style="text-align:right">92</td>
+<td style="text-align:left"><code>NULL_OUT</code></td>
+<td style="text-align:left">nothing</td>
+<td style="text-align:left"><strong>Yes — always erased</strong></td>
+</tr>
+<tr>
+<td style="text-align:right">3</td>
+<td style="text-align:left"><code>DESCRIPTION</code></td>
+<td style="text-align:left"><code>ANONYMIZE_*_DESCRIPTION</code></td>
+<td style="text-align:left">Yes</td>
+</tr>
+<tr>
+<td style="text-align:right">5</td>
+<td style="text-align:left"><code>SELF_CODE</code> + <code>ANY</code></td>
+<td style="text-align:left">any <code>ANONYMIZE_*_ATTRIBUTES</code></td>
+<td style="text-align:left">Yes</td>
+</tr>
+<tr>
+<td style="text-align:right">17</td>
+<td style="text-align:left"><code>SELF_CODE</code> + category</td>
+<td style="text-align:left">that category's <code>_ATTRIBUTES</code></td>
+<td style="text-align:left">Yes</td>
+</tr>
+</tbody></table></div>
+<p><code>tools/analyze_flag_impact.sql</code> resolves the remaining 391 against a real instance.</p>
+<h3 id="the-three-flag-families">The three flag families</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Flag</th>
+<th style="text-align:left">Gates</th>
+<th style="text-align:left">Replaces</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>ANONYMIZE_&lt;CATEGORY&gt;</code></td>
+<td style="text-align:left"><code>CODE</code> — whether the category's identifiers are mapped at all</td>
+<td style="text-align:left">v2's <code>Ent0</code> + <code>EntC</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ANONYMIZE_&lt;CATEGORY&gt;_DESCRIPTION</code></td>
+<td style="text-align:left"><code>DESCRIPTION</code> — the label column</td>
+<td style="text-align:left"><code>EntD</code> / <code>FoldD</code> / <code>TierD</code> / <code>CpteD</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ANONYMIZE_&lt;CATEGORY&gt;_ATTRIBUTES</code></td>
+<td style="text-align:left"><code>SELF_CODE</code> — the extra PII attribute columns</td>
+<td style="text-align:left"><code>Ent1</code>–<code>Ent5</code> and the equivalents</td>
+</tr>
+</tbody></table></div>
+<p>Descriptions and attributes are gated separately because the vendor package separated them, and the separation is useful: a support copy often wants readable labels while still scrubbing phone numbers and personal names.</p>
+<p>Both require their own category to be enabled, because both write the row's anonymized identifier — without a mapping there is nothing to write.</p>
+<p><code>NULL_OUT</code> has no flag. Free text and PII are always erased.</p>
+<h3 id="what-replaced-the-ent1ent5-slots">What replaced the <code>Ent1</code>–<code>Ent5</code> slots</h3>
+<p>In v2 each category had five free-form slots holding column names, applied only to <code>op.tiers</code> and <code>op.compte_banque</code>. <strong>Which</strong> columns are treated this way is now declared in the inventory with rule <code>SELF_CODE</code>, so there is no five-column ceiling and no table restriction. The flags remain as the on/off switch those slots gave you by being left blank.</p>
+<p>The 17 <code>SELF_CODE</code> rows in <code>inventory_op_custom.csv</code> are what one site had put in those slots. They live in the custom file precisely because they are that site's choice, not a product default.</p>
+<hr>
+<h2 id="5-identifier-generation">5. Identifier generation</h2>
+<p>Codes are generated <strong>deterministically and set-based</strong>:</p>
+<pre><code>INSERT INTO anon_meta.code_map (category, old_code, new_code)
+SELECT :category, code,
+       :prefix || LPAD(ROW_NUMBER() OVER (ORDER BY code), 7, '0')
+  FROM (&lt;category source query&gt;);</code></pre>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Category</th>
+<th style="text-align:left">Prefix</th>
+<th style="text-align:left">Width</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">Entity</td>
+<td style="text-align:left"><code>E_</code></td>
+<td style="text-align:left">9</td>
+</tr>
+<tr>
+<td style="text-align:left">Portfolio</td>
+<td style="text-align:left"><code>P_</code></td>
+<td style="text-align:left">9</td>
+</tr>
+<tr>
+<td style="text-align:left">Counterparty</td>
+<td style="text-align:left"><code>T_</code></td>
+<td style="text-align:left">9</td>
+</tr>
+<tr>
+<td style="text-align:left">Bank account</td>
+<td style="text-align:left"><code>CB_</code></td>
+<td style="text-align:left">10</td>
+</tr>
+</tbody></table></div>
+<p>Uniqueness is guaranteed by construction, so there is no collision probe and no retry loop. The whole mapping is produced in one statement per category rather than one round-trip per code, and the result is reproducible — the same source data always yields the same mapping.</p>
+<p>v3 instead drew a random 7-digit number per code, queried the mapping table to check for a collision, and retried up to 100 times.</p>
+<p><strong>Width is checked before any data is touched.</strong> Preflight compares the generated width against <code>all_tab_columns</code> for every <code>CODE</code> column in the inventory and refuses to start if a target is too narrow. v3 would have discovered that as an <code>ORA-12899</code> partway through a run it could not resume.</p>
+<h3 id="code_map_any"><code>code_map_any</code></h3>
+<p>A second table holds the resolved unrestricted lookup — one row per distinct original, with collisions across categories resolved by priority (entity &gt; portfolio &gt; counterparty &gt; bank account). <code>CODE,ANY</code> columns read this; <code>CODE,BANK_ACCOUNT</code> columns read <code>code_map</code> filtered to that category.</p>
+<p>Six originals currently exist in more than one category. Verification reports them as an informational warning; they were reviewed and are correct by design.</p>
+<hr>
+<h2 id="6-run-lifecycle">6. Run lifecycle</h2>
+<pre><code>run_op_anonymization.bat
+   ├─ settle configuration (file, prompts, defaults)
+   ├─ parse both CSVs into a temporary INSERT script
+   └─ sqlplus @sql/00_run_op_anonymization.sql  (22 positional parameters)
+        ├─ connect as SYS
+        ├─ @@10_create_metadata_schema.sql      create anon_meta if absent; truncate the inventory
+        ├─ connect as OP, assert the connection landed
+        ├─ @@30_install_engine.sql              compile the anon_engine package
+        ├─ @&lt;temporary inventory script&gt;        load 579 rows
+        ├─ @@21_validate_inventory.sql          reject impossible rule/category pairs
+        ├─ anon_engine.configure / start_run
+        ├─ anon_engine.preflight                DRY RUN STOPS HERE
+        ├─ disable triggers            (45 on the tested instance)
+        ├─ generate or reuse the mapping
+        ├─ apply the inventory         NULL_OUT → CODE → DESCRIPTION/SELF_CODE
+        ├─ re-enable triggers          (runs even when the run fails)
+        └─ finish_run
+   ├─ verify/verify_op_coverage.sql            after a successful EXECUTE
+   └─ verify/generate_report.sql               always, even when verification fails</code></pre>
+<p>Triggers are re-enabled by a handler that runs before the error propagates, so a failed run does not leave the schema with its audit triggers off.</p>
+<p>Verification's exit code is captured and becomes the batch's exit code. The report is generated either way, because a failed verification is exactly when it is most wanted.</p>
+<hr>
+<h2 id="7-restartability">7. Restartability</h2>
+<p><strong>A failed run can be re-run directly. No restore, no flag, no checkpoint.</strong></p>
+<p>The guarantee is that every operation is a no-op when its work is already done, so re-executing the whole inventory converges on the same result whether the previous run reached 5% or 95%.</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Rule</th>
+<th style="text-align:left">Why a second pass changes nothing</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left">Matches <code>WHERE column IN (SELECT old_code …)</code>. An already-substituted value is a <em>new</em> code, which is not in <code>old_code</code>, so it does not match.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>NULL_OUT</code></td>
+<td style="text-align:left">Matches <code>WHERE column IS NOT NULL</code>. Already empty, nothing to do.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>DESCRIPTION</code> / <code>SELF_CODE</code></td>
+<td style="text-align:left">Matches only rows where the column does not already equal its row's code.</td>
+</tr>
+<tr>
+<td style="text-align:left">Mapping</td>
+<td style="text-align:left">Reused, never regenerated — identifiers stay stable across runs.</td>
+</tr>
+</tbody></table></div>
+<h3 id="it-does-not-skip-completed-steps">It does not skip completed steps</h3>
+<p>There is no checkpoint; the whole inventory is re-executed. That is deliberate — skipping based on a previous run's log would be wrong the moment the configuration changed or the database was partially restored, whereas idempotent re-execution is correct in every case.</p>
+<p><strong>The cost:</strong> a re-run re-scans every table and takes roughly as long as the original even though it changes almost nothing.</p>
+<h3 id="what-a-clean-re-run-looks-like">What a clean re-run looks like</h3>
+<pre><code>mapping ................ REUSED  (n existing mappings)
+NULL_OUT items ......... NOOP
+CODE items ............. NOOP
+DESCRIPTION / SELF_CODE  NOOP</code></pre>
+<p><code>REUSED</code> on all four categories is the signal that the mapping survived. Identifiers being <em>generated</em> instead means <code>anon_meta</code> was dropped and the previous run's work can no longer be reconciled — restore and start over.</p>
+<p>This was proven directly: runs 3 and 4 against an already-anonymized instance showed the dry run predicting exactly one change and the execute making exactly that one change.</p>
+<h3 id="when-you-must-not-re-run">When you must not re-run</h3>
+<p><strong>After restoring the database.</strong> The mapping refers to values the restore has put back, so the two are out of step. <code>DROP USER anon_meta CASCADE</code> first.</p>
+<blockquote><p>This is the behaviour not to take for granted if you have used v3. There, every run dropped the mapping table and generated fresh random identifiers, so a failed run left renamed rows whose originals could no longer be recovered.</p></blockquote>
+<hr>
+<h2 id="8-logging">8. Logging</h2>
+<p>Every inventory item produces exactly one <code>anon_step_log</code> row — <strong>including items that changed zero rows</strong>.</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Status</th>
+<th style="text-align:left">Meaning</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>OK</code></td>
+<td style="text-align:left">Applied, <em>n</em> rows changed</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>NOOP</code></td>
+<td style="text-align:left">Applied, 0 rows changed — already clean, or nothing matched</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>SKIPPED</code></td>
+<td style="text-align:left">Table or column does not exist here (<code>ORA-00942</code> / <code>ORA-00904</code>)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>DISABLED</code></td>
+<td style="text-align:left">Excluded by configuration</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ERROR</code></td>
+<td style="text-align:left">Anything else — the run fails</td>
+</tr>
+</tbody></table></div>
+<p>The <code>NOOP</code> / <code>SKIPPED</code> distinction is the point. v3's <code>merge_codes</code> printed nothing at all when zero rows matched, so a misspelled column name and a genuinely clean column produced identical output: silence.</p>
+<p>Errors other than missing-object are not swallowed. The orchestrator runs under <code>WHENEVER SQLERROR EXIT FAILURE</code>, so a failed run returns a non-zero exit code.</p>
+<h3 id="live-progress">Live progress</h3>
+<p>The step log is written through an <strong>autonomous transaction</strong>, so progress is visible from a second session immediately, even though SQL*Plus will not print <code>DBMS_OUTPUT</code> until the block finishes:</p>
+<pre><code>sqlplus op/&lt;pwd&gt;@&lt;TNS&gt; @tests\manual\monitor_op_progress.sql</code></pre>
+<h3 id="counters">Counters</h3>
+<p>The run summary counts each object once. Preflight visits every object too, and until this was fixed both visits were counted — a run reporting <code>skipped 304</code> was describing 152 objects.</p>
+<hr>
+<h2 id="9-the-dry-run">9. The dry run</h2>
+<p><code>/dryrun</code> runs the same code path with <code>p_dry_run =&gt; TRUE</code>. It:</p>
+<ul>
+<li>resolves every inventory row against <code>all_tab_columns</code> and reports what is missing here,</li>
+<li>checks generated code width against every <code>CODE</code> target,</li>
+<li>identifies one-character columns and reports that they will be left alone,</li>
+<li>identifies <code>NOT NULL</code> free-text columns that cannot be emptied,</li>
+<li>counts the rows each item <em>would</em> change,</li>
+<li>writes <code>DRYRUN</code> rows to the step log,</li>
+<li>issues <strong>no DML</strong>, and</li>
+<li><strong>exits non-zero if any check fails.</strong></li>
+</ul>
+<p>It is a rehearsal, not a summary. v3's <code>/dryrun</code> lived entirely in the batch file, echoed a hardcoded list of five filenames — three of which the real run did not execute — issued four <code>COUNT(*)</code> queries, never consulted the inventory, and could not fail.</p>
+<hr>
+<h2 id="10-verification">10. Verification</h2>
+<p><code>verify/verify_op_coverage.sql</code> reads the same inventory the engine used, so it cannot check a different set of columns than the one that was anonymized. Results are written to <code>anon_meta.verify_result</code> and the script exits non-zero on any failure.</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Part</th>
+<th style="text-align:left">Question</th>
+<th style="text-align:left">Pass/fail?</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">1</td>
+<td style="text-align:left">Does any <strong>original identifier</strong> still exist in any identifier column?</td>
+<td style="text-align:left"><strong>Yes — this is the test</strong></td>
+</tr>
+<tr>
+<td style="text-align:left">2</td>
+<td style="text-align:left">Is every free-text / PII column empty or masked?</td>
+<td style="text-align:left">Yes</td>
+</tr>
+<tr>
+<td style="text-align:left">3</td>
+<td style="text-align:left">Do anonymized rows agree with their own code?</td>
+<td style="text-align:left">Warning only</td>
+</tr>
+<tr>
+<td style="text-align:left">4</td>
+<td style="text-align:left">Is the mapping unique, complete and unambiguous?</td>
+<td style="text-align:left">Yes</td>
+</tr>
+<tr>
+<td style="text-align:left">5</td>
+<td style="text-align:left">How much of each identifier column carries a prefix?</td>
+<td style="text-align:left">Informational</td>
+</tr>
+</tbody></table></div>
+<h3 id="residual-detection-not-prefix-matching">Residual detection, not prefix matching</h3>
+<p>Part 1 asks <em>"is any value here still one of the originals?"</em> — a question with a definite answer that cannot be fooled.</p>
+<p>The older scripts instead asked <em>"does this value look anonymized?"</em> by testing a prefix. That is weaker in two ways:</p>
+<ol>
+<li><strong>It produced false passes.</strong> The OP script used <code>LIKE 'E_%'</code> — and in Oracle <code>_</code> is a single-character wildcard, so a real currency code <code>EUR</code> matched and was counted as anonymized. Every prefix test in v4 uses <code>ESCAPE</code>, as the EPF script correctly did.</li>
+<li><strong>Even written correctly, it asks the wrong question.</strong> Plenty of values legitimately have no prefix — currency codes, product codes, system references that were never client data. Those are not failures. Prefix conformance is reported as information, not pass/fail.</li>
+</ol>
+<h3 id="part-1-deliberately-does-not-mirror-the-engine">Part 1 deliberately does not mirror the engine</h3>
+<p>An earlier version restricted <code>BANK_ACCOUNT</code> columns to bank-account codes, exactly as the engine does. That meant a column whose declared category was too narrow was missed by the engine <strong>and</strong> by the check meant to catch it. Both agreed; both were wrong. On the test instance that hid five live client codes in <code>param_cpta_reg_gen.compte_ana</code>, and verification reported <code>PASS</code>.</p>
+<p>Part 1 now searches the <strong>full</strong> mapping regardless of the declared category. The verifier's job is to test the outcome, not to re-apply the engine's assumptions. Any original left anywhere is a leak, whatever category it belongs to.</p>
+<p><strong>The general rule this illustrates:</strong> it is legitimate for the checker to share a <em>definition</em> with the engine — what an anonymized value looks like. It is not legitimate for it to share an <em>assumption</em> about where to look.</p>
+<h3 id="things-that-are-deliberately-not-failures">Things that are deliberately not failures</h3>
+<ul>
+<li><strong>One-character columns.</strong> The engine leaves them alone by design, so failing them would mean a correct run could never pass.</li>
+<li><strong>`NOT NULL` free text.</strong> It cannot be emptied. It is masked with <code>ANONYMIZED</code> where the column is character-typed; where it is not, the gap is reported as a warning — loud, but not a run failure.</li>
+<li><strong>Missing objects.</strong> Reported as <code>SKIP</code>, with a row count of nothing.</li>
+</ul>
+<hr>
+<h2 id="11-the-html-report">11. The HTML report</h2>
+<p><code>verify/generate_report.sql</code> writes <code>op/logs/report_&lt;timestamp&gt;.html</code> — a single self-contained file with inline CSS and no external dependencies.</p>
+<h3 id="it-reads-it-never-re-checks">It reads, it never re-checks</h3>
+<p>Every number comes from <code>anon_meta.verify_result</code>, joined to <code>anon_inventory</code> and <code>anon_run</code>. The report performs no verification of its own.</p>
+<p>That is deliberate. Duplicating the check logic is exactly how the engine and the verifier came to share one wrong assumption and both miss five live client codes. There is one place that decides whether a column is clean, and the renderer is not it.</p>
+<p>If <code>verify_result</code> is empty the script raises <code>ORA-20070</code> and stops, rather than rendering an empty report that would look like a pass.</p>
+<h3 id="structure">Structure</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Section</th>
+<th style="text-align:left">Contents</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">Verdict banner</td>
+<td style="text-align:left"><code>PASS</code> / <code>FAIL</code> with the headline figures</td>
+</tr>
+<tr>
+<td style="text-align:left">Six tiles</td>
+<td style="text-align:left">Columns in scope · verified clean · rows exposed · not on instance · identifiers mapped · rows changed</td>
+</tr>
+<tr>
+<td style="text-align:left">Coverage by treatment</td>
+<td style="text-align:left">One row per rule, with columns / clean / exposed / not checked</td>
+</tr>
+<tr>
+<td style="text-align:left">Shipped inventory</td>
+<td style="text-align:left">Every column from <code>inventory_op.csv</code>, grouped by table</td>
+</tr>
+<tr>
+<td style="text-align:left">Custom-added inventory</td>
+<td style="text-align:left">The same for <code>inventory_op_custom.csv</code></td>
+</tr>
+<tr>
+<td style="text-align:left">Not checked on this instance</td>
+<td style="text-align:left">Tables absent here, grouped, with the reason</td>
+</tr>
+<tr>
+<td style="text-align:left">Mapping integrity</td>
+<td style="text-align:left">Uniqueness, completeness, per-category counts</td>
+</tr>
+</tbody></table></div>
+<p>Failures sort to the top <strong>within each table group</strong> and are shaded, so nothing needing action can be buried a few hundred rows down.</p>
+<h3 id="clean-and-exposed-not-anonymized-and-not-anonymized">Clean and Exposed, not anonymized and not-anonymized</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Column</th>
+<th style="text-align:left">Means</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><strong>Rows</strong></td>
+<td style="text-align:left">Every row in the column</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Exposed</strong></td>
+<td style="text-align:left">Rows still holding an original client value — the only figure that should ever be non-zero</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Clean</strong></td>
+<td style="text-align:left">Rows − Exposed</td>
+</tr>
+</tbody></table></div>
+<p>A <code>CODE</code> column can legitimately hold currency codes, product codes and system references that were never client data and correctly carry no prefix. Counting those as "not anonymized" would show alarming figures on a perfectly clean database — the trap the v3 verifier fell into.</p>
+<h3 id="regenerating">Regenerating</h3>
+<p>It reads stored results, so it can be re-run at any time without a run and without changing anything. It always reflects the most recent verification.</p>
+<hr>
+<h2 id="12-metadata-schema-reference">12. Metadata schema reference</h2>
+<p>Everything the tool stores lives in <code>anon_meta</code>, created on first run and never dropped as part of a run.</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Object</th>
+<th style="text-align:left">Purpose</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>code_map</code></td>
+<td style="text-align:left"><code>category</code>, <code>old_code</code>, <code>new_code</code>. The mapping. Retained across runs.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>code_map_any</code></td>
+<td style="text-align:left">Resolved unrestricted lookup — one row per distinct original, cross-category collisions resolved by priority</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>anon_inventory</code></td>
+<td style="text-align:left">The loaded inventory. Truncated and reloaded each run. PK <code>(table_name, column_name)</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>anon_run</code></td>
+<td style="text-align:left">One row per run: <code>run_id</code>, <code>run_mode</code> (<code>EXECUTE</code> / <code>DRYRUN</code>), <code>status</code>, timestamps, <code>config_json</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>anon_step_log</code></td>
+<td style="text-align:left">One row per inventory item per run: <code>phase</code>, <code>object_name</code>, <code>rows_affected</code>, <code>elapsed_ms</code>, <code>status</code>, <code>message</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>verify_result</code></td>
+<td style="text-align:left">One row per check: <code>part</code>, <code>check_name</code>, <code>expectation</code>, <code>total_rows</code>, <code>bad_rows</code>, <code>status</code>, <code>detail</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>atrace.ref_tables_modif</code></td>
+<td style="text-align:left">A view over <code>code_map</code> in a separate schema, for EPF compatibility</td>
+</tr>
+</tbody></table></div>
+<blockquote><p><code>anon_run.run_mode</code> is not called <code>mode</code>. <code>MODE</code> is an Oracle reserved word, and naming the column that caused the first live test to fail with <code>ORA-00904</code> plus four cascading errors. Quoting it as <code>"MODE"</code> would have worked but would have made the identifier case-sensitive forever.</p></blockquote>
+<h3 id="the-atrace-compatibility-surface">The <code>atrace</code> compatibility surface</h3>
+<p>EPF's cascade phase reads <code>atrace.ref_tables_modif</code>. v4 exposes that name and shape as a view over <code>code_map</code> so the existing EPF scripts keep working until EPF is ported.</p>
+<p>A view compiles with its <strong>owner's</strong> rights, so <code>atrace</code> needs its own <code>SELECT</code> on <code>anon_meta.code_map</code>, granted <code>WITH GRANT OPTION</code> so it can pass the privilege on to <code>op</code>. Missing that produced an <code>ORA-00942</code> on view creation that looked like a missing schema and was not one.</p>
+<h3 id="after-handover">After handover</h3>
+<pre><code>DROP USER anon_meta CASCADE;
+DROP USER atrace CASCADE;   -- only once EPF has also run</code></pre>
+<p><code>code_map</code> maps every anonymized identifier back to the real one. It is kept so a failed run can resume and so verification can be re-run — not as a key to hold on to.</p>
+<hr>
+<h2 id="13-extending-coverage">13. Extending coverage</h2>
+<p>Add a line to <code>config/inventory_op_custom.csv</code>:</p>
+<pre><code>my_new_table,entity_code,CODE,ANY,CUSTOM,Added for the 2026 module
+my_new_table,contact_email,NULL_OUT,NONE,CUSTOM,</code></pre>
+<p>Then dry-run to confirm it resolves, run for real, and optionally regenerate the coverage document:</p>
+<pre><code>sqlplus op/&lt;pwd&gt;@&lt;TNS&gt; @tools\generate_coverage_doc.sql</code></pre>
+<p>No SQL changes anywhere. The engine, the dry run, the verifier, the report and the coverage document all pick it up.</p>
+<h3 id="choosing-the-rule">Choosing the rule</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Situation</th>
+<th style="text-align:left">Rule</th>
+<th style="text-align:left">Category</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">Holds an entity / portfolio / counterparty code</td>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left"><code>ANY</code></td>
+</tr>
+<tr>
+<td style="text-align:left">References <code>compte_banque.code</code></td>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left"><code>BANK_ACCOUNT</code></td>
+</tr>
+<tr>
+<td style="text-align:left">Free text or PII</td>
+<td style="text-align:left"><code>NULL_OUT</code></td>
+<td style="text-align:left"><code>NONE</code></td>
+</tr>
+<tr>
+<td style="text-align:left">PII that must stay populated (<code>NOT NULL</code>, format check)</td>
+<td style="text-align:left"><code>SELF_CODE</code></td>
+<td style="text-align:left">the owning category</td>
+</tr>
+</tbody></table></div>
+<p><code>SELF_CODE</code> requires the table to have a <code>code</code> column, since the value written <em>is</em> that row's anonymized code. The <code>histo_*</code> tables do not have one, which is why a <code>NOT NULL</code> free-text column there is masked rather than self-coded.</p>
+<h3 id="is-the-inventory-complete">Is the inventory complete?</h3>
+<p>The tool guarantees that <strong>the inventory is followed exactly</strong>. It cannot know whether the inventory lists everything that needs anonymizing — that is a data-classification question for whoever owns the schema. <code>tools/scan_for_leaks.sql</code> samples the schema for values that look like client identifiers but are not in the inventory, as an aid to that review.</p>
+<hr>
+<h2 id="14-version-compatibility">14. Version compatibility</h2>
+<h3 id="older-op-versions-supported">Older OP versions — supported</h3>
+<p>The shipped inventory spans several KTP/CTI releases. On the tested instance 147 of 580 items did not exist, and the run completed cleanly: missing objects are resolved at preflight, logged as <code>SKIPPED</code>, and never touched.</p>
+<p>Set <code>FAIL_ON_MISSING_OBJECT=y</code> for a strict run where any drift from the inventory is a failure.</p>
+<h3 id="newer-op-versions-supported">Newer OP versions — supported</h3>
+<p>Adding coverage for a new table or column is one line in <code>inventory_op_custom.csv</code>. No SQL, no release of the tool. This path is proven: the <code>compte_ana</code> correction was delivered exactly this way.</p>
+<h3 id="what-would-need-real-work">What would need real work</h3>
+<p>A new <em>kind</em> of anonymization — something none of the four rules expresses. That means a new rule in the engine and matching handling in the verifier. Nothing currently on the horizon needs one.</p>
+<hr>
+<h2 id="15-naming-and-vocabulary">15. Naming and vocabulary</h2>
+<p>Our own objects use English names. The vendor's schema objects are <strong>never</strong> renamed — doing so would break the application.</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">v3</th>
+<th style="text-align:left">v4</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>atrace</code> (schema)</td>
+<td style="text-align:left"><code>anon_meta</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>pack_anonym</code></td>
+<td style="text-align:left"><code>anon_engine</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>merge_codes</code></td>
+<td style="text-align:left"><code>anon_engine.apply_code_mapping</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>generate_unique_mappings</code></td>
+<td style="text-align:left"><code>anon_engine.generate_code_map</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op_code_mapping</code></td>
+<td style="text-align:left"><code>code_map</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>EntC</code> / <code>FoldC</code> / <code>TierC</code> / <code>CpteC</code></td>
+<td style="text-align:left"><code>ANONYMIZE_ENTITY</code> / <code>_PORTFOLIO</code> / <code>_COUNTERPARTY</code> / <code>_BANK_ACCOUNT</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ENTITE</code> / <code>PORTEFEUILLE</code> / <code>TIERS</code> / <code>COMPTE</code></td>
+<td style="text-align:left"><code>ENTITY</code> / <code>PORTFOLIO</code> / <code>COUNTERPARTY</code> / <code>BANK_ACCOUNT</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="the-vendors-french-vocabulary">The vendor's French vocabulary</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Term</th>
+<th style="text-align:left">Means</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>entite</code></td>
+<td style="text-align:left">Legal entity</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>portefeuille</code></td>
+<td style="text-align:left">Portfolio</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tiers</code></td>
+<td style="text-align:left">Counterparty / third party</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>compte_banque</code></td>
+<td style="text-align:left">Bank account</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>structure</code></td>
+<td style="text-align:left">The entity table</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>libelle</code></td>
+<td style="text-align:left">Label, description</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>adresse1</code>–<code>adresse5</code></td>
+<td style="text-align:left">Address lines</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>nom_pp</code> / <code>prenom_pp</code></td>
+<td style="text-align:left">Surname / given name of a natural person</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>email_adress</code></td>
+<td style="text-align:left">Email address (the vendor's spelling)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>histo_*</code></td>
+<td style="text-align:left">History tables — the bulk of the row count</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>compte_ana</code></td>
+<td style="text-align:left"><em>Compte analytique</em> — an <strong>analytical</strong> account, not a bank account</td>
+</tr>
+</tbody></table></div>
+<p>That last one is not trivia. It is the word that caused a misclassification which survived a full run and a verification pass.</p>
+<hr>
+<h2 id="16-file-reference">16. File reference</h2>
+<h3 id="what-runs">What runs</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Role</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>op/run_op_anonymization.bat</code></td>
+<td style="text-align:left">The only entry point. Settles configuration, turns the CSVs into loadable SQL, calls SQL*Plus, returns its exit code. No logic.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/sql/00_run_op_anonymization.sql</code></td>
+<td style="text-align:left">Orchestrator. 22 positional parameters.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/sql/10_create_metadata_schema.sql</code></td>
+<td style="text-align:left">Creates <code>anon_meta</code> and the <code>atrace</code> view. Runs as SYS.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/sql/21_validate_inventory.sql</code></td>
+<td style="text-align:left">Rejects impossible rule/category pairs before anything runs.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/sql/30_install_engine.sql</code></td>
+<td style="text-align:left">The <code>anon_engine</code> package — 23 procedures and functions.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/verify/verify_op_coverage.sql</code></td>
+<td style="text-align:left">The five-part check. Writes <code>verify_result</code>. Non-zero exit on failure.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/verify/generate_report.sql</code></td>
+<td style="text-align:left">Renders the HTML report from stored results.</td>
+</tr>
+</tbody></table></div>
+<h3 id="configuration">Configuration</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Role</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>config/anonymization.template.ini</code></td>
+<td style="text-align:left">Fully commented template. Copy it.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>config/anonymization.ini</code></td>
+<td style="text-align:left">Your settings. <strong>Not in version control</strong> — it is the file that ends up holding a real SID and possibly passwords.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>config/inventory_op.csv</code></td>
+<td style="text-align:left">Shipped coverage, 562 rows</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>config/inventory_op_custom.csv</code></td>
+<td style="text-align:left">Site additions and corrections, 18 rows</td>
+</tr>
+</tbody></table></div>
+<h3 id="optional">Optional</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Role</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>tools/generate_coverage_doc.sql</code></td>
+<td style="text-align:left">Writes the coverage document from the loaded inventory</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tools/analyze_flag_impact.sql</code></td>
+<td style="text-align:left">Resolves what each flag actually governs against a real instance</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tools/scan_for_leaks.sql</code></td>
+<td style="text-align:left">Samples the schema for identifier-shaped values not in the inventory</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tests/manual/monitor_op_progress.sql</code></td>
+<td style="text-align:left">Live progress from a second session</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tests/manual/row_counts.sql</code></td>
+<td style="text-align:left">What you are dealing with, before you start</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tests/manual/check_tables_exist.sql</code></td>
+<td style="text-align:left">Which inventory objects exist here</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tests/manual/check_locks.sql</code></td>
+<td style="text-align:left">Who is holding what</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tests/manual/inspect_code_map.sql</code></td>
+<td style="text-align:left">Mapping contents — <strong>shows real client values; keep local</strong></td>
+</tr>
+</tbody></table></div>
+<p><code>tests/manual/</code> is ad-hoc only and never part of a run.</p>
+<h3 id="everything-else">Everything else</h3>
+<p><code>unofficial docs/</code> holds the working notes from the rebuild: the test log, the defect record, open questions, the flag-impact analysis, and the session-2 test plan. They are accurate but are working documents, not deliverables.</p>
+<hr>
+<h2 id="17-error-codes">17. Error codes</h2>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Code</th>
+<th style="text-align:left">Raised by</th>
+<th style="text-align:left">Means</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>ORA-20010</code></td>
+<td style="text-align:left">engine</td>
+<td style="text-align:left">No category is enabled — every <code>ANONYMIZE_*</code> flag is <code>n</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20011</code></td>
+<td style="text-align:left">preflight</td>
+<td style="text-align:left">Columns cannot hold a generated identifier: too narrow, or not character-typed. <strong>Nothing was changed.</strong></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20012</code></td>
+<td style="text-align:left">preflight</td>
+<td style="text-align:left">Inventory items missing and <code>FAIL_ON_MISSING_OBJECT=y</code>. Nothing was changed.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20013</code></td>
+<td style="text-align:left">engine</td>
+<td style="text-align:left">Core entity tables not shaped as expected — no identifiers can be derived. Usually the wrong database.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20020</code></td>
+<td style="text-align:left">validation</td>
+<td style="text-align:left">The inventory is empty — CSV not found, or every line is a comment</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20021</code></td>
+<td style="text-align:left">validation</td>
+<td style="text-align:left">Rows pair a rule with a category that cannot apply</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20023</code></td>
+<td style="text-align:left">setup</td>
+<td style="text-align:left"><code>anon_inventory</code> is locked by another session. The message names the holder.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20030</code></td>
+<td style="text-align:left">verify</td>
+<td style="text-align:left"><code>code_map</code> is empty — nothing to verify</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20031</code></td>
+<td style="text-align:left">verify</td>
+<td style="text-align:left">Checks failed — client data is still present</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-20070</code></td>
+<td style="text-align:left">report</td>
+<td style="text-align:left"><code>verify_result</code> is empty — run the verifier first</td>
+</tr>
+</tbody></table></div>
+<h3 id="oracle-errors-worth-recognising">Oracle errors worth recognising</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Code</th>
+<th style="text-align:left">Meaning here</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>ORA-03114: not connected</code></td>
+<td style="text-align:left">The client had already lost the connection. Network, not code.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-03113: end-of-file</code></td>
+<td style="text-align:left">The server-side process died. Different problem, different fix.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-00942</code> / <code>ORA-00904</code></td>
+<td style="text-align:left">Missing table / column. Caught and logged as <code>SKIPPED</code>, not an error.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ORA-01407</code></td>
+<td style="text-align:left">Cannot set a <code>NOT NULL</code> column to <code>NULL</code>. Handled by masking.</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="18-known-limitations">18. Known limitations</h2>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left"></th>
+<th style="text-align:left"></th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><strong>Inventory completeness is out of scope</strong></td>
+<td style="text-align:left">The tool guarantees the inventory is followed exactly. Whether the inventory lists everything that needs anonymizing is a classification question for the schema owner. <code>tools/scan_for_leaks.sql</code> assists.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>A re-run costs a full run</strong></td>
+<td style="text-align:left">No checkpointing, by design. See <a href="#7-restartability">§7</a>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Passwords are visible in the process list</strong></td>
+<td style="text-align:left">They are passed to SQL*Plus as arguments. Inherited from v3, normal for an internal DBA tool, worth knowing on a shared host.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>The run needs a stable network</strong></td>
+<td style="text-align:left">One session for the length of the run. Run from a host near the database.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>`NOT NULL` free text on non-character columns</strong></td>
+<td style="text-align:left">Cannot be emptied or masked. Reported as a warning; there is currently one such column.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>EPF is not ported</strong></td>
+<td style="text-align:left"><code>Anonymization_EPF/</code> still holds the previous-generation scripts. The v4 verifier already carries EPF's best idea — residual detection — so the port is mostly a second inventory.</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="19-history">19. History</h2>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">When</th>
+<th style="text-align:left">What</th>
+<th style="text-align:left">Result</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">Feb 2021</td>
+<td style="text-align:left">Vendor base — <code>pack_anonym</code>, per-entity iterative rename, 98 audit triggers</td>
+<td style="text-align:left">8–12 hour runtime</td>
+</tr>
+<tr>
+<td style="text-align:left">v2</td>
+<td style="text-align:left">Batch driver with interactive prompts</td>
+<td style="text-align:left">—</td>
+</tr>
+<tr>
+<td style="text-align:left">v3</td>
+<td style="text-align:left">Set-based rewrite: bulk pre-clear plus <code>MERGE</code>/<code>UPDATE</code> against a mapping table</td>
+<td style="text-align:left">20–40 minutes</td>
+</tr>
+<tr>
+<td style="text-align:left">Jul 2026</td>
+<td style="text-align:left">KTP/CTI table scope added, then CTI tables, then <code>/dryrun</code> and custom inclusions</td>
+<td style="text-align:left">Each addition brought its own numbered script and its own hand-maintained table list</td>
+</tr>
+<tr>
+<td style="text-align:left">Aug–Sep 2026</td>
+<td style="text-align:left"><strong>v4</strong> — rebuilt around a single inventory</td>
+<td style="text-align:left">580 columns, 167 tables, reconciled against v3</td>
+</tr>
+</tbody></table></div>
+<h3 id="what-v4-fixed">What v4 fixed</h3>
+<p>Eleven defects were found by reading v3, including: custom inclusions could never work (the table holding them was dropped before it was read); folder layout did not match the paths the scripts resolved, so neither orchestrator could run; re-running after a partial failure destroyed the link between original and anonymized values; <code>DROP USER atrace CASCADE</code> destroyed the EPF cascade source; and the OP verifier's unescaped <code>LIKE 'E_%'</code> systematically overstated coverage.</p>
+<p>Roughly 200 KB of the 340 KB v3 codebase was unreachable and was not carried forward.</p>
+<h3 id="what-real-testing-found">What real testing found</h3>
+<p>Eight further defects (T1–T8) were found and fixed by running v4 against a live instance — a reserved word used as a column name, a privilege chain on the compatibility view, a nested aggregate, a batch quoting bug that corrupted roughly 500 of 579 <code>INSERT</code> statements, and the <code>compte_ana</code> misclassification that the verifier shared and therefore could not catch.</p>
+<h3 id="the-result">The result</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left"></th>
+<th style="text-align:left"></th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">Mapping</td>
+<td style="text-align:left">2,885 identifiers — 76 entity, 32 portfolio, 761 counterparty, 2,016 bank account</td>
+</tr>
+<tr>
+<td style="text-align:left">Rows changed</td>
+<td style="text-align:left">44,460,155</td>
+</tr>
+<tr>
+<td style="text-align:left">Duration</td>
+<td style="text-align:left">29 minutes</td>
+</tr>
+<tr>
+<td style="text-align:left">Errors</td>
+<td style="text-align:left">0</td>
+</tr>
+<tr>
+<td style="text-align:left">Triggers</td>
+<td style="text-align:left">45 disabled and re-enabled</td>
+</tr>
+<tr>
+<td style="text-align:left">Verification</td>
+<td style="text-align:left">432 passed, 0 failed</td>
+</tr>
+<tr>
+<td style="text-align:left">Restartability</td>
+<td style="text-align:left">Proven — the dry run predicted exactly one change and the execute made exactly that one change</td>
+</tr>
+</tbody></table></div>
+</div></body></html>

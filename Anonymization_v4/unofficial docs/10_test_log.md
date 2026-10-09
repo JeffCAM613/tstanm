@@ -1,0 +1,804 @@
+# 10 — Test log
+
+Running record of every execution against a real database: what was run, what happened, what broke,
+and what was changed as a result.
+
+Kept in the repo rather than in a ticket so that the reason for each fix stays next to the code.
+Newest session first.
+
+---
+
+## Session 1 — TANM7881, 2026-08-13
+
+| | |
+|---|---|
+| Database | TANM7881 — personal/disposable instance, recreatable |
+| Oracle server | 19c Enterprise Edition 19.24.0.0.0 |
+| sqlplus client | 19.28.0.0.0 |
+| Code location | `C:\Users\u735031\Desktop\WORK_DIR\Projects\Test_Anonymization` |
+| Config | `anonymization.ini`, `DATA` for both data and index tablespaces, passwords left blank |
+| Stage reached | **A1 — blocked, then fixed** |
+
+### Result summary
+
+| Stage | Result |
+|---|---|
+| A0 — prerequisites | ✅ PASS — sqlplus present, connected as OP |
+| A1 — metadata schema | ❌ **FAIL** — two defects, both fixed below |
+| A2 — engine compile | ⛔ blocked by A1 |
+| B–G | ⏳ not started |
+
+---
+
+### Defect T1 — `MODE` is an Oracle reserved word 🔴 BLOCKER — fixed
+
+```
+ORA-00904: "MODE": invalid identifier
+ORA-06512: at line 8
+```
+
+**Where:** `op/sql/10_create_metadata_schema.sql`, `anon_run` table definition.
+
+**Cause:** the column was named `mode`. `MODE` is on Oracle's reserved word list (it is the keyword
+in `LOCK TABLE … IN EXCLUSIVE MODE`), so it cannot be used as a column name unquoted.
+
+**Consequence:** `anon_run` was never created. Because the sequence `seq_anon_run` is created in the
+same PL/SQL block *after* the table, it was not created either — and three later `GRANT` statements
+then failed with `ORA-00942` because their target did not exist. **Four of the five reported errors
+were downstream of this one.**
+
+**Fix:** renamed the column `mode` → `run_mode`, in four places:
+
+| File | What |
+|---|---|
+| `op/sql/10_create_metadata_schema.sql` | column definition and the `ck_anon_run_mode` check constraint |
+| `op/sql/30_install_engine.sql` | the `INSERT` in `start_run` |
+| `op/verify/verify_op_coverage.sql` | `WHERE run_mode = 'EXECUTE'` when reading back `MIN_CODE_LENGTH` |
+| `tests/manual/monitor_op_progress.sql` | `SELECT` list and `COLUMN` format |
+
+Renamed rather than quoted as `"MODE"`: a quoted identifier stays case-sensitive forever and every
+future query has to quote it too.
+
+**Why it was not caught earlier:** nothing in this package had been compiled against Oracle. Reserved
+words are exactly the class of error that only a real parser finds — no amount of reading catches it.
+
+**Audit done as a result:** checked every column name in all eight metadata tables against Oracle's
+reserved word list. `MODE` was the only one. `RULE`, `SOURCE`, `PART`, `DETAIL`, `PHASE`, `LEVEL` and
+`STATUS` are keywords but not reserved, and the tables using them created without error — which the
+test output independently confirms.
+
+---
+
+### Defect T2 — view owner had no privilege on the table it reads 🟠 fixed
+
+```
+ORA-00942: table or view does not exist
+```
+…on `CREATE OR REPLACE VIEW atrace.ref_tables_modif`.
+
+**Where:** `op/sql/10_create_metadata_schema.sql`, EPF compatibility view.
+
+**Cause:** the view belongs to `atrace` but selects from `anon_meta.code_map`. A view compiles with
+its **owner's** rights, not the creator's, so SYS creating it is not sufficient — `atrace` needed its
+own `SELECT` privilege on `anon_meta.code_map`. It had none.
+
+`WITH GRANT OPTION` is required as well, because the next statement is
+`GRANT SELECT ON atrace.ref_tables_modif TO op` — `atrace` can only pass on a privilege it holds
+grantable.
+
+**Fix:** added before the view is created:
+
+```sql
+GRANT SELECT ON anon_meta.code_map TO atrace WITH GRANT OPTION;
+```
+
+**Worth noting:** `ORA-00942` here reads as "the table does not exist", which invites the wrong
+diagnosis — the initial reading of this error was that the `atrace` schema was missing. It existed;
+it simply could not see `anon_meta.code_map`. The script now carries a comment saying so.
+
+**Is `atrace` required?** Not for OP anonymization. It exists solely so the **unported EPF pipeline**
+can keep reading `atrace.ref_tables_modif`, which is the name and shape its phase B expects. It
+disappears when EPF is ported — see [../epf/README.md](../epf/README.md).
+
+---
+
+### Things that worked
+
+Worth recording, because they were untested assumptions until this run:
+
+- **Idempotency.** The output shows every object reporting `already exists - kept` / `PRESERVED`,
+  which means this was at least the second invocation and the re-run guards behaved exactly as
+  designed. `code_map` in particular reported `PRESERVED` — the property the whole restart story
+  depends on.
+- **Partial failure did not cascade into corruption.** `anon_run` failing left the other five tables
+  intact and the script continued, so re-running after the fix simply fills the gap.
+- **`&tbs_data` / `&tbs_index` substitution** worked inside `q'[…]'` quoted DDL.
+- **Connecting as SYSDBA and running the script by relative path** worked from the copied tree on a
+  different machine, which exercises the `%~dp0`-derived paths that were broken throughout v3.
+
+---
+
+### Actions
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Rename `mode` → `run_mode` in 4 files | ✅ done |
+| 2 | Grant `atrace` SELECT on `code_map` `WITH GRANT OPTION` | ✅ done |
+| 3 | Re-run A1 on TANM7881 with the fixed script | ⏳ next |
+| 4 | Continue from A2 | ⏳ |
+
+Both fixes are safe to apply to the partially-created schema — the script keeps what exists and
+creates only what is missing.
+
+---
+
+### Defect T3 — aggregate alias shadowed its own column 🔴 BLOCKER — fixed
+
+```
+931/17  PL/SQL: SQL Statement ignored
+935/27  PL/SQL: ORA-00935: group function is nested too deeply
+936/10  PL/SQL: Statement ignored
+936/25  PLS-00364: loop index variable 'T' use is invalid
+950/17  PL/SQL: SQL Statement ignored
+954/27  PL/SQL: ORA-00935: group function is nested too deeply
+955/10  PL/SQL: Statement ignored
+955/26  PLS-00364: loop index variable 'G' use is invalid
+```
+
+**Where:** `op/sql/30_install_engine.sql`, both grouped cursor loops in `apply_inventory`.
+
+**Cause:** the query read
+
+```sql
+SELECT table_name, MIN(seq) AS seq
+  FROM anon_meta.anon_inventory
+ GROUP BY table_name
+ ORDER BY MIN(seq)          -- <-- "seq" here resolves to the ALIAS
+```
+
+In `ORDER BY`, Oracle resolves an unqualified name to the **select-list alias** before the base
+column. The alias `seq` *is* `MIN(seq)`, so `ORDER BY MIN(seq)` became `ORDER BY MIN(MIN(seq))` —
+hence `ORA-00935: group function is nested too deeply`.
+
+`PLS-00364` on loop variables `T` and `G` is pure cascade: the cursor query failed to parse, so the
+loop record had no type and every `t.table_name` reference was invalid. **Eight reported errors, two
+root causes — one per loop.**
+
+**Fix:** dropped the aliased aggregate from the select list entirely. It was never read — the loops
+only use `table_name`, `category` and `rule`. `ORDER BY MIN(seq)` on a `GROUP BY` query is valid
+without the column being selected, and with no alias in scope the name resolves to the base column.
+
+The rule is now stated in a comment above the loop, since it is easy to reintroduce.
+
+**Audit done as a result:** swept every SQL file for `AGG(x) AS x` shadowing and for aggregates in
+`ORDER BY`. The only other one is `monitor_op_progress.sql:66` (`ORDER BY MIN(logged_at)`), whose
+select list has no colliding alias — correct as written.
+
+Also ran a package-wide declaration audit while the compiler was unavailable: all 15 package globals
+declared, all spec constants declared, all 23 internal procedures and functions defined, and no
+undeclared local variables in any procedure.
+
+---
+
+### Actions (updated)
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Rename `mode` → `run_mode` in 4 files | ✅ done |
+| 2 | Grant `atrace` SELECT on `code_map` `WITH GRANT OPTION` | ✅ done |
+| 3 | Re-run A1 | ✅ **PASS** — `created anon_meta.anon_run`, all 6 tables present |
+| 4 | Remove aggregate-alias shadowing in `apply_inventory` | ✅ done |
+| 5 | Re-run A2 — package body must compile `VALID` | ⏳ next |
+| 6 | Continue to Stage B (baseline capture) | ⏳ |
+
+---
+
+### A2 — package body compiles ✅
+
+After T3, both `ANON_ENGINE` PACKAGE and PACKAGE BODY report `VALID`, `all_errors` empty.
+
+### Stage B — baseline captured ✅
+
+| Category | Codes |
+|---|---:|
+| ENTITY | 76 |
+| PORTFOLIO | 32 |
+| COUNTERPARTY | 761 |
+| BANK_ACCOUNT | 2,016 |
+
+`op.tiers` 869 rows, `op.compte_banque` 2,016 rows. Sample values recorded locally by the tester
+(real client data — not reproduced here).
+
+`compte_banque` codes are 8 characters (`SDFFCCFA`); `tiers` codes are 4 (`REAL`, `SDME`). Both
+comfortably above the 1-character checkbox threshold and below what the target columns must hold, so
+neither the flag-column rule nor `MIN_CODE_LENGTH` should exclude anything real. Worth re-checking
+against preflight once the dry run gets that far.
+
+**B1/B2 reported 0 tables in scope** — expected. Those scripts read `anon_meta.anon_inventory`, which
+is only populated by a run. They were executed before the first dry run, so the inventory was empty.
+Re-run them after C1 succeeds to get the real numbers.
+
+---
+
+### Defect T4 — inventory load fails with ORA-01756 🔴 BLOCKER — under investigation
+
+```
+=== Coverage inventory ===
+ERROR:
+ORA-01756: quoted string not properly terminated
+```
+
+The batch reported `579 inventory items prepared`, so the CSV parse produced the expected count.
+The failure is in SQL*Plus, loading the generated INSERT file.
+
+**Ruled out by inspection:**
+
+- Both CSVs are pure ASCII with **no quote characters at all in data rows** (apostrophes appear only
+  in `#` comment lines, which `eol=#` skips).
+- Simulating the batch tokenizer exactly — `eol=#`, blank-line skip, `delims=,` with consecutive
+  delimiters collapsed, `tokens=1-5*` — produces 579 statements, every one with exactly 12 single
+  quotes. No odd counts, no unbalanced strings.
+- `DELETE FROM anon_meta.anon_inventory` is the only statement between the `=== Coverage inventory ===`
+  banner and the generated file, and it contains no quotes.
+
+So the fault is in the **load plumbing**, not the inventory content.
+
+**Changes made to isolate it:**
+
+1. **Removed one level of indirection.** The generated file was `@`-included from *inside*
+   `20_load_inventory.sql`, which had itself been `@@`-included by the orchestrator, with the path
+   arriving through a second `DEFINE` from `&1`. When that fails, the error names neither the file
+   nor the line. `20_load_inventory.sql` now only clears the table; the orchestrator runs the
+   generated file directly and `21_validate_inventory.sql` validates afterwards.
+
+2. **The resolved path is now echoed** before the load: `PROMPT Inventory file: &inventory_data`.
+   This also tests something never yet proven — that SQL\*Plus resolves **multi-digit positional
+   parameters**. Everything that has worked so far used `&1`–`&9`; the inventory path arrives as
+   `&22`. If `&22` were parsed as `&2` followed by a literal `2`, the path would come out as the SYS
+   password with `2` appended.
+
+3. **The generated file is kept when the run fails**, and its location printed, instead of being
+   deleted unconditionally. A failed run should leave its inputs behind.
+
+**Next:** re-run C1 and read the `Inventory file:` line, then the first lines of the kept file.
+
+---
+
+### Actions (updated)
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Rename `mode` → `run_mode` | ✅ |
+| 2 | Grant `atrace` SELECT on `code_map` `WITH GRANT OPTION` | ✅ |
+| 3 | Re-run A1 | ✅ PASS |
+| 4 | Remove aggregate-alias shadowing | ✅ |
+| 5 | Re-run A2 | ✅ PASS — both objects VALID |
+| 6 | Stage B baseline | ✅ captured |
+| 7 | Diagnose ORA-01756 on inventory load | ⏳ **in progress** |
+| 8 | Re-run B1/B2 once the inventory loads | ⏳ |
+
+---
+
+### Defect T4 — RESOLVED: cmd leaks substring-replacement text on undefined variables 🔴 BLOCKER
+
+**Root cause found from the generated file**, which the tester recovered. Rows with a note were
+correct; rows **without** one were not:
+
+```sql
+-- row with a note - correct
+... ,'CUSTOM','was Cpte1',577);
+
+-- row with an empty note - BROKEN, three quotes
+... ,'BASE',''=',1);
+```
+
+`''='` is an odd number of quotes, so the **first** `INSERT` raised `ORA-01756`. Roughly 500 of the
+579 rows have no note, so most of the file was malformed.
+
+**Cause:** this line, applied to every row:
+
+```bat
+set "NTS=!NTS:'=!"
+```
+
+When `NTS` is **undefined**, cmd does not perform the replacement — it emits the
+`search=replace` text as a literal. Confirmed by direct experiment on this platform:
+
+```
+[raw]         NTS=[]
+[after strip] NTS=['=]        <-- from an empty variable
+```
+
+So an empty notes field became the literal `'=`, which the template then wrapped in quotes as
+`''='`.
+
+**Why the analysis kept missing it:** every check was aimed at the *inventory*, and the inventory was
+never at fault. Both CSVs are clean ASCII with no quote characters in any data row, and a simulation
+of the tokenizer produced 579 perfectly balanced statements. The corruption was introduced *after*
+parsing, by the sanitising step itself. **The fix that mattered was keeping the generated file on
+failure** — one look at it identified the cause immediately.
+
+**Fix:** guard the replacement.
+
+```bat
+if defined NTS set "NTS=!NTS:'=!"
+```
+
+Verified on this platform: empty → `''`, value preserved when present, apostrophe still stripped.
+
+**Wider finding — this affects BOTH substring forms.** A follow-up experiment showed
+position-based substring leaks the same way:
+
+```
+!UNDEF:~0,1!   ->  ~0,1        (not empty)
+!UNDEF:x=y!    ->  x=y         (not empty)
+```
+
+An earlier note in this log claimed position substring was safe on undefined variables. **That was
+wrong.** Every `!var:...!` expansion in the batch file is now guarded with `if defined`, including
+the two `~0,1` uses that were safe only by accident of ordering.
+
+**Rule for this codebase:** never write `!var:...!` without `if defined var` in front of it, for
+either form.
+
+---
+
+### Actions (updated)
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Rename `mode` → `run_mode` | ✅ |
+| 2 | Grant `atrace` SELECT on `code_map` `WITH GRANT OPTION` | ✅ |
+| 3 | Re-run A1 | ✅ PASS |
+| 4 | Remove aggregate-alias shadowing | ✅ |
+| 5 | Re-run A2 | ✅ PASS — both objects VALID |
+| 6 | Stage B baseline | ✅ captured |
+| 7 | Guard all `!var:...!` expansions with `if defined` | ✅ |
+| 8 | Re-run C1 dry run | ⏳ next |
+| 9 | Re-run B1/B2 once the inventory loads | ⏳ |
+
+---
+
+## Dry run — PASS
+
+```
+resolved .......... 427
+missing tables .... 68
+missing columns ... 79
+checkbox columns .. 4   (left alone)
+too narrow ........ 0
+wrong type ........ 0
+not nullable ...... 1
+errors ............ 0
+rows affected ..... 10,663,242   (would change)
+step time ......... 20s
+```
+
+579 loaded / 562 shipped / 17 site-specific — all three match. The rule and category breakdown
+matches the CSV exactly. 167 tables in scope, ~115M rows.
+
+The counts reconcile: 427 resolved + 68 missing-table rows + 79 missing-column rows + 4 checkbox
++ 1 not-nullable = 579. The 6 absent tables (`CM_DEAL_DEAL`, `CM_PAYT_PAYMENT`,
+`CM_CMS_EXCEPTIONS`, `VAL_CPTYRATING`, `VUE_AFFILIE_COMPTE`, `VUE_AFFILIE_TIERS`) account for the 68
+rows — `cm_deal_deal` alone holds 32 of them.
+
+---
+
+### Finding T5 — three inventory rows are misclassified 🟠 no action needed, but worth knowing
+
+Preflight flagged four checkbox columns. One was expected. **Three were not:**
+
+```
+CHECKBOX ventiler_corresp_bqe.tiers_entite  (VARCHAR2(1)) - will be left alone
+CHECKBOX val_ssi_account.tiers_entite       (VARCHAR2(1)) - will be left alone
+CHECKBOX val_ssi_corresp.tiers_entite       (VARCHAR2(1)) - will be left alone
+CHECKBOX tiers.flag_pp                      (VARCHAR2(1)) - will be left alone
+```
+
+`tiers.flag_pp` is the known case — a natural-person checkbox that the old `config.ini` listed as
+an anonymizable attribute via `Fold4`.
+
+The three `tiers_entite` columns are more interesting. They are declared `CODE` / `ANY` in the
+inventory, inherited from v3's `merge_codes` calls — meaning v3 treated them as **references to an
+entity or counterparty code**. But they are `VARCHAR2(1)` on this instance, and codes here are 4
+characters (`REAL`, `SDME`) or 8 (`SDFFCCFA`). **A one-character column cannot hold any of them.**
+
+The name reads differently in that light: `tiers_entite` is almost certainly a **discriminator** —
+`'T'` or `'E'`, saying which kind of thing the neighbouring column refers to — not a reference
+itself.
+
+**No action taken.** The engine already skips them, so behaviour is correct either way, and the
+checkbox rule caught the misclassification without needing the inventory to be right. Recorded for
+the developer review as evidence that the width rule earns its place: it found three rows that
+sixteen years of the previous tool had been feeding into `merge_codes`.
+
+If a code of one character had ever existed, v3 would have overwritten these discriminators
+schema-wide.
+
+---
+
+### Finding T6 — one free-text column cannot be emptied 🟠 verifier adjusted
+
+```
+NOT NULL histo_pricing_groupe.description (cannot be emptied)
+```
+
+`histo_pricing_groupe.description` is `NULL_OUT` in the inventory but `NOT NULL` on this schema. The
+engine skips it rather than failing the run with `ORA-01407`, as designed.
+
+**But the verifier would have failed on it**, because PART 2 asserts every `NULL_OUT` column is
+entirely empty. A correct run would have reported `FAIL` — which is both wrong and the kind of thing
+that trains people to ignore verification output.
+
+**Fixed:** PART 2 now detects `NOT NULL` columns and reports them as `WARN` with the reason and the
+remedy, consistent with how checkbox columns are handled. The gap stays visible; it no longer fails
+a run that behaved correctly.
+
+**The gap is real:** the free text in that column is still there. Options are to change its rule to
+`SELF_CODE` so it is overwritten rather than emptied, or accept it knowingly. See
+[08_open_questions.md](08_open_questions.md) item 7.
+
+---
+
+### Defect T7 — first EXECUTE attempt lost its connection 🔵 environmental, re-run
+
+```
+Inventory file: C:\Users\...\anon_inventory_5830.sql
+=== Coverage inventory ===
+ERROR:
+ORA-03114: not connected to ORACLE
+```
+
+**Not a code defect.** `ORA-03114` means the session was gone. The script had already connected as
+SYS, created the metadata schema, reconnected as OP and compiled the package (`No errors.` twice) —
+all of which require a live session. It then died on the first statement afterwards.
+
+**Nothing was changed.** The failure came before the inventory load, which is before `start_run` and
+long before any DML. No run row, no mapping change, no data touched.
+
+Usual causes: the server process crashed, the session was killed, a profile idle limit expired, or
+the network dropped. Worth checking the alert log around the timestamp for `ORA-00600` / `ORA-07445`
+or a shutdown.
+
+**Change made:** the orchestrator now asserts its connection immediately after connecting as OP:
+
+```sql
+SELECT 'Connected as ' || USER || ' on ' || ... FROM dual;
+```
+
+`SET TERMOUT OFF` around the `CONNECT` hides a failed logon, and SQL*Plus does not reliably treat one
+as a `SQLERROR` — so without this a bad connect surfaces later as `ORA-03114` on whatever statement
+runs next, naming the wrong culprit. Now the run states which user and instance it is on before
+doing anything.
+
+---
+
+### Actions (updated)
+
+| # | Action | Status |
+|---|---|---|
+| 1–7 | T1–T4 fixes | ✅ |
+| 8 | Dry run C1/C2 | ✅ **PASS** — 0 errors, 10.6M rows would change |
+| 9 | Verifier: treat NOT NULL free-text as WARN not FAIL | ✅ |
+| 10 | Orchestrator: assert connection after connecting as OP | ✅ |
+| 11 | Re-run Stage D (EXECUTE) after the ORA-03114 drop | ⏳ next |
+| 12 | Stage E verify | ⏳ |
+
+---
+
+### Defect T7 (revised) — ORA-03114 at the inventory reload 🔵 still open
+
+Failed identically **after an instance restart**, at exactly the same point:
+
+```
+Connected as OP on TANM7881 (session 869)
+No errors.
+No errors.
+Inventory file: C:\Users\...\anon_inventory_13729.sql
+=== Coverage inventory ===
+ERROR:
+ORA-03114: not connected to ORACLE
+```
+
+The connection assertion added for the previous attempt worked — the run confirms it is OP on
+TANM7881, session 869 — so the session was alive after connecting and stayed alive long enough to
+compile the package. It dies on the first server round trip afterwards.
+
+**Locks were found on `ANON_META.ANON_INVENTORY`** (sessions 381 and 869, both `OP`, Row-X). Session
+869 is the failing run's own session, identified by the new assertion.
+
+**Two facts argue against locks being the root cause:**
+
+1. **Sessions do not survive an instance restart.** The restart cleared every session and every
+   lock, and the very next run failed identically. On that attempt there was no pre-existing holder.
+   The locks found afterwards were left *by* the failed run, not encountered *by* it.
+2. **A blocked DELETE hangs; it does not raise ORA-03114.** Oracle DML has no default lock timeout,
+   so a row-lock conflict makes the statement wait indefinitely. Something would have had to kill
+   the session mid-wait to turn that into ORA-03114.
+
+So locks are a real problem worth defending against, but most likely a symptom.
+
+**Defences added regardless** — they turn a hang into a named error either way:
+
+- `20_load_inventory.sql` now takes the table lock explicitly with `LOCK TABLE … IN EXCLUSIVE MODE
+  WAIT 10` before the DELETE. On `ORA-00054` it names the holding session and the exact
+  `ALTER SYSTEM KILL SESSION` needed. A run can no longer hang silently on this table.
+- `tests/manual/check_locks.sql` reports holders, idle times, ready-to-paste kill statements, all OP
+  sessions, and any blocking chain in the instance.
+
+**Still to determine.** The decisive test is the DELETE on its own, in a fresh session:
+
+```sql
+SET TIMING ON
+DELETE FROM anon_meta.anon_inventory;
+COMMIT;
+```
+
+- completes instantly → not a lock; the fault is in the script context around the package compile
+- hangs → lock contention confirmed
+- ORA-03114 → the session is dying for an unrelated reason; check the alert log for `ORA-00600`,
+  `ORA-07445`, `ORA-04030` around the failure time
+
+```sql
+SELECT name, value FROM v$diag_info WHERE name IN ('Diag Trace','Diag Alert');
+```
+
+**Note for the record:** the earlier troubleshooting summary stated "sessions survive restart". They
+do not. That line should not be carried into any runbook.
+
+---
+
+## Stage D — EXECUTE, PASS (run 2)
+
+Run from a Windows server **on the same network as the database**. No errors.
+
+| | |
+|---|---|
+| Mappings | 2,885 — entity 76, portfolio 32, counterparty 761, account 2,016 |
+| Applied | 156 statements, 44,460,155 rows |
+| Errors | 0 |
+| Runtime | 1,757s (~29 min), inside the 20–40 min estimate |
+| Triggers | 45 disabled → 45 re-enabled |
+
+Mapping counts **match the Stage B baseline exactly** — checklist item C5, the check that proves the
+four mapping source queries select the right populations.
+
+### Defect T7 — RESOLVED: the network, not the code
+
+Every `ORA-03114` was a dropped client connection between the workstation and the database. Same
+code, same instance, same credentials, run from a host on the same network: clean.
+
+Three hypotheses were pursued and discarded first — zombie locks, the 579-row DELETE, session
+exhaustion. The through-line that should have been followed sooner: **manual execution of the same
+statements succeeded, and the reported failure point moved between runs.** Both were visible early
+and both point outside the code. `ORA-03114` ("not connected") rather than `ORA-03113`
+("end-of-file") was the specific tell — the client had already lost the connection before the
+statement that reported it.
+
+Nothing in the code fixed this. The `TRUNCATE` and lock-timeout changes are worth keeping on their
+own merits, but neither addressed the cause.
+
+---
+
+## Stage E — verification
+
+`verify_op_coverage.sql`: **432 passed, 0 failed.** 462 identifier columns with no residual
+originals, 92 free-text columns empty, 25 labels consistent. Row counts unchanged (869 / 2,016).
+`flag_pp` untouched. 45 triggers enabled.
+
+432 checked + 147 absent = 579 — every inventory row accounted for.
+
+---
+
+### Defect T8 — the verifier shared the engine's blind spot, and a real leak survived
+
+**Found by an independent check, after the standard verification reported PASS.**
+
+```
+param_cpta_reg_gen.compte_ana     5
+columns with residual originals: 1
+```
+
+Five rows still held **original client identifiers**.
+
+**Cause.** The column is declared `CODE` / `BANK_ACCOUNT`, inherited from v3's
+`merge_codes('param_cpta_reg_gen','compte_ana', p_entity_type => 'COMPTE')`. The engine therefore
+substituted only bank-account codes. Those five values belong to a different category, so they were
+never touched.
+
+`compte_ana` is *compte analytique* — an analytical / cost-centre account, not a bank account. v3
+classified it from the word `compte` in the name.
+
+**Why verification missed it.** PART 1 restricted its residual search **the same way the engine
+did** — bank-account codes only, for a `BANK_ACCOUNT` column. Engine and verifier shared one wrong
+assumption, so both agreed and both were wrong. A verifier that re-applies the engine's assumptions
+cannot detect an assumption that is itself wrong.
+
+This contradicted the principle stated in the script's own header — that the check tests the
+*outcome*, not the method — and it took an independent query to expose it.
+
+**Fixes:**
+
+1. **PART 1 now searches the full mapping** for every `CODE` column whatever its declared category.
+   Any original left anywhere is a leak. A failing `BANK_ACCOUNT` column names the likely cause and
+   the remedy.
+2. **`param_cpta_reg_gen.compte_ana` corrected to `CODE,ANY`** in `inventory_op_custom.csv`.
+3. **The loader now supports overrides.** `anon_inventory` has a primary key on
+   `(table_name, column_name)`, so a second row for the same column previously raised `ORA-00001`
+   instead of taking effect. Custom rows now emit a `DELETE` first, so a wrong classification in the
+   shipped inventory can be corrected without editing it.
+
+**Why `ANY`:** `code_map_any` contains every category, so genuine bank account references still
+resolve to `CB_`. Only the six cross-category collisions resolve differently.
+
+---
+
+### The six cross-category collisions — reviewed, correct
+
+```
+BNPSP      counterparty T_0000116   account CB_0000088   ANY columns got T_0000116
+ENCON      entity       E_0000008   account CB_0000267   ANY columns got E_0000008
+FACTOCGED  entity       E_0000012   account CB_0000285   ANY columns got E_0000012
+FACTOSIDF  entity       E_0000017   account CB_0000293   ANY columns got E_0000017
+FACTOSNE   entity       E_0000018   account CB_0000298   ANY columns got E_0000018
+SNDS       entity       E_0000063   account CB_0001425   ANY columns got E_0000063
+```
+
+Bank accounts named after their owner. An entity and its account are different objects in different
+tables, so they anonymize differently — the collision guard working as intended, and the same
+behaviour v3 had.
+
+Resolution follows the documented priority: entity → portfolio → counterparty → account. Account
+always loses in an `ANY` column, matching every row above.
+
+**Blast radius is exactly bounded:** an `ANY`-classified column referencing a bank account and
+holding one of these six codes. Every other code in the 2,885-entry mapping resolves identically
+everywhere, guaranteed by the primary key on `code_map_any` and the unique index on
+`code_map.new_code`.
+
+---
+
+### Actions
+
+| # | Action | Status |
+|---|---|---|
+| 1–10 | T1–T7 | ✅ |
+| 11 | Stage D EXECUTE | ✅ PASS — 44.5M rows, 0 errors, 29 min |
+| 12 | Stage E verify | ✅ PASS — then T8 found by an independent check |
+| 13 | Verifier PART 1 searches the full mapping | ✅ |
+| 14 | `compte_ana` corrected to `CODE,ANY` | ✅ |
+| 15 | Loader supports custom-overrides-shipped | ✅ |
+| 16 | Re-run to clear the 5 residual rows, then re-verify | ⏳ next |
+
+---
+
+## Runs 3 and 4 — the `compte_ana` correction, applied
+
+The five values in `param_cpta_reg_gen.compte_ana` were confirmed as **counterparty** codes:
+
+```sql
+SELECT m.category, COUNT(*) FROM op.param_cpta_reg_gen t
+  JOIN anon_meta.code_map m ON m.old_code = t.compte_ana GROUP BY m.category;
+-- COUNTERPARTY   5
+```
+
+So the column holds counterparty references, not bank accounts — `compte analytique`, misclassified
+by v3 from the word `compte`. `CODE,ANY` confirmed correct by data rather than by inference.
+
+### Run 3 — dry run
+
+```
+cleared anon_meta.anon_inventory (579 rows)
+loaded ............ 579 items
+  shipped ......... 561
+  site-specific ... 18
+...
+param_cpta_reg_gen.compte_ana        DRYRUN    5 rows would change
+```
+
+Mapping: all four categories `REUSED`. Everything else 0. 28s, no errors.
+
+**The override accounting is the thing to notice.** Shipped fell 562 → 561 and site-specific rose
+17 → 18, total unchanged at 579: the shipped row for `compte_ana` was replaced by the custom one.
+That is the `DELETE`-before-`INSERT` added for exactly this, working.
+
+### Run 4 — execute
+
+```
+param_cpta_reg_gen.compte_ana        OK        5 rows
+```
+
+**That is the only item that reported `OK` in the entire run.** Everything else `NOOP` or `SKIPPED`.
+
+```
+applied ........... 3          (compte_ana + two trigger steps)
+no rows matched ... 389
+skipped ........... 304
+errors ............ 0
+rows affected ..... 2,980
+step time ......... 11s
+```
+
+`rows affected` reconciles exactly: 2,885 mapping reuse + 45 triggers off + 45 triggers on + 5 real
+updates. Triggers 45 → 45.
+
+### What these two runs prove
+
+- **The dry run is trustworthy.** It predicted exactly one change; the execute made exactly that one
+  change and nothing else. Predicted and actual agree at the level of individual columns.
+- **Restartability works on real data.** All four categories `REUSED`, every previously-applied item
+  `NOOP`, only genuinely-outstanding work performed. This is the property v3 lacked — and it is what
+  would have saved a run interrupted by the network drops in T7.
+- **11s versus the first run's 1,757s is expected.** The first run physically rewrote 44.5M rows;
+  this one had 5 to change and the rest evaluated to no-ops.
+- **Custom rows can correct the shipped inventory** without editing it.
+
+### Actions
+
+| # | Action | Status |
+|---|---|---|
+| 16 | Re-run to clear the 5 residual rows | ✅ run 4, exactly 5 rows |
+| 17 | Re-verify with the corrected PART 1 | ⏳ next |
+| 18 | Independent bank-account residual check → expect 0 | ⏳ next |
+
+---
+
+## Post-verification hardening
+
+Final verification on TANM7881: **432 passed, 0 failed, 1 warning.** PART 1 — 462 identifier columns
+checked against the **full** mapping — 0 residual. `param_cpta_reg_gen.compte_ana` now clean.
+
+Three follow-ups, all from reviewing that output rather than from a failure.
+
+### Step-log counters double-counted 🟡 fixed
+
+`skipped 304` described **152** actual objects. `log_step` incremented the run counters for every
+call, and preflight reports on all 579 inventory items *before* the apply phase reports on the same
+items again — so each missing object was counted twice.
+
+Preflight entries are now logged but **not counted**. The summary describes the work done, so it
+counts the phases that do work: `MAPPING`, `NULL_OUT`, `CODE`, `DESCRIPTION`, `SELF_CODE`,
+`TRIGGERS`. Preflight keeps its own separate summary, which was always correct.
+
+### `NOT NULL` free text is now masked rather than left alone 🟢 gap closed
+
+`histo_pricing_groupe.description` is `NULL_OUT` in the inventory but `NOT NULL` on this schema.
+`SET … = NULL` raises `ORA-01407`, so the engine skipped it — leaving real free text in place and
+the verifier reporting a permanent `WARN`.
+
+`SELF_CODE` is not an alternative: it writes *the row's own identifier*, which needs a `code` column
+on the table, and the `histo_*` tables do not have one.
+
+So the engine now **overwrites with a fixed marker** — `ANONYMIZED`, truncated to the column width.
+The client content is removed, which is the point, and the constraint stays satisfied. The predicate
+excludes rows already masked, so a re-run remains a no-op.
+
+Only a `NOT NULL` **non-character** column is now skipped, since a marker cannot be written to one.
+That still reports `WARN`.
+
+The verifier accepts either outcome — empty or masked — as clean.
+
+**This shares a definition with the engine, not an assumption.** Knowing what an anonymized value
+looks like is the same kind of knowledge as knowing the `E_`/`P_`/`T_`/`CB_` prefixes. It is not
+knowing *where to look*, which is what caused T8.
+
+### The T8 lesson recorded for the EPF port 🟢
+
+[epf/README.md](../epf/README.md) now opens with it: **a verifier that re-applies the engine's
+assumptions can only ever confirm them.** Share definitions, never scope or restrictions; search the
+full mapping regardless of declared category; let the check be stricter than the run.
+
+EPF has more such restrictions than OP, not fewer — BIC components matched by sub-field, payment
+amounts by numeric range, orphan codes via a synthetic mapping. Each is a place the same blind spot
+could reappear.
+
+### Actions
+
+| # | Action | Status |
+|---|---|---|
+| 17 | Re-verify with the corrected PART 1 | ✅ PASS — 462 checked, 0 failed |
+| 18 | Independent bank-account residual check | ✅ 0 |
+| 19 | Stop double-counting preflight in the run summary | ✅ |
+| 20 | Mask `NOT NULL` free text instead of skipping it | ✅ |
+| 21 | Record the verifier-independence rule for EPF | ✅ |
+| 22 | Re-run so `histo_pricing_groupe.description` gets masked | ⏳ next |
