@@ -1,7 +1,9 @@
 # tests/
 
-**Nothing in this folder is part of a run.** These are ad-hoc scripts for inspecting an instance by
-hand — before a run, during one, or when something looks wrong.
+**Nothing in this folder is part of a run.** `manual/` holds ad-hoc scripts for inspecting an
+instance by hand — before a run, during one, or when something looks wrong. In the source
+repository, `regression/` holds the automated suite that proves the engine on fictional data in a
+disposable container; it is not part of a release.
 
 The workflow scripts live elsewhere and are the only things the orchestrator executes:
 
@@ -24,6 +26,7 @@ scripts, and it was not possible to tell by looking which ones a run would execu
 | `manual/row_counts.sql` | Row counts for the main anonymization targets. Read-only. Useful for estimating runtime. |
 | `manual/monitor_op_progress.sql` | Live progress of a run in flight, read from `anon_meta.anon_step_log`. Run from a second session. |
 | `manual/inspect_code_map.sql` | Sample the generated mapping; check category counts and look for anomalies. Read-only. |
+| `manual/typed_identity_diagnostics.sql` | Before a run, on raw data: is the copy raw, how many bank accounts and parties of each kind, how many texts are both, which structure screens hold identifiers, and what a `pere` points at. Counts only - safe to share. Read-only. |
 | `manual/check_locks.sql` | Who is holding the `anon_meta` tables. Run as SYS when a run stalls or fails at the inventory reload. Read-only. |
 
 ## Ground rules

@@ -12,8 +12,12 @@ Read-only, safe to run against an anonymized copy, and referenced from the guide
 | Script | Answers | Cost |
 |---|---|---|
 | `generate_coverage_doc.sql` | *What does the inventory cover, and which of it exists on this instance?* Writes `op/logs/coverage.md`. Needs the inventory loaded, which any run — including a dry run — does. | Seconds |
-| `analyze_flag_impact.sql` | *If I turn a category off, which columns stop being anonymized?* Measures it per column instead of guessing. Writes `op/logs/flag_impact.md`. | Minutes |
-| `scan_for_leaks.sql` | *Is the inventory itself complete?* Ignores the inventory and scans every character column in OP for surviving original codes. | **Roughly a full run** — it reads the whole schema |
+| `analyze_flag_impact.sql` | *If I turn a category off, which columns stop being anonymized? Does a column hold the other domain?* Measures it per column, against the identities of the latest plan (a dry run is enough). Writes `op/logs/flag_impact.md`. | Minutes |
+| `scan_for_leaks.sql` | *Is the inventory itself complete?* Ignores the inventory and scans every character column in OP, whatever its width, for surviving original identifiers. | **Roughly a full run** — it reads the whole schema |
+
+`analyze_flag_impact.sql` and `scan_for_leaks.sql` keep their results in tables they create in
+`anon_meta`, so the account running them needs to be able to create tables there: run them as SYS
+if OP cannot.
 
 ### Two things to know before sharing their output
 

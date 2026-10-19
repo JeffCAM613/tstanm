@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+# ============================================================================
+# OP Anonymization - regression suite
+# ============================================================================
+# Runs the engine, the verifier and the assertions against a DISPOSABLE Oracle
+# database in a local container, on fictional data. See README.md.
+#
+#   export ANON_TEST_SYS_PASSWORD=<the container's SYS password>
+#   tests/regression/run_regression.sh            every scenario
+#   tests/regression/run_regression.sh S1 S5      some of them
+#
+# Settings (environment):
+#   ANON_TEST_CONTAINER     container name                     anonv4-xe
+#   ANON_TEST_SERVICE       service inside the container       localhost:1521/XEPDB1
+#   ANON_TEST_SYS_PASSWORD  SYS password                       (required)
+#
+# Exit code: 0 when every check passed, 1 otherwise.
+# ============================================================================
+
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+V4="$(cd "$HERE/../.." && pwd)"
+CT="${ANON_TEST_CONTAINER:-anonv4-xe}"
+SVC="${ANON_TEST_SERVICE:-localhost:1521/XEPDB1}"
+SYSPWD="${ANON_TEST_SYS_PASSWORD:?set ANON_TEST_SYS_PASSWORD to the container SYS password}"
+SYSCONN="sys/${SYSPWD}@${SVC} as sysdba"
+WORK="$(mktemp -d)"
+INV="$WORK/inventory.sql"
+ONLY=("$@")
+
+export MSYS_NO_PATHCONV=1          # keep Git Bash from rewriting container paths
+
+PASSED=0
+FAILED=0
+
+say()     { printf '%s\n' "$*"; }
+section() { say ""; say "=== $* ==="; }
+ok()      { PASSED=$((PASSED + 1)); say "PASS  $*"; }
+ko()      { FAILED=$((FAILED + 1)); say "FAIL  $*"; }
+check()   { if [ "$2" = "$3" ]; then ok "$1"; else ko "$1   got [$2] expected [$3]"; fi; }
+wanted()  { [ ${#ONLY[@]} -eq 0 ] && return 0; local s; for s in "${ONLY[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
+
+# --- SQL*Plus in the container ------------------------------------------------
+sync_tree() {
+  docker exec "$CT" bash -c 'rm -rf /tmp/v4 && mkdir -p /tmp/v4' >/dev/null
+  (cd "$V4" && tar cf - op config tests) | docker exec -i "$CT" bash -c 'cd /tmp/v4 && tar xf -'
+}
+sysfile() { docker exec -w /tmp/v4 "$CT" sqlplus -L -S "$SYSCONN" "$@"; }
+# Setup SQL. Each statement on its own line: SQL*Plus ends a statement only at
+# a ';' that ENDS a line. A failure is shown and counted, never swallowed.
+sysrun()  { local out
+            out=$(printf 'SET FEEDBACK OFF\nWHENEVER SQLERROR EXIT FAILURE\n%s\nEXIT\n' "$1" \
+                    | docker exec -i -w /tmp/v4 "$CT" sqlplus -L -S "$SYSCONN" 2>&1) \
+              || ko "setup SQL failed: $(printf '%s' "$out" | grep -m1 -E 'ORA-|SP2-')"; }
+val()     { printf 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF LINESIZE 400\n%s;\nEXIT\n' "$1" \
+              | docker exec -i -w /tmp/v4 "$CT" sqlplus -L -S "$SYSCONN" | tr -d '[:space:]'; }
+# docker is a Windows program: hand it a Windows path, not a Git Bash one.
+put_inventory() { docker cp "$(cygpath -w "$1")" "$CT:/tmp/v4/inv.sql" >/dev/null; }
+
+# run MODE "ID x5" "DESC x5" "ATTR x5" APPROVE - switch order ENT PTF CPTY UNCL ACCT.
+# Output goes to $WORK/last.log; the exit code is the orchestrator's.
+RC=0
+run() {
+  local mode=$1 i d a
+  read -r -a i <<< "$2"; read -r -a d <<< "$3"; read -r -a a <<< "$4"
+  docker exec -w /tmp/v4/op "$CT" bash -c "mkdir -p logs && sqlplus -L /nolog @sql/00_run_op_anonymization.sql \
+     '$SVC' '$SYSPWD' op USERS USERS $mode ${i[*]} ${d[*]} ${a[*]} 1 n $5 /tmp/v4/inv.sql" > "$WORK/last.log" 2>&1
+  RC=$?
+}
+run_all_on() { run EXECUTE "y y y y y" "y y y y y" "y y y y y" y; }
+verify()     { docker exec -w /tmp/v4/op "$CT" sqlplus -L -S "op/op@$SVC" @verify/verify_op_coverage.sql \
+                 > "$WORK/verify.log" 2>&1
+               RC=$?; }
+# Counts the PASS/FAIL lines an assertion script prints. Read through a process
+# substitution, not a pipe, so the counters are updated in THIS shell.
+asserts()    { local line
+               while IFS= read -r line; do
+                  case "$line" in PASS*) PASSED=$((PASSED + 1)) ;; FAIL*) FAILED=$((FAILED + 1)) ;; esac
+                  say "$line"
+               done < <(sysfile "$@" | grep -E '^(PASS|FAIL)'); }
+fresh()      { sysfile @tests/regression/fixture_schema.sql >/dev/null && sysfile @tests/regression/fixture_data.sql >/dev/null; }
+# Raw data again, the metadata kept: what a re-import of the same client does.
+reload_raw() {
+  sysrun "BEGIN
+            FOR t IN (SELECT table_name FROM dba_tables WHERE owner = 'OP' AND table_name <> 'ANON_FIXTURE_MARKER') LOOP
+               EXECUTE IMMEDIATE 'DELETE FROM op.' || t.table_name;
+            END LOOP;
+            COMMIT;
+          END;
+          /"
+  sysfile @tests/regression/fixture_data.sql >/dev/null
+}
+
+# --- Setup --------------------------------------------------------------------
+section "setup"
+docker exec "$CT" true 2>/dev/null || { say "container $CT is not running - see README.md"; exit 1; }
+powershell.exe -NoProfile -Command "& '$(cygpath -w "$V4/op/run_op_anonymization.bat")' /inventory '$(cygpath -w "$INV")'" >/dev/null \
+  || { say "could not build the inventory with run_op_anonymization.bat /inventory"; exit 1; }
+check "the batch file builds the inventory from the shipped CSVs" "$(grep -c '^INSERT INTO anon_meta.anon_inventory' "$INV")" "575"
+sync_tree
+put_inventory "$INV"
+
+# --- S0 ---------------------------------------------------------------------------
+if wanted S0; then
+  section "S0 design checks - sections 7 and 7A (SELECT only)"
+  asserts @tests/regression/design_checks.sql
+fi
+
+# --- S1 ---------------------------------------------------------------------------
+if wanted S1; then
+  section "S1 core fixture: dry run, then every switch on"
+  fresh
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y; check "dry run completes" "$RC" "0"
+  check "dry run changed nothing" "$(val "SELECT COUNT(*) FROM op.tiers WHERE code = 'ENTN'")" "1"
+  check "dry run persisted no mapping and froze no classification" \
+        "$(val "SELECT (SELECT COUNT(*) FROM anon_meta.code_map) + (SELECT COUNT(*) FROM anon_meta.identity_inventory) FROM dual")" "0"
+  check "dry run estimated against its plan (tiers.code: 15 rows)" \
+        "$(grep -c 'tiers.code[[:space:]]*DRYRUN[[:space:]]*15 rows would change' "$WORK/last.log")" "1"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  verify;     check "verification: PASS" "$RC" "0"
+  asserts @tests/regression/assert_core.sql
+fi
+
+# --- S2 ---------------------------------------------------------------------------
+if wanted S2; then
+  section "S2 second run on the same data changes nothing"
+  wanted S1 || { fresh; run_all_on; }
+  sysrun "CREATE TABLE anon_meta.s2_before AS SELECT category, old_code, new_code FROM anon_meta.code_map;"
+  run_all_on; check "second EXECUTE completes" "$RC" "0"
+  check "no translation changed or was added" \
+        "$(val "SELECT COUNT(*) FROM (SELECT category, old_code, new_code FROM anon_meta.code_map
+                MINUS SELECT * FROM anon_meta.s2_before) ")" "0"
+  check "no data row rewritten" \
+        "$(val "SELECT NVL(SUM(rows_affected), 0) FROM anon_meta.anon_step_log WHERE run_id = (SELECT MAX(run_id)
+                FROM anon_meta.anon_run) AND phase IN ('CODE', 'NULL_OUT', 'DESCRIPTION', 'SELF_CODE')")" "0"
+  check "every identity found already recorded" "$(grep -c 'found this run [.]* 0[[:space:]]*already recorded 24' "$WORK/last.log")" "1"
+  verify; check "verification: PASS" "$RC" "0"
+  sysrun "DROP TABLE anon_meta.s2_before PURGE;"
+fi
+
+# --- S3 ---------------------------------------------------------------------------
+if wanted S3; then
+  section "S3 structure-only account nodes need approval"
+  fresh
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" n; check "dry run refuses: scope review" "$RC" "1"
+  run EXECUTE "y y y y y" "y y y y y" "y y y y y" n; check "EXECUTE refuses before any update" "$RC" "1"
+  check "the refusal names the scope decision" "$(grep -c 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=y' "$WORK/last.log")" "1"
+  check "nothing renamed, nothing persisted" \
+        "$(val "SELECT (SELECT COUNT(*) FROM op.tiers WHERE code = 'ENTN') || '/' || (SELECT COUNT(*) FROM anon_meta.code_map)
+                || '/' || (SELECT COUNT(*) FROM anon_meta.identity_inventory) FROM dual")" "1/0/0"
+fi
+
+# --- S4 ---------------------------------------------------------------------------
+if wanted S4; then
+  section "S4 roles that cannot be established are left for review"
+  fresh; sysfile @tests/regression/fixture_review.sql >/dev/null
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "four review items logged" "$(val "SELECT COUNT(*) FROM anon_meta.anon_step_log WHERE status = 'REVIEW'
+        AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "4"
+  verify; check "verification: REVIEW REQUIRED" "$RC" "3"
+  check "other-screen nodes unchanged" "$(val "SELECT COUNT(*) FROM op.structure WHERE ecran = 'w_autre' AND code IN ('OSCN', 'EOSC')")" "2"
+  check "ambiguous parent unchanged" "$(val "SELECT COUNT(*) FROM op.structure WHERE pere = 'SHRD'")" "1"
+  check "party-and-account text unchanged in MIXED columns" \
+        "$(val "SELECT (SELECT COUNT(*) FROM op.ventiler_compte WHERE valeur_1 = 'SHRD') + (SELECT COUNT(*) FROM op.histo_operation WHERE clearing_member = 'SHRD') FROM dual")" "2"
+  check "a party seen only on another screen is X_ NO_PARTY_SCREEN" \
+        "$(val "SELECT category || '/' || x_reason FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'OSCN'")" \
+        "UNCLASSIFIED_PARTY/NO_PARTY_SCREEN"
+fi
+
+# --- S5 ---------------------------------------------------------------------------
+if wanted S5; then
+  section "S5 the eight switch combinations, every category"
+  for combo in "n n n" "n n y" "n y n" "n y y" "y n n" "y n y" "y y n" "y y y"; do
+    read -r i d a <<< "$combo"
+    fresh
+    run EXECUTE "$i $i $i $i $i" "$d $d $d $d $d" "$a $a $a $a $a" y; check "[$i/$d/$a] EXECUTE completes" "$RC" "0"
+    verify; check "[$i/$d/$a] verification: $([ "$combo" = 'y y y' ] && echo PASS || echo INCOMPLETE)" "$RC" \
+                  "$([ "$combo" = 'y y y' ] && echo 0 || echo 4)"
+    asserts @tests/regression/assert_switches.sql "$i" "$d" "$a"
+  done
+fi
+
+# --- S6 ---------------------------------------------------------------------------
+if wanted S6; then
+  section "S6 new inputs extend an existing map; nothing is renumbered"
+  fresh; run_all_on
+  sysrun "CREATE TABLE anon_meta.s6_before AS SELECT category, old_code, new_code FROM anon_meta.code_map;
+          INSERT INTO op.compte_banque (code, description) VALUES ('NEWACC', 'New account');
+          INSERT INTO op.tiers (code, flag_portefeuille, description) VALUES ('NEWPTY', 'N', 'New party');
+          INSERT INTO op.structure (code, structure, ecran) VALUES ('NEWPTY', 'Compte', 'w_tiers');
+          INSERT INTO op.compte_regle (id, entite, compte) VALUES (9, 'NEWPTY', 'NEWACC');
+          COMMIT;"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "existing translations unchanged" \
+        "$(val "SELECT COUNT(*) FROM anon_meta.s6_before b WHERE NOT EXISTS (SELECT 1 FROM anon_meta.code_map c
+                WHERE c.category = b.category AND c.old_code = b.old_code AND c.new_code = b.new_code)")" "0"
+  check "new account appended after the existing ones" \
+        "$(val "SELECT new_code FROM anon_meta.code_map WHERE category = 'BANK_ACCOUNT' AND old_code = 'NEWACC'")" "CB_0000008"
+  check "new party classified and appended" \
+        "$(val "SELECT new_code FROM anon_meta.code_map WHERE old_code = 'NEWPTY'")" "T_0000003"
+  check "its reference renamed" "$(val "SELECT entite || '/' || compte FROM op.compte_regle WHERE id = 9")" "T_0000003/CB_0000008"
+  verify; check "verification: PASS" "$RC" "0"
+  sysrun "DROP TABLE anon_meta.s6_before PURGE;"
+fi
+
+# --- S7 ---------------------------------------------------------------------------
+if wanted S7; then
+  section "S7 raw data re-imported, maps kept, one category switched off"
+  fresh; run_all_on
+  sysrun "CREATE TABLE anon_meta.s7_before AS SELECT category, old_code, new_code FROM anon_meta.code_map;"
+  reload_raw
+  run EXECUTE "n y y y y" "n y y y y" "n y y y y" y; check "EXECUTE completes" "$RC" "0"
+  check "entity identifiers kept" "$(val "SELECT COUNT(*) FROM op.tiers WHERE code IN ('ENTN', 'EOVL', 'EDUP', 'SHRD', 'Z')")" "5"
+  check "entity labels kept" "$(val "SELECT description FROM op.tiers WHERE code = 'ENTN'")" "EntityNLtd"
+  check "the other categories reuse their earlier translations" \
+        "$(val "SELECT COUNT(*) FROM op.tiers t JOIN anon_meta.s7_before b ON b.new_code = t.code AND b.category <> 'ENTITY'")" "10"
+  check "entity translations preserved, not used" "$(val "SELECT COUNT(*) FROM anon_meta.code_map WHERE category = 'ENTITY'")" "5"
+  check "EPF no longer lists the kept entities" \
+        "$(val "SELECT COUNT(*) FROM atrace.ref_tables_modif r JOIN anon_meta.code_map c ON c.new_code = r.new_value AND c.category = 'ENTITY'")" "0"
+  verify; check "verification: INCOMPLETE" "$RC" "4"
+  sysrun "DROP TABLE anon_meta.s7_before PURGE;"
+fi
+
+# --- S8 ---------------------------------------------------------------------------
+if wanted S8; then
+  section "S8 X_ party whose master data is repaired later keeps its X_"
+  fresh; run_all_on
+  x_before="$(val "SELECT new_code FROM anon_meta.code_map WHERE category = 'UNCLASSIFIED_PARTY' AND old_code = 'NSTN'")"
+  reload_raw
+  sysrun "INSERT INTO op.structure (code, structure, ecran) VALUES ('NSTN', 'Entite', 'w_tiers');
+          COMMIT;"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "recorded category kept" "$(val "SELECT category FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'NSTN'")" "UNCLASSIFIED_PARTY"
+  check "master and new node carry the same X_" \
+        "$(val "SELECT (SELECT COUNT(*) FROM op.tiers WHERE code = '$x_before') + (SELECT COUNT(*) FROM op.structure WHERE code = '$x_before') FROM dual")" "2"
+  check "no second translation for it" "$(val "SELECT COUNT(*) FROM anon_meta.code_map WHERE old_code = 'NSTN'")" "1"
+  check "the drift is reported" "$(grep -c 'would be classified differently today' "$WORK/last.log")" "1"
+  verify; check "verification: REVIEW REQUIRED (drift)" "$RC" "3"
+fi
+
+# --- S9 ---------------------------------------------------------------------------
+if wanted S9; then
+  section "S9 data already anonymized, mapping lost"
+  fresh
+  sysrun "UPDATE op.tiers SET code = 'E_0000001' WHERE code = 'ENTN';
+          COMMIT;"
+  run_all_on; check "EXECUTE refuses before any update" "$RC" "1"
+  check "the refusal says why" "$(grep -c 'already anonymized without' "$WORK/last.log")" "1"
+  check "nothing renamed" "$(val "SELECT COUNT(*) FROM op.tiers WHERE code LIKE '%\_0%' ESCAPE '\'")" "1"
+fi
+
+# --- S10 --------------------------------------------------------------------------
+if wanted S10; then
+  section "S10 data anonymized by the previous version - provenance not trusted"
+  fresh
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y      # creates anon_meta
+  sysrun "INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('ENTITY', 'ENTN', 'E_0000099');
+          INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('BANK_ACCOUNT', 'SHRD', 'CB_0000099');
+          UPDATE op.tiers SET code = 'CB_0000099' WHERE code = 'SHRD';
+          COMMIT;"
+  run_all_on; check "EXECUTE refuses: a party master holds an account replacement" "$RC" "1"
+  check "the refusal says why" "$(grep -c 'not their own domain' "$WORK/last.log")" "1"
+fi
+
+# --- S11 --------------------------------------------------------------------------
+if wanted S11; then
+  section "S11 maps left by the previous version, on raw data"
+  fresh
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y
+  sysrun "INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('ENTITY', 'CPTC', 'E_0000050');
+          INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('COUNTERPARTY', 'CPTC', 'T_0000050');
+          INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('COUNTERPARTY', 'NMCP', 'T_0000070');
+          COMMIT;"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "two earlier translations: the one matching the category is reused" \
+        "$(val "SELECT new_value FROM atrace.ref_tables_modif WHERE table_name = 'tiers' AND old_value = 'CPTC'")" "T_0000050"
+  check "the other one is superseded, never used" "$(val "SELECT COUNT(*) FROM op.tiers WHERE code = 'E_0000050'")" "0"
+  check "a single earlier translation is kept even if the category changed" \
+        "$(val "SELECT COUNT(*) FROM op.structure WHERE code = 'T_0000070'")" "1"
+  check "new translations continue after the existing numbers" \
+        "$(val "SELECT new_code FROM anon_meta.code_map WHERE category = 'COUNTERPARTY' AND old_code = 'CPTN'")" "T_0000071"
+  verify; check "verification: REVIEW REQUIRED (recorded category differs)" "$RC" "3"
+fi
+
+# --- S12 --------------------------------------------------------------------------
+if wanted S12; then
+  section "S12 incompatible earlier party maps stop the run"
+  fresh
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y
+  sysrun "INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('ENTITY', 'NMCP', 'E_0000060');
+          INSERT INTO anon_meta.code_map (category, old_code, new_code) VALUES ('COUNTERPARTY', 'NMCP', 'T_0000060');
+          COMMIT;"
+  run_all_on; check "EXECUTE refuses before any update" "$RC" "1"
+  check "the refusal says why" "$(grep -c 'none matches their category' "$WORK/last.log")" "1"
+fi
+
+# --- S13 --------------------------------------------------------------------------
+if wanted S13; then
+  section "S13 the previous version's metadata schema is migrated in place"
+  fresh; sysfile @tests/regression/legacy_metadata.sql >/dev/null
+  run_all_on; check "EXECUTE completes on migrated metadata" "$RC" "0"
+  check "code_map gained run_id and id_applied" \
+        "$(val "SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META' AND table_name = 'CODE_MAP' AND column_name IN ('RUN_ID', 'ID_APPLIED')")" "2"
+  check "the untyped code_map_any is gone" "$(val "SELECT COUNT(*) FROM dba_tables WHERE owner = 'ANON_META' AND table_name = 'CODE_MAP_ANY'")" "0"
+  check "the inventory accepts the new categories" \
+        "$(val "SELECT COUNT(*) FROM anon_meta.anon_inventory WHERE category IN ('PARTY', 'MIXED', 'NODE_ROLE')")" "396"
+  check "the earlier run record is kept" "$(val "SELECT COUNT(*) FROM anon_meta.anon_run WHERE config_json LIKE '%min_code_length%'")" "1"
+  verify; check "verification: PASS" "$RC" "0"
+fi
+
+# --- S14 --------------------------------------------------------------------------
+if wanted S14; then
+  section "S14 the inventory is validated, every listed column processed"
+  inv_with() { cp "$INV" "$WORK/inv_extra.sql"; sed -i '/^COMMIT;/d;/^SET DEFINE ON/d' "$WORK/inv_extra.sql"
+               printf '%s\nCOMMIT;\nSET DEFINE ON\n' "$1" >> "$WORK/inv_extra.sql"; put_inventory "$WORK/inv_extra.sql"; }
+  row() { printf "INSERT INTO anon_meta.anon_inventory (table_name,column_name,rule,category,source,notes,seq) VALUES ('%s','%s','%s','%s','CUSTOM',NULL,%s);" "$@"; }
+
+  fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE ANY 9001)"
+  run_all_on; check "ANY is refused" "$RC" "1"
+  check "  ... with the rows named" "$(grep -c 'ANY is no longer accepted' "$WORK/last.log")" "1"
+
+  fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE ENTITY 9001)"
+  run_all_on; check "a single party category on CODE is refused" "$RC" "1"
+
+  fresh; inv_with "DELETE FROM anon_meta.anon_inventory WHERE table_name = 'TIERS' AND column_name = 'CODE'; $(row TIERS CODE CODE BANK_ACCOUNT 9001)"
+  run_all_on; check "tiers.code as BANK_ACCOUNT is refused" "$RC" "1"
+
+  fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE PARTY 9001)"
+  run_all_on; check "a replacement that cannot fit stops preflight" "$RC" "1"
+  check "  ... reported, not skipped" "$(grep -c 'TOO NARROW  anon_fixture_extra.one_char' "$WORK/last.log")" "1"
+
+  fresh; inv_with "$(row ANON_FIXTURE_EXTRA LOCKED_NUM NULL_OUT NONE 9001)"
+  run_all_on; check "a NOT NULL number with no masking value stops preflight" "$RC" "1"
+
+  fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR NULL_OUT NONE 9001)"
+  run_all_on; check "a one-character free-text column is processed" "$RC" "0"
+  check "  ... and emptied, not skipped as a checkbox" "$(val "SELECT NVL(one_char, '<empty>') FROM op.anon_fixture_extra")" "<empty>"
+  verify; check "  ... and verified" "$RC" "0"
+
+  put_inventory "$INV"
+fi
+
+# --- S15 --------------------------------------------------------------------------
+if wanted S15; then
+  section "S15 a switch that is neither y nor n stops the run"
+  fresh
+  run EXECUTE "y maybe y y y" "y y y y y" "y y y y y" y; check "refused" "$RC" "1"
+  check "  ... naming the switch" "$(grep -c 'ANONYMIZE_PORTFOLIO must be y or n' "$WORK/last.log")" "1"
+  check "nothing renamed" "$(val "SELECT COUNT(*) FROM op.tiers WHERE code = 'ENTN'")" "1"
+fi
+
+# --- S16 --------------------------------------------------------------------------
+if wanted S16; then
+  section "S16 a confirmed reference-only party"
+  fresh
+  sysrun "INSERT INTO op.histo_operation (id, entite, contrepartie) VALUES (16, 'ENTN', 'GONE');
+          COMMIT;"
+  run_all_on; verify
+  check "unconfirmed: the dangling reference is only a warning" \
+        "$(val "SELECT COUNT(*) FROM anon_meta.verify_result WHERE status = 'WARN' AND check_name LIKE 'values that are no%'")" "1"
+  check "  ... and stays as it is" "$(val "SELECT contrepartie FROM op.histo_operation WHERE id = 16")" "GONE"
+  sysrun "INSERT INTO anon_meta.confirmed_identity (domain, old_code, note) VALUES ('PARTY', 'GONE', 'regression');
+          COMMIT;"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "confirmed: classified X_ with no master, found only as a reference" \
+        "$(val "SELECT category || '/' || x_reason || '/' || membership FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'GONE'")" \
+        "UNCLASSIFIED_PARTY/MISSING_MASTER/REFERENCE_ONLY"
+  check "  ... and its reference renamed" \
+        "$(val "SELECT COUNT(*) FROM op.histo_operation h JOIN anon_meta.code_map c ON c.new_code = h.contrepartie AND c.old_code = 'GONE' WHERE h.id = 16")" "1"
+  verify; check "verification: PASS" "$RC" "0"
+fi
+
+# --- S17 --------------------------------------------------------------------------
+if wanted S17; then
+  section "S17 resume after a run that stopped partway"
+  fresh; run_all_on
+  # Put some originals back, as if the run had stopped before reaching them:
+  # a reference, an account node and a party master.
+  sysrun "UPDATE op.histo_operation SET entite = 'ENTN' WHERE id = 1;
+          UPDATE op.structure SET code = 'SHRD' WHERE structure = 'Compte' AND ecran = 'w_compte_banque'
+             AND code = (SELECT new_code FROM anon_meta.code_map WHERE category = 'BANK_ACCOUNT' AND old_code = 'SHRD');
+          UPDATE op.tiers SET code = 'CPTC' WHERE code = (SELECT new_code FROM anon_meta.code_map WHERE category = 'COUNTERPARTY' AND old_code = 'CPTC');
+          COMMIT;"
+  run_all_on; check "the resumed run completes" "$RC" "0"
+  check "no identity was classified again" "$(grep -c 'found this run [.]* 0[[:space:]]' "$WORK/last.log")" "1"
+  check "the restored originals got the same translations" \
+        "$(val "SELECT (SELECT COUNT(*) FROM op.histo_operation h JOIN anon_meta.code_map c ON c.new_code = h.entite
+                         WHERE h.id = 1 AND c.old_code = 'ENTN' AND c.category = 'ENTITY')
+                    + (SELECT COUNT(*) FROM op.structure s JOIN anon_meta.code_map c ON c.new_code = s.code
+                         WHERE s.ecran = 'w_compte_banque' AND c.old_code = 'SHRD' AND c.category = 'BANK_ACCOUNT')
+                    + (SELECT COUNT(*) FROM op.tiers t JOIN anon_meta.code_map c ON c.new_code = t.code
+                         WHERE c.old_code = 'CPTC' AND c.category = 'COUNTERPARTY') FROM dual")" "3"
+  verify; check "verification: PASS" "$RC" "0"
+fi
+
+# --- Result ---------------------------------------------------------------------
+section "result"
+say "passed $PASSED, failed $FAILED"
+rm -rf "$WORK"
+[ "$FAILED" -eq 0 ]

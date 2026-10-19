@@ -46,6 +46,14 @@ tbody tr:last-child td{border-bottom:none}
 </head><body><div class="wrap">
 <h1 id="op-anonymization-technical-guide">OP Anonymization — Technical Guide</h1>
 <p><strong>KTP Payment Factory · OP schema · version 4</strong></p>
+<blockquote><p><strong>Out of date in parts — being rewritten.</strong> This guide describes v4 before the typed-identity fix of 2026-10-20. Where it disagrees with the following, the following is right — and so are <code>config/anonymization.template.ini</code> and the headers of the two inventory CSVs:</p>
+<ul>
+<li><strong>Identifiers are typed.</strong> Every party — entity <code>E_</code>, portfolio <code>P_</code>, counterparty <code>T_</code>, and the new <em>unclassified party</em> <code>X_</code>, with the reason recorded — and every bank account <code>CB_</code> is classified once, from the data, before anything changes. A column only ever receives the translation of the domain it holds: <code>PARTY</code>, <code>BANK_ACCOUNT</code>, <code>MIXED</code> (reviewed columns holding both) or <code>NODE_ROLE</code> (the structure tree, by each node's role). The category <code>ANY</code> is gone.</li>
+<li><strong>The three switches of a category are independent.</strong> <code>ANONYMIZE_&lt;CATEGORY&gt;</code> renames identifiers only; <code>_DESCRIPTION</code> and <code>_ATTRIBUTES</code> mask labels and attributes even when the identifier is kept. Five categories, every switch on by default.</li>
+<li><strong>No checkbox exceptions.</strong> <code>MIN_CODE_LENGTH</code> and the one-character column rule are gone: every listed column is processed, a one-character identifier is anonymized like any other, and a column that must not be touched is left out of the inventory.</li>
+<li><strong>A new scope decision</strong>, <code>APPROVE_STRUCTURE_ONLY_ACCOUNTS</code>, for account nodes that have no <code>compte_banque</code> row.</li>
+<li><strong>Four verdicts</strong>: PASS, FAIL, REVIEW REQUIRED, INCOMPLETE — exit codes 0, 2, 3, 4.</li>
+</ul></blockquote>
 <p>Everything needed to understand, operate, maintain and extend the tool. For the shorter run-it-and-go instructions, read the <em>OP Anonymization — User Guide</em>.</p>
 <hr>
 <h2 id="contents">Contents</h2>

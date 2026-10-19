@@ -1,0 +1,4 @@
+# Shell scripts must keep LF on every checkout: bash fails on CR line endings.
+*.sh  text eol=lf
+# cmd resolves goto/call labels unreliably in LF-only batch files.
+*.bat text eol=crlf

@@ -12,47 +12,81 @@
 #   Everything is case-insensitive.
 #
 # RULE:
-#   CODE        Replace the identifier using anon_meta.code_map.
-#   NULL_OUT    Free text / PII -> NULL. ALWAYS applied, never configurable.
-#   DESCRIPTION Label column -> the row's own new code (keeps the UI readable).
-#   SELF_CODE   Per-entity PII attribute -> the row's own new code.
+#   CODE        Replace the identifier with its typed translation.
+#   NULL_OUT    Free text / PII -> NULL (a marker if NOT NULL). ALWAYS applied.
+#   DESCRIPTION Label -> the owning identity's replacement (keeps the UI
+#               readable).
+#   SELF_CODE   Sensitive attribute -> the owning identity's replacement. An
+#               empty field stays empty.
 #
-# CATEGORY:
-#   ANY           Column may hold entity, portfolio or counterparty codes.
-#                 Mapping is searched unrestricted.
-#   BANK_ACCOUNT  Column references compte_banque.code. Mapping is RESTRICTED
-#                 to bank-account codes, because a compte_banque.code can be
-#                 textually identical to a tiers.code and would otherwise be
-#                 rewritten with the wrong mapping.
-#   ENTITY /      Owning category for DESCRIPTION and SELF_CODE rules; selects
-#   PORTFOLIO /   which ANONYMIZE_<CATEGORY>_DESCRIPTION flag gates the column.
-#   COUNTERPARTY
-#   NONE          NULL_OUT only. Free text is never category-dependent.
+# Every listed column is processed by its rule. Nothing is skipped because it
+# is narrow or its values are short: a column that must NOT be touched is left
+# out of this file, commented, with the reason - never guessed from its width.
+# If a rule cannot fit its column, preflight stops the run.
+#
+# ----------------------------------------------------------------------------
+# IDENTITIES AND DOMAINS
+# ----------------------------------------------------------------------------
+# Every original identifier belongs to one DOMAIN and is classified once, from
+# the data, into one category:
+#
+#   PARTY    tiers.code, the w_tiers structure nodes, confirmed references
+#              ENTITY E_ . PORTFOLIO P_ . COUNTERPARTY T_ .
+#              UNCLASSIFIED_PARTY X_ (the data cannot say which; reason kept)
+#   ACCOUNT  compte_banque.code, the Compte/w_compte_banque structure nodes
+#              BANK_ACCOUNT CB_
+#
+# The same text can be a party AND an account. They are different objects:
+# each keeps its own replacement, and a column only ever receives the
+# translation of the domain it holds.
+#
+# CATEGORY on a CODE row - which domain the column holds:
+#   PARTY         party identifiers only. Never a bank account's replacement.
+#   BANK_ACCOUNT  bank-account identifiers only. Never a party's replacement.
+#   MIXED         reviewed columns that hold either. A value known in one
+#                 domain takes that translation; a value that is a party AND
+#                 an account is left unchanged and reported for review.
+#   NODE_ROLE     structure.code and structure.pere only. Each node takes the
+#                 translation of its own role (account node / party node);
+#                 pere takes its parent's. Other screens are left unchanged
+#                 and reported for review.
+#
+# CATEGORY on a DESCRIPTION or SELF_CODE row - who owns the row:
+#   PARTY / BANK_ACCOUNT / NODE_ROLE (structure), or one party category
+#   (ENTITY, PORTFOLIO, COUNTERPARTY, UNCLASSIFIED_PARTY) to limit a column
+#   to the owners of that category.
+#
+# NONE            NULL_OUT only. Free text is never category-dependent.
+#
+# ANY is no longer accepted: it meant "whichever category's mapping matches the
+# text", which is how a party received a bank account's replacement.
+#
+# HOW EACH COLUMN WAS TYPED (2026-10-20). From two independent sources: which
+# branch of the original vendor package (02pack_anonym_number.sql) updated the
+# column - the party branches, the account branch, or both - and whether v3
+# restricted it to bank accounts. Not from the column name.
+#   party branches only, or a v4 addition naming a party ........ PARTY
+#   account branch only, or restricted to accounts by v3 ......... BANK_ACCOUNT
+#   both, or a known analytical field ............................ MIXED
 #
 # ----------------------------------------------------------------------------
 # WHAT anonymization.ini CAN AND CANNOT SWITCH OFF
 # ----------------------------------------------------------------------------
-# The flags do NOT filter this file by table. Only PART B below - 8 rows out of
-# 562 - can be turned off by a flag.
+# The switches do NOT filter this file by table. They act per identity, by its
+# category:
 #
-#   PART A   applied on every run, no flag can disable it
-#     CODE       462 rows   The flags act on the MAPPING, not on this list. A
-#                           disabled category has no rows in anon_meta.code_map,
-#                           so these statements still run but find nothing of
-#                           that category to substitute. Filtering happens per
-#                           VALUE, not per table or column.
-#     NULL_OUT    92 rows   Never optional. Free text is the highest-risk
+#   CODE         459 rows   ANONYMIZE_<CATEGORY> - an identity whose renaming
+#                           is off keeps its original code in every column.
+#   DESCRIPTION    3 rows   ANONYMIZE_<CATEGORY>_DESCRIPTION
+#   SELF_CODE      5 rows   ANONYMIZE_<CATEGORY>_ATTRIBUTES
+#   NULL_OUT      92 rows   Never optional. Free text is the highest-risk
 #                           category and the least useful to preserve.
 #
-#   PART B   switchable
-#     DESCRIPTION  3 rows   ANONYMIZE_<CATEGORY>_DESCRIPTION
-#     SELF_CODE    5 rows   ANONYMIZE_<CATEGORY>_ATTRIBUTES
+# The three switches of a category are independent: labels and attributes can
+# be masked while the identifier itself is kept.
 #
 # To exclude a specific table or column, comment its line out here. That is the
-# per-column control; the flags are the per-category control.
-#
-# Review of which rows SHOULD be flag-gated is open - see
-# docs/08_open_questions.md.
+# per-column control; the switches are the per-category control.
 #
 # To extend coverage, prefer config/inventory_op_custom.csv - it survives
 # upgrades of this file.
@@ -63,9 +97,10 @@ table_name,column_name,rule,category,source,notes
 # ############################################################################
 # ############################################################################
 # ##                                                                        ##
-# ##   PART A - ALWAYS APPLIED   (sections 1 to 8)                          ##
+# ##   PART A - IDENTIFIERS AND FREE TEXT   (sections 1 to 8)               ##
 # ##                                                                        ##
-# ##   No flag in anonymization.ini can switch any of this off.             ##
+# ##   CODE rows follow ANONYMIZE_<CATEGORY> of each identity they hold.    ##
+# ##   NULL_OUT rows are always applied.                                    ##
 # ##   Comment out a line to exclude it.                                    ##
 # ##                                                                        ##
 # ############################################################################
@@ -73,168 +108,184 @@ table_name,column_name,rule,category,source,notes
 
 # ============================================================================
 # SECTION 1 - CORE REFERENCE TABLES
-# The entity master tables. Everything else references these.
+# The party and account master tables. Everything else references these.
+#
+# structure holds BOTH kinds of node - a party node on the w_tiers screen, an
+# account node as Compte on w_compte_banque - so neither of its code columns
+# can have one domain. NODE_ROLE types each row by its own role, and pere by
+# its parent's, decided before anything is renamed. A node on any other screen
+# is left unchanged and reported for review.
 # ============================================================================
-structure,code,CODE,ANY,BASE,
-structure,pere,CODE,ANY,BASE,
-tiers,code,CODE,ANY,BASE,
-tiers,entite_pere,CODE,ANY,BASE,
-tiers,entite_fifo,CODE,ANY,BASE,
-tiers,tiers_conso,CODE,ANY,BASE,
-tiers,tiers_federateur,CODE,ANY,BASE,
-tiers,tiers_conso2,CODE,ANY,BASE,
-tiers,tiers_conso3,CODE,ANY,BASE,
+structure,code,CODE,NODE_ROLE,BASE,Each node takes its own role's translation
+structure,pere,CODE,NODE_ROLE,BASE,The parent's typed translation - never the child's
+tiers,code,CODE,PARTY,BASE,
+tiers,entite_pere,CODE,PARTY,BASE,
+tiers,entite_fifo,CODE,PARTY,BASE,
+tiers,tiers_conso,CODE,PARTY,BASE,
+tiers,tiers_federateur,CODE,PARTY,BASE,
+tiers,tiers_conso2,CODE,PARTY,BASE,
+tiers,tiers_conso3,CODE,PARTY,BASE,
 compte_banque,code,CODE,BANK_ACCOUNT,BASE,
-compte_banque,code_bban,CODE,BANK_ACCOUNT,BASE,
-compte_banque,agence,CODE,ANY,BASE,
-compte_banque,banque,CODE,ANY,BASE,
-compte_banque,entite,CODE,ANY,BASE,
-compte_banque,portefeuille_defaut,CODE,ANY,BASE,
+# KNOWN GAP, not covered by this row: a BBAN is an account NUMBER, never a
+# compte_banque.code, so this lookup cannot match and the column keeps real
+# account numbers. Needs a field-specific rule - see inventory_op_custom.csv.
+compte_banque,code_bban,CODE,BANK_ACCOUNT,BASE,Never matches - BBAN values need their own rule
+compte_banque,agence,CODE,PARTY,BASE,
+compte_banque,banque,CODE,PARTY,BASE,
+compte_banque,entite,CODE,PARTY,BASE,
+compte_banque,portefeuille_defaut,CODE,PARTY,BASE,
 compte_banque,compte_previs_glob,CODE,BANK_ACCOUNT,BASE,
 
 # ============================================================================
 # SECTION 2 - PARAMETER / CONFIGURATION TABLES
 # Small tables holding rules, mappings and settings that reference entities.
 # ============================================================================
-param_marge_titre,entite,CODE,ANY,BASE,
-ccp_breakdown,clearing_member,CODE,ANY,BASE,
-clearing_member_breakdown,clearing_member,CODE,ANY,BASE,
-budget_filtre,entite,CODE,ANY,BASE,
-budget_regle,entite,CODE,ANY,BASE,
-compte_devise,entite,CODE,ANY,BASE,
+param_marge_titre,entite,CODE,PARTY,BASE,
+ccp_breakdown,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+clearing_member_breakdown,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+budget_filtre,entite,CODE,PARTY,BASE,
+budget_regle,entite,CODE,PARTY,BASE,
+compte_devise,entite,CODE,PARTY,BASE,
 compte_devise,compte,CODE,BANK_ACCOUNT,BASE,
-compte_filiale,filiale,CODE,ANY,BASE,
-compte_filiale,entite,CODE,ANY,BASE,
+compte_filiale,filiale,CODE,PARTY,BASE,
+compte_filiale,entite,CODE,PARTY,BASE,
 compte_filiale,compte,CODE,BANK_ACCOUNT,BASE,
-compte_regle,contrepartie,CODE,ANY,BASE,
-compte_regle,entite,CODE,ANY,BASE,
-compte_regle,portefeuille,CODE,ANY,BASE,
-compte_regle,depositaire,CODE,ANY,BASE,
+compte_regle,contrepartie,CODE,PARTY,BASE,
+compte_regle,entite,CODE,PARTY,BASE,
+compte_regle,portefeuille,CODE,PARTY,BASE,
+compte_regle,depositaire,CODE,PARTY,BASE,
 compte_regle,compte,CODE,BANK_ACCOUNT,BASE,
-compte_regle_bqe,correspondant,CODE,ANY,BASE,
-compte_regle_bqe,contrepartie,CODE,ANY,BASE,
-compte_regle_bqe,portefeuille,CODE,ANY,BASE,
-compte_regle_bqe,depositaire,CODE,ANY,BASE,
-compte_regle_bqe,entite,CODE,ANY,BASE,
+compte_regle_bqe,correspondant,CODE,PARTY,BASE,
+compte_regle_bqe,contrepartie,CODE,PARTY,BASE,
+compte_regle_bqe,portefeuille,CODE,PARTY,BASE,
+compte_regle_bqe,depositaire,CODE,PARTY,BASE,
+compte_regle_bqe,entite,CODE,PARTY,BASE,
 compte_regle_bqe,compte,CODE,BANK_ACCOUNT,BASE,
-compte_regle_liv,contrepartie,CODE,ANY,BASE,
-compte_regle_liv,entite,CODE,ANY,BASE,
-compte_regle_liv,portefeuille,CODE,ANY,BASE,
-compte_regle_liv,depositaire,CODE,ANY,BASE,
+compte_regle_liv,contrepartie,CODE,PARTY,BASE,
+compte_regle_liv,entite,CODE,PARTY,BASE,
+compte_regle_liv,portefeuille,CODE,PARTY,BASE,
+compte_regle_liv,depositaire,CODE,PARTY,BASE,
 compte_regle_liv,compte,CODE,BANK_ACCOUNT,BASE,
-compte_titre,depositaire,CODE,ANY,BASE,
-compte_titre,entite,CODE,ANY,BASE,
-contrat,emetteur,CODE,ANY,BASE,
-contrat_cadre,entite,CODE,ANY,BASE,
-contrat_cadre,federateur,CODE,ANY,BASE,
+compte_titre,depositaire,CODE,PARTY,BASE,
+compte_titre,entite,CODE,PARTY,BASE,
+contrat,emetteur,CODE,PARTY,BASE,
+contrat_cadre,entite,CODE,PARTY,BASE,
+contrat_cadre,federateur,CODE,PARTY,BASE,
 contrat_cadre,compte_echelle,CODE,BANK_ACCOUNT,BASE,
-contrat_instrument,entite,CODE,ANY,BASE,
-contrat_instrument,federateur,CODE,ANY,BASE,
-ctpyrating,counterparty,CODE,ANY,BASE,
-deposit_fils,portefeuille,CODE,ANY,BASE,
-deposit_fils,portefeuille_pere,CODE,ANY,BASE,
-deposit_pere,portefeuille,CODE,ANY,BASE,
-deposit_pere,portefeuille_depo,CODE,ANY,BASE,
-echelle,entite_mere,CODE,ANY,BASE,
-echelle,portefeuille_mere,CODE,ANY,BASE,
+contrat_instrument,entite,CODE,PARTY,BASE,
+contrat_instrument,federateur,CODE,PARTY,BASE,
+ctpyrating,counterparty,CODE,PARTY,BASE,
+deposit_fils,portefeuille,CODE,PARTY,BASE,
+deposit_fils,portefeuille_pere,CODE,PARTY,BASE,
+deposit_pere,portefeuille,CODE,PARTY,BASE,
+deposit_pere,portefeuille_depo,CODE,PARTY,BASE,
+echelle,entite_mere,CODE,PARTY,BASE,
+echelle,portefeuille_mere,CODE,PARTY,BASE,
 echelle,compte_reglement,CODE,BANK_ACCOUNT,BASE,
-echelle_condition,code,CODE,ANY,BASE,
-echelle_cond_date,condition,CODE,ANY,BASE,
+echelle_condition,code,CODE,PARTY,BASE,
+echelle_cond_date,condition,CODE,PARTY,BASE,
 echelle_compte,compte,CODE,BANK_ACCOUNT,BASE,
-echelle_marge,condition,CODE,ANY,BASE,
-fifo_solde_depo,compensateur,CODE,ANY,BASE,
-fifo_solde_depo,depositaire,CODE,ANY,BASE,
-fifo_solde_depo,portefeuille,CODE,ANY,BASE,
-frais_gestion,portefeuille,CODE,ANY,BASE,
-groupe_detail,portefeuille,CODE,ANY,BASE,
-groupe_provision,entite,CODE,ANY,BASE,
+echelle_marge,condition,CODE,PARTY,BASE,
+fifo_solde_depo,compensateur,CODE,PARTY,BASE,
+fifo_solde_depo,depositaire,CODE,PARTY,BASE,
+fifo_solde_depo,portefeuille,CODE,PARTY,BASE,
+frais_gestion,portefeuille,CODE,PARTY,BASE,
+groupe_detail,portefeuille,CODE,PARTY,BASE,
+groupe_provision,entite,CODE,PARTY,BASE,
 decouvert_compte,compte,CODE,BANK_ACCOUNT,BASE,
-marge_compte_de,contrepartie,CODE,ANY,BASE,
-marge_regle,contrepartie,CODE,ANY,BASE,
-marge_regle,entite,CODE,ANY,BASE,
-param_arrete,entite,CODE,ANY,BASE,
-param_bafi_cpt,entite,CODE,ANY,BASE,
-param_clonage,por_maitre,CODE,ANY,BASE,
-param_clonage,por_clone,CODE,ANY,BASE,
-param_cpta_reg_gen,portefeuille,CODE,ANY,BASE,
-param_cpta_reg_gen,compte_ana,CODE,BANK_ACCOUNT,BASE,
-param_cpta_reg_ven,banque,CODE,ANY,BASE,
-param_cpta_reg_ven,entite,CODE,ANY,BASE,
-param_cpta_reg_ven,portefeuille,CODE,ANY,BASE,
+marge_compte_de,contrepartie,CODE,PARTY,BASE,
+marge_regle,contrepartie,CODE,PARTY,BASE,
+marge_regle,entite,CODE,PARTY,BASE,
+param_arrete,entite,CODE,PARTY,BASE,
+param_bafi_cpt,entite,CODE,PARTY,BASE,
+param_clonage,por_maitre,CODE,PARTY,BASE,
+param_clonage,por_clone,CODE,PARTY,BASE,
+param_cpta_reg_gen,portefeuille,CODE,PARTY,BASE,
+param_cpta_reg_gen,compte_ana,CODE,MIXED,BASE,MIXED - analytical account. Held party codes on TANM7881 (was BANK_ACCOUNT)
+param_cpta_reg_ven,banque,CODE,PARTY,BASE,
+param_cpta_reg_ven,entite,CODE,PARTY,BASE,
+param_cpta_reg_ven,portefeuille,CODE,PARTY,BASE,
 param_cpta_reg_ven,compte,CODE,BANK_ACCOUNT,BASE,
-param_date,portefeuille,CODE,ANY,BASE,
-param_date,contrepartie,CODE,ANY,BASE,
+param_date,portefeuille,CODE,PARTY,BASE,
+param_date,contrepartie,CODE,PARTY,BASE,
 param_effet_paye,compte,CODE,BANK_ACCOUNT,BASE,
 param_effet_recu,compte,CODE,BANK_ACCOUNT,BASE,
-param_fiche_val_detail,code,CODE,ANY,BASE,
-param_garanti_taux,assureur,CODE,ANY,BASE,
+param_fiche_val_detail,code,CODE,BANK_ACCOUNT,BASE,Account branch only in the vendor package (was ANY)
+param_garanti_taux,assureur,CODE,PARTY,BASE,
 param_net_reg,compte_comp,CODE,BANK_ACCOUNT,BASE,
 param_net_reg,compte_pivot,CODE,BANK_ACCOUNT,BASE,
-param_ope_bloc,portefeuille_pere,CODE,ANY,BASE,
-param_ope_bloc,portefeuille_fils,CODE,ANY,BASE,
-param_parapheur_det,filiale,CODE,ANY,BASE,
-param_rappro_stock,depositaire,CODE,ANY,BASE,
-param_sign_user,filiale,CODE,ANY,BASE,
-photo,entite,CODE,ANY,BASE,
-photo_budget,entite,CODE,ANY,BASE,
-photo_flux,entite,CODE,ANY,BASE,
-prevision_param,entite,CODE,ANY,BASE,
+param_ope_bloc,portefeuille_pere,CODE,PARTY,BASE,
+param_ope_bloc,portefeuille_fils,CODE,PARTY,BASE,
+param_parapheur_det,filiale,CODE,PARTY,BASE,
+param_rappro_stock,depositaire,CODE,PARTY,BASE,
+param_sign_user,filiale,CODE,PARTY,BASE,
+photo,entite,CODE,PARTY,BASE,
+photo_budget,entite,CODE,PARTY,BASE,
+photo_flux,entite,CODE,PARTY,BASE,
+prevision_param,entite,CODE,PARTY,BASE,
 prevision_param,compte,CODE,BANK_ACCOUNT,BASE,
-regle_rappro_auto,banque,CODE,ANY,BASE,
-regle_rappro_auto,entite,CODE,ANY,BASE,
+regle_rappro_auto,banque,CODE,PARTY,BASE,
+regle_rappro_auto,entite,CODE,PARTY,BASE,
 regle_rappro_auto,compte,CODE,BANK_ACCOUNT,BASE,
-reglement_decalage,banque,CODE,ANY,BASE,
+reglement_decalage,banque,CODE,PARTY,BASE,
 reglement_decalage,compte,CODE,BANK_ACCOUNT,BASE,
-reglement_flux,entite,CODE,ANY,BASE,
-reglement_flux,tiers,CODE,ANY,BASE,
+reglement_flux,entite,CODE,PARTY,BASE,
+reglement_flux,tiers,CODE,PARTY,BASE,
 reglement_flux,compte,CODE,BANK_ACCOUNT,BASE,
-reglement_regle,banque,CODE,ANY,BASE,
+reglement_regle,banque,CODE,PARTY,BASE,
 reglement_regle,compte,CODE,BANK_ACCOUNT,BASE,
-spread_breakdown,portfolio,CODE,ANY,BASE,
-spread_breakdown,entity,CODE,ANY,BASE,
-spread_breakdown,issuer,CODE,ANY,BASE,
-stress_results,portefeuille,CODE,ANY,BASE,
-tiers_compteur,tiers,CODE,ANY,BASE,
-tiers_foyer,foyer,CODE,ANY,BASE,
-tiers_foyer,foyer_appartenance,CODE,ANY,BASE,
-tiers_limite,tiers,CODE,ANY,BASE,
-tiers_limite,entite,CODE,ANY,BASE,
-titre,emetteur,CODE,ANY,BASE,
-titre,bafi_garant,CODE,ANY,BASE,
-titre,depositaire,CODE,ANY,BASE,
-titre,domiciliataire,CODE,ANY,BASE,
-val_bank_account,code,CODE,BANK_ACCOUNT,BASE,
-val_affilied_code,code_ref,CODE,ANY,BASE,
-val_third_party,adresse1,CODE,ANY,BASE,
-val_third_party,code,CODE,ANY,BASE,
-val_third_party,tiers_conso,CODE,ANY,BASE,
-val_table_security,code,CODE,ANY,BASE,
-valo_ccy_volat_rule,portfolio,CODE,ANY,BASE,
-valo_ccy_volat_rule,entity,CODE,ANY,BASE,
-valo_regle,portefeuille,CODE,ANY,BASE,
-valo_regle,entite,CODE,ANY,BASE,
-ventiler_contrat_cadre,entite,CODE,ANY,BASE,
-ventiler_contrat_cadre,tiers,CODE,ANY,BASE,
-ventiler_corresp,banque,CODE,ANY,BASE,
-ventiler_corresp,contrepartie,CODE,ANY,BASE,
-ventiler_corresp,correspondant_1,CODE,ANY,BASE,
-ventiler_corresp,correspondant_2,CODE,ANY,BASE,
-ventiler_corresp_bqe,tiers_entite,CODE,ANY,BASE,
-ventiler_corresp_bqe,contrepartie,CODE,ANY,BASE,
-ventiler_corresp_bqe,correspondant_1,CODE,ANY,BASE,
-ventiler_corresp_bqe,correspondant_2,CODE,ANY,BASE,
-ventiler_corresp_bqe,banque,CODE,ANY,BASE,
-ventiler_portef,contrepartie,CODE,ANY,BASE,
-ventiler_portef,portefeuille,CODE,ANY,BASE,
-ventiler_reg_liv,depositaire,CODE,ANY,BASE,
-ventiler_reg_liv,contrepartie,CODE,ANY,BASE,
-ventiler_reg_liv,portefeuille,CODE,ANY,BASE,
-vue_affilie_tiers,code_ref,CODE,ANY,BASE,
-vue_affilie_compte,code_ref,CODE,ANY,BASE,
-ventiler_compte,valeur_1,CODE,ANY,BASE,
-ventiler_compte,valeur_2,CODE,ANY,BASE,
-ventiler_compte,valeur_3,CODE,ANY,BASE,
-ventiler_compte,valeur_4,CODE,ANY,BASE,
+spread_breakdown,portfolio,CODE,PARTY,BASE,
+spread_breakdown,entity,CODE,PARTY,BASE,
+spread_breakdown,issuer,CODE,PARTY,BASE,
+stress_results,portefeuille,CODE,PARTY,BASE,
+tiers_compteur,tiers,CODE,PARTY,BASE,
+tiers_foyer,foyer,CODE,PARTY,BASE,
+tiers_foyer,foyer_appartenance,CODE,PARTY,BASE,
+tiers_limite,tiers,CODE,PARTY,BASE,
+tiers_limite,entite,CODE,PARTY,BASE,
+titre,emetteur,CODE,PARTY,BASE,
+titre,bafi_garant,CODE,PARTY,BASE,
+titre,depositaire,CODE,PARTY,BASE,
+titre,domiciliataire,CODE,PARTY,BASE,
+val_bank_account,code,CODE,BANK_ACCOUNT,BASE,Restricted to accounts by v3 - the vendor package wrote party values (copy of its party block)
+val_affilied_code,code_ref,CODE,PARTY,BASE,
+val_third_party,adresse1,CODE,PARTY,BASE,
+val_third_party,code,CODE,PARTY,BASE,
+val_third_party,tiers_conso,CODE,PARTY,BASE,
+val_table_security,code,CODE,PARTY,BASE,
+valo_ccy_volat_rule,portfolio,CODE,PARTY,BASE,
+valo_ccy_volat_rule,entity,CODE,PARTY,BASE,
+valo_regle,portefeuille,CODE,PARTY,BASE,
+valo_regle,entite,CODE,PARTY,BASE,
+ventiler_contrat_cadre,entite,CODE,PARTY,BASE,
+ventiler_contrat_cadre,tiers,CODE,PARTY,BASE,
+ventiler_corresp,banque,CODE,PARTY,BASE,
+ventiler_corresp,contrepartie,CODE,PARTY,BASE,
+ventiler_corresp,correspondant_1,CODE,PARTY,BASE,
+ventiler_corresp,correspondant_2,CODE,PARTY,BASE,
+# EXCLUDED 2026-10-20 - a one-character discriminator, not an identifier.
+# VARCHAR2(1) on TANM7881, where identifiers are 4 and 8 characters: it says
+# whether the neighbouring column holds a tiers or an entity. It was listed
+# only because v3 copied every vendor update - and it was skipped silently by
+# a checkbox rule that no longer exists. Listed, a one-character column cannot
+# hold any replacement and preflight would stop the run; the decision belongs
+# here, where it can be seen and reversed.
+# ventiler_corresp_bqe,tiers_entite,CODE,PARTY,BASE,discriminator - not an identifier
+ventiler_corresp_bqe,contrepartie,CODE,PARTY,BASE,
+ventiler_corresp_bqe,correspondant_1,CODE,PARTY,BASE,
+ventiler_corresp_bqe,correspondant_2,CODE,PARTY,BASE,
+ventiler_corresp_bqe,banque,CODE,PARTY,BASE,
+ventiler_portef,contrepartie,CODE,PARTY,BASE,
+ventiler_portef,portefeuille,CODE,PARTY,BASE,
+ventiler_reg_liv,depositaire,CODE,PARTY,BASE,
+ventiler_reg_liv,contrepartie,CODE,PARTY,BASE,
+ventiler_reg_liv,portefeuille,CODE,PARTY,BASE,
+vue_affilie_tiers,code_ref,CODE,PARTY,BASE,
+vue_affilie_compte,code_ref,CODE,BANK_ACCOUNT,BASE,Account branch only in the vendor package (was ANY)
+ventiler_compte,valeur_1,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
+ventiler_compte,valeur_2,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
+ventiler_compte,valeur_3,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
+ventiler_compte,valeur_4,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
 virement_compte,compte,CODE,BANK_ACCOUNT,BASE,
 
 # ============================================================================
@@ -242,148 +293,148 @@ virement_compte,compte,CODE,BANK_ACCOUNT,BASE,
 # The bulk of the data - several million rows each on a production instance.
 # These dominate the runtime.
 # ============================================================================
-histo_budget,entite,CODE,ANY,BASE,
-histo_compta,tiers,CODE,ANY,BASE,
-histo_compta,entite,CODE,ANY,BASE,
-histo_compta,portefeuille,CODE,ANY,BASE,
-histo_compta_solde,entite,CODE,ANY,BASE,
-histo_courtage,tiers,CODE,ANY,BASE,
-histo_couverture,tiers_deposit,CODE,ANY,BASE,
-histo_couverture,tiers_reception,CODE,ANY,BASE,
-histo_deposit,depositaire,CODE,ANY,BASE,
-histo_deposit,portefeuille,CODE,ANY,BASE,
-histo_detenteur,ancien_detenteur,CODE,ANY,BASE,
-histo_detenteur,nouveau_detenteur,CODE,ANY,BASE,
+histo_budget,entite,CODE,PARTY,BASE,
+histo_compta,tiers,CODE,PARTY,BASE,
+histo_compta,entite,CODE,PARTY,BASE,
+histo_compta,portefeuille,CODE,PARTY,BASE,
+histo_compta_solde,entite,CODE,PARTY,BASE,
+histo_courtage,tiers,CODE,PARTY,BASE,
+histo_couverture,tiers_deposit,CODE,PARTY,BASE,
+histo_couverture,tiers_reception,CODE,PARTY,BASE,
+histo_deposit,depositaire,CODE,PARTY,BASE,
+histo_deposit,portefeuille,CODE,PARTY,BASE,
+histo_detenteur,ancien_detenteur,CODE,PARTY,BASE,
+histo_detenteur,nouveau_detenteur,CODE,PARTY,BASE,
 histo_effet,compte,CODE,BANK_ACCOUNT,BASE,
 histo_effet,compte_effet,CODE,BANK_ACCOUNT,BASE,
-histo_evenement,entite,CODE,ANY,BASE,
-histo_evenement,contrepartie,CODE,ANY,BASE,
-histo_evenement,depositaire,CODE,ANY,BASE,
-histo_evenement,entity_corresp1,CODE,ANY,BASE,
-histo_evenement,entity_corresp2,CODE,ANY,BASE,
-histo_facture,entite,CODE,ANY,BASE,
-histo_facture,tiers,CODE,ANY,BASE,
-histo_fifo_solde,portefeuille,CODE,ANY,BASE,
-histo_fifo_solde,compensateur,CODE,ANY,BASE,
-histo_fiscalite,entite,CODE,ANY,BASE,
-histo_fiscalite,foyer,CODE,ANY,BASE,
+histo_evenement,entite,CODE,PARTY,BASE,
+histo_evenement,contrepartie,CODE,PARTY,BASE,
+histo_evenement,depositaire,CODE,PARTY,BASE,
+histo_evenement,entity_corresp1,CODE,PARTY,BASE,
+histo_evenement,entity_corresp2,CODE,PARTY,BASE,
+histo_facture,entite,CODE,PARTY,BASE,
+histo_facture,tiers,CODE,PARTY,BASE,
+histo_fifo_solde,portefeuille,CODE,PARTY,BASE,
+histo_fifo_solde,compensateur,CODE,PARTY,BASE,
+histo_fiscalite,entite,CODE,PARTY,BASE,
+histo_fiscalite,foyer,CODE,PARTY,BASE,
 histo_fiscalite,compte_fiscal,CODE,BANK_ACCOUNT,BASE,
-histo_flux,entite,CODE,ANY,BASE,
-histo_flux,portefeuille,CODE,ANY,BASE,
-histo_flux,tiers,CODE,ANY,BASE,
-histo_limite_tr,entite,CODE,ANY,BASE,
-histo_limite_tr,tiers,CODE,ANY,BASE,
+histo_flux,entite,CODE,PARTY,BASE,
+histo_flux,portefeuille,CODE,PARTY,BASE,
+histo_flux,tiers,CODE,PARTY,BASE,
+histo_limite_tr,entite,CODE,PARTY,BASE,
+histo_limite_tr,tiers,CODE,PARTY,BASE,
 histo_ligne,compte,CODE,BANK_ACCOUNT,BASE,
-histo_liv_solde,entite,CODE,ANY,BASE,
-histo_livraison,entite,CODE,ANY,BASE,
-histo_livraison,tiers,CODE,ANY,BASE,
-histo_livraison,portefeuille,CODE,ANY,BASE,
-histo_matiere,entite,CODE,ANY,BASE,
-histo_matiere,tiers,CODE,ANY,BASE,
-histo_matiere,portefeuille,CODE,ANY,BASE,
+histo_liv_solde,entite,CODE,PARTY,BASE,
+histo_livraison,entite,CODE,PARTY,BASE,
+histo_livraison,tiers,CODE,PARTY,BASE,
+histo_livraison,portefeuille,CODE,PARTY,BASE,
+histo_matiere,entite,CODE,PARTY,BASE,
+histo_matiere,tiers,CODE,PARTY,BASE,
+histo_matiere,portefeuille,CODE,PARTY,BASE,
 histo_mouv_solde,compte,CODE,BANK_ACCOUNT,BASE,
-histo_mouv_titre_solde,compensateur,CODE,ANY,BASE,
-histo_mouvement,entite,CODE,ANY,BASE,
-histo_mouvement,compte,CODE,ANY,BASE,
-histo_mouvement,compte_contrepartie,CODE,ANY,BASE,
-histo_operation,clearing_member,CODE,ANY,BASE,
-histo_operation,entite,CODE,ANY,BASE,
-histo_operation,contrepartie,CODE,ANY,BASE,
-histo_operation,compensateur,CODE,ANY,BASE,
-histo_operation,filiale,CODE,ANY,BASE,
-histo_operation,intermediaire,CODE,ANY,BASE,
-histo_operation,portefeuille,CODE,ANY,BASE,
-histo_operation,portefeuille_tiers,CODE,ANY,BASE,
-histo_operation,depositaire,CODE,ANY,BASE,
-histo_operation,depositaire_2,CODE,ANY,BASE,
-histo_operation,emetteur,CODE,ANY,BASE,
-histo_operation,corresp_receiver1,CODE,ANY,BASE,
-histo_operation,corresp_receiver2,CODE,ANY,BASE,
-histo_operation,corresp_sender1,CODE,ANY,BASE,
-histo_operation,corresp_sender2,CODE,ANY,BASE,
-histo_operation,portefeuille_deposit,CODE,ANY,BASE,
-histo_operation,tiers_domicile,CODE,ANY,BASE,
-histo_operation,compte_entite,CODE,ANY,BASE,
-histo_operation,compte_tiers,CODE,ANY,BASE,
-histo_operation,compte_filiale,CODE,ANY,BASE,
-histo_operation,compte_tiers_2,CODE,ANY,BASE,
-histo_operation,compte_entite_2,CODE,ANY,BASE,
-histo_operation,tiers_iban_compte,CODE,ANY,BASE,
-histo_parapheur,filiale,CODE,ANY,BASE,
-histo_parapheur_det,filiale,CODE,ANY,BASE,
-histo_position_tr,entite,CODE,ANY,BASE,
+histo_mouv_titre_solde,compensateur,CODE,PARTY,BASE,
+histo_mouvement,entite,CODE,PARTY,BASE,
+histo_mouvement,compte,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_mouvement,compte_contrepartie,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+histo_operation,entite,CODE,PARTY,BASE,
+histo_operation,contrepartie,CODE,PARTY,BASE,
+histo_operation,compensateur,CODE,PARTY,BASE,
+histo_operation,filiale,CODE,PARTY,BASE,
+histo_operation,intermediaire,CODE,PARTY,BASE,
+histo_operation,portefeuille,CODE,PARTY,BASE,
+histo_operation,portefeuille_tiers,CODE,PARTY,BASE,
+histo_operation,depositaire,CODE,PARTY,BASE,
+histo_operation,depositaire_2,CODE,PARTY,BASE,
+histo_operation,emetteur,CODE,PARTY,BASE,
+histo_operation,corresp_receiver1,CODE,PARTY,BASE,
+histo_operation,corresp_receiver2,CODE,PARTY,BASE,
+histo_operation,corresp_sender1,CODE,PARTY,BASE,
+histo_operation,corresp_sender2,CODE,PARTY,BASE,
+histo_operation,portefeuille_deposit,CODE,PARTY,BASE,
+histo_operation,tiers_domicile,CODE,PARTY,BASE,
+histo_operation,compte_entite,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,compte_tiers,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,compte_filiale,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,compte_tiers_2,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,compte_entite_2,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,tiers_iban_compte,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_parapheur,filiale,CODE,PARTY,BASE,
+histo_parapheur_det,filiale,CODE,PARTY,BASE,
+histo_position_tr,entite,CODE,PARTY,BASE,
 histo_prevision,compte,CODE,BANK_ACCOUNT,BASE,
-histo_pricing_detail,entite,CODE,ANY,BASE,
-histo_pricing_detail,portefeuille,CODE,ANY,BASE,
-histo_pricing_detail,portefeuille_tiers,CODE,ANY,BASE,
+histo_pricing_detail,entite,CODE,PARTY,BASE,
+histo_pricing_detail,portefeuille,CODE,PARTY,BASE,
+histo_pricing_detail,portefeuille_tiers,CODE,PARTY,BASE,
 histo_reg_conso,compte,CODE,BANK_ACCOUNT,BASE,
-histo_reg_releve,entite,CODE,ANY,BASE,
+histo_reg_releve,entite,CODE,PARTY,BASE,
 histo_reg_releve,compte,CODE,BANK_ACCOUNT,BASE,
-histo_reg_solde,entite,CODE,ANY,BASE,
-histo_reg_solde,portefeuille,CODE,ANY,BASE,
+histo_reg_solde,entite,CODE,PARTY,BASE,
+histo_reg_solde,portefeuille,CODE,PARTY,BASE,
 histo_reg_solde,compte,CODE,BANK_ACCOUNT,BASE,
-histo_reglement,entite,CODE,ANY,BASE,
-histo_reglement,tiers,CODE,ANY,BASE,
-histo_reglement,corresp_receiver1,CODE,ANY,BASE,
-histo_reglement,corresp_receiver2,CODE,ANY,BASE,
-histo_reglement,corresp_sender1,CODE,ANY,BASE,
-histo_reglement,corresp_sender2,CODE,ANY,BASE,
-histo_reglement,portefeuille,CODE,ANY,BASE,
-histo_reglement,compte,CODE,ANY,BASE,
-histo_reglement,cpty_account,CODE,ANY,BASE,
-histo_titre_solde,compensateur,CODE,ANY,BASE,
-histo_titre_solde,portefeuille,CODE,ANY,BASE,
+histo_reglement,entite,CODE,PARTY,BASE,
+histo_reglement,tiers,CODE,PARTY,BASE,
+histo_reglement,corresp_receiver1,CODE,PARTY,BASE,
+histo_reglement,corresp_receiver2,CODE,PARTY,BASE,
+histo_reglement,corresp_sender1,CODE,PARTY,BASE,
+histo_reglement,corresp_sender2,CODE,PARTY,BASE,
+histo_reglement,portefeuille,CODE,PARTY,BASE,
+histo_reglement,compte,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_reglement,cpty_account,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_titre_solde,compensateur,CODE,PARTY,BASE,
+histo_titre_solde,portefeuille,CODE,PARTY,BASE,
 
 # ============================================================================
 # SECTION 4 - IMPORT / STAGING TABLES
 # ============================================================================
-import_evenement,contrepartie,CODE,ANY,BASE,
-import_evenement,entite,CODE,ANY,BASE,
+import_evenement,contrepartie,CODE,PARTY,BASE,
+import_evenement,entite,CODE,PARTY,BASE,
 import_evenement,cpty_account,CODE,BANK_ACCOUNT,BASE,
 import_evenement,entity_account,CODE,BANK_ACCOUNT,BASE,
-import_evenement,cpty_corresp1,CODE,ANY,BASE,
-import_evenement,cpty_corresp2,CODE,ANY,BASE,
-import_evenement,entity_corresp1,CODE,ANY,BASE,
-import_evenement,entity_corresp2,CODE,ANY,BASE,
-import_operation,clearing_member,CODE,ANY,BASE,
-import_operation,entite,CODE,ANY,BASE,
-import_operation,contrepartie,CODE,ANY,BASE,
-import_operation,compensateur,CODE,ANY,BASE,
-import_operation,filiale,CODE,ANY,BASE,
-import_operation,intermediaire,CODE,ANY,BASE,
-import_operation,portefeuille,CODE,ANY,BASE,
-import_operation,portefeuille_tiers,CODE,ANY,BASE,
-import_operation,depositaire,CODE,ANY,BASE,
-import_operation,depositaire_2,CODE,ANY,BASE,
-import_operation,emetteur,CODE,ANY,BASE,
-import_operation,corresp_receiver1,CODE,ANY,BASE,
-import_operation,corresp_receiver2,CODE,ANY,BASE,
-import_operation,corresp_sender1,CODE,ANY,BASE,
-import_operation,corresp_sender2,CODE,ANY,BASE,
-import_operation,portefeuille_deposit,CODE,ANY,BASE,
-import_operation,tiers_domicile,CODE,ANY,BASE,
+import_evenement,cpty_corresp1,CODE,PARTY,BASE,
+import_evenement,cpty_corresp2,CODE,PARTY,BASE,
+import_evenement,entity_corresp1,CODE,PARTY,BASE,
+import_evenement,entity_corresp2,CODE,PARTY,BASE,
+import_operation,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+import_operation,entite,CODE,PARTY,BASE,
+import_operation,contrepartie,CODE,PARTY,BASE,
+import_operation,compensateur,CODE,PARTY,BASE,
+import_operation,filiale,CODE,PARTY,BASE,
+import_operation,intermediaire,CODE,PARTY,BASE,
+import_operation,portefeuille,CODE,PARTY,BASE,
+import_operation,portefeuille_tiers,CODE,PARTY,BASE,
+import_operation,depositaire,CODE,PARTY,BASE,
+import_operation,depositaire_2,CODE,PARTY,BASE,
+import_operation,emetteur,CODE,PARTY,BASE,
+import_operation,corresp_receiver1,CODE,PARTY,BASE,
+import_operation,corresp_receiver2,CODE,PARTY,BASE,
+import_operation,corresp_sender1,CODE,PARTY,BASE,
+import_operation,corresp_sender2,CODE,PARTY,BASE,
+import_operation,portefeuille_deposit,CODE,PARTY,BASE,
+import_operation,tiers_domicile,CODE,PARTY,BASE,
 import_operation,compte_entite,CODE,BANK_ACCOUNT,BASE,
 import_operation,compte_tiers,CODE,BANK_ACCOUNT,BASE,
 import_operation,compte_filiale,CODE,BANK_ACCOUNT,BASE,
 import_operation,compte_tiers_2,CODE,BANK_ACCOUNT,BASE,
-import_operation,groupe_1,CODE,ANY,BASE,
-import_operation,groupe_2,CODE,ANY,BASE,
-import_operation,groupe_3,CODE,ANY,BASE,
+import_operation,groupe_1,CODE,PARTY,BASE,
+import_operation,groupe_2,CODE,PARTY,BASE,
+import_operation,groupe_3,CODE,PARTY,BASE,
 
 # ============================================================================
 # SECTION 5 - ZBA (ZERO BALANCE ACCOUNT) TABLES
 # ============================================================================
 zba_breakdown,centralizer_account,CODE,BANK_ACCOUNT,BASE,
-zba_payment_breakdown,entity,CODE,ANY,BASE,
-zba_payment_breakdown,portfolio,CODE,ANY,BASE,
-zba_payment_breakdown,mirrored_entity,CODE,ANY,BASE,
-zba_payment_breakdown,mirrored_portfolio,CODE,ANY,BASE,
+zba_payment_breakdown,entity,CODE,PARTY,BASE,
+zba_payment_breakdown,portfolio,CODE,PARTY,BASE,
+zba_payment_breakdown,mirrored_entity,CODE,PARTY,BASE,
+zba_payment_breakdown,mirrored_portfolio,CODE,PARTY,BASE,
 zba_payment_breakdown,centralizer_account,CODE,BANK_ACCOUNT,BASE,
 zba_payment_breakdown,current_account,CODE,BANK_ACCOUNT,BASE,
 zba_payment_breakdown,mirrored_current_account,CODE,BANK_ACCOUNT,BASE,
-zba_transfer_breakdown,entity,CODE,ANY,BASE,
-zba_transfer_breakdown,portfolio,CODE,ANY,BASE,
-zba_transfer_breakdown,counterparty,CODE,ANY,BASE,
+zba_transfer_breakdown,entity,CODE,PARTY,BASE,
+zba_transfer_breakdown,portfolio,CODE,PARTY,BASE,
+zba_transfer_breakdown,counterparty,CODE,PARTY,BASE,
 zba_transfer_breakdown,centralizer_account,CODE,BANK_ACCOUNT,BASE,
 zba_transfer_breakdown,counterparty_account,CODE,BANK_ACCOUNT,BASE,
 zba_transfer_breakdown,entity_account,CODE,BANK_ACCOUNT,BASE,
@@ -393,180 +444,194 @@ zba_transfer_breakdown,entity_account,CODE,BANK_ACCOUNT,BASE,
 # Charge contracts, MPM, trade repository, and the val_* reference tables.
 # Not present on every instance - missing ones are reported as SKIPPED.
 # ============================================================================
-charge_contract_criteria,entity,CODE,ANY,BASE,
-charge_contract_criteria,bank,CODE,ANY,BASE,
+charge_contract_criteria,entity,CODE,PARTY,BASE,
+charge_contract_criteria,bank,CODE,PARTY,BASE,
 charge_contract_criteria,account,CODE,BANK_ACCOUNT,BASE,
-charge_contract_process,entity,CODE,ANY,BASE,
-charge_contract_process,bank,CODE,ANY,BASE,
+charge_contract_process,entity,CODE,PARTY,BASE,
+charge_contract_process,bank,CODE,PARTY,BASE,
 charge_contract_process,account,CODE,BANK_ACCOUNT,BASE,
-charge_missing_process,entity,CODE,ANY,BASE,
-charge_missing_process,bank,CODE,ANY,BASE,
+charge_missing_process,entity,CODE,PARTY,BASE,
+charge_missing_process,bank,CODE,PARTY,BASE,
 charge_missing_process,account,CODE,BANK_ACCOUNT,BASE,
-mpm_file_bkd,entity,CODE,ANY,BASE,
-mpm_file_bkd,counterparty,CODE,ANY,BASE,
+mpm_file_bkd,entity,CODE,PARTY,BASE,
+mpm_file_bkd,counterparty,CODE,PARTY,BASE,
 mpm_file_bkd,account,CODE,BANK_ACCOUNT,BASE,
-trade_repository_breakdown,entity,CODE,ANY,BASE,
-val_cptyrating,counterparty,CODE,ANY,BASE,
-val_currency_account,entity,CODE,ANY,BASE,
+trade_repository_breakdown,entity,CODE,PARTY,BASE,
+val_cptyrating,counterparty,CODE,PARTY,BASE,
+val_currency_account,entity,CODE,PARTY,BASE,
 val_currency_account,compte,CODE,BANK_ACCOUNT,BASE,
-val_security_account,entite,CODE,ANY,BASE,
-val_security_account,depositaire,CODE,ANY,BASE,
-val_security_account,correspondant,CODE,ANY,BASE,
-val_security_account,contrepartie,CODE,ANY,BASE,
-val_ssi_account,portefeuille,CODE,ANY,BASE,
-val_ssi_account,depositaire,CODE,ANY,BASE,
+val_security_account,entite,CODE,PARTY,BASE,
+val_security_account,depositaire,CODE,PARTY,BASE,
+val_security_account,correspondant,CODE,PARTY,BASE,
+val_security_account,contrepartie,CODE,PARTY,BASE,
+val_ssi_account,portefeuille,CODE,PARTY,BASE,
+val_ssi_account,depositaire,CODE,PARTY,BASE,
 val_ssi_account,compte,CODE,BANK_ACCOUNT,BASE,
-val_ssi_account,tiers_entite,CODE,ANY,BASE,
-val_ssi_corresp,banque,CODE,ANY,BASE,
-val_ssi_corresp,contrepartie,CODE,ANY,BASE,
-val_ssi_corresp,correspondant_1,CODE,ANY,BASE,
-val_ssi_corresp,correspondant_2,CODE,ANY,BASE,
-val_ssi_corresp,tiers_entite,CODE,ANY,BASE,
-val_third_party_limit,entite,CODE,ANY,BASE,
-val_third_party_limit,tiers,CODE,ANY,BASE,
+# EXCLUDED 2026-10-20 - a one-character discriminator, not an identifier.
+# VARCHAR2(1) on TANM7881, where identifiers are 4 and 8 characters: it says
+# whether the neighbouring column holds a tiers or an entity. It was listed
+# only because v3 copied every vendor update - and it was skipped silently by
+# a checkbox rule that no longer exists. Listed, a one-character column cannot
+# hold any replacement and preflight would stop the run; the decision belongs
+# here, where it can be seen and reversed.
+# val_ssi_account,tiers_entite,CODE,PARTY,BASE,discriminator - not an identifier
+val_ssi_corresp,banque,CODE,PARTY,BASE,
+val_ssi_corresp,contrepartie,CODE,PARTY,BASE,
+val_ssi_corresp,correspondant_1,CODE,PARTY,BASE,
+val_ssi_corresp,correspondant_2,CODE,PARTY,BASE,
+# EXCLUDED 2026-10-20 - a one-character discriminator, not an identifier.
+# VARCHAR2(1) on TANM7881, where identifiers are 4 and 8 characters: it says
+# whether the neighbouring column holds a tiers or an entity. It was listed
+# only because v3 copied every vendor update - and it was skipped silently by
+# a checkbox rule that no longer exists. Listed, a one-character column cannot
+# hold any replacement and preflight would stop the run; the decision belongs
+# here, where it can be seen and reversed.
+# val_ssi_corresp,tiers_entite,CODE,PARTY,BASE,discriminator - not an identifier
+val_third_party_limit,entite,CODE,PARTY,BASE,
+val_third_party_limit,tiers,CODE,PARTY,BASE,
 
 # ============================================================================
 # SECTION 7 - CTI TABLES
 # cm_* Cash Management, dm_* Deal Management, tp_* Third Party, uaa_* Users.
 # ============================================================================
-cm_account_of_bkstmt_file,entity,CODE,ANY,BASE,
+cm_account_of_bkstmt_file,entity,CODE,PARTY,BASE,
 cm_account_of_bkstmt_file,account,CODE,BANK_ACCOUNT,BASE,
-cm_account_of_bkstmt_file,bank,CODE,ANY,BASE,
-cm_archived_forecast,entity,CODE,ANY,BASE,
-cm_archived_forecast,bank,CODE,ANY,BASE,
-cm_bkstmt_file_config,collator,CODE,ANY,BASE,
-cm_bkstmt_file_config,bank,CODE,ANY,BASE,
-cm_bsi_bank_statement,entity,CODE,ANY,BASE,
+cm_account_of_bkstmt_file,bank,CODE,PARTY,BASE,
+cm_archived_forecast,entity,CODE,PARTY,BASE,
+cm_archived_forecast,bank,CODE,PARTY,BASE,
+cm_bkstmt_file_config,collator,CODE,PARTY,BASE,
+cm_bkstmt_file_config,bank,CODE,PARTY,BASE,
+cm_bsi_bank_statement,entity,CODE,PARTY,BASE,
 cm_bsi_bank_statement,bank_account,CODE,BANK_ACCOUNT,BASE,
-cm_cash_concent_accounts,entity,CODE,ANY,BASE,
+cm_cash_concent_accounts,entity,CODE,PARTY,BASE,
 cm_cash_concent_accounts,account,CODE,BANK_ACCOUNT,BASE,
-cm_cash_concent_accounts,bank,CODE,ANY,BASE,
+cm_cash_concent_accounts,bank,CODE,PARTY,BASE,
 cm_cash_concent_header,master_account,CODE,BANK_ACCOUNT,BASE,
 cm_cash_concent_header,compte_tiers,CODE,BANK_ACCOUNT,BASE,
 cm_cash_concent_header,compte_entite,CODE,BANK_ACCOUNT,BASE,
 cm_cash_concent_header,compte_filiale,CODE,BANK_ACCOUNT,BASE,
-cm_cash_concent_header,entity,CODE,ANY,BASE,
-cm_cash_concent_header,filiale,CODE,ANY,BASE,
-cm_cash_concent_header,intermediaire,CODE,ANY,BASE,
-cm_cash_concent_header,portefeuille,CODE,ANY,BASE,
-cm_cash_concent_header,contrepartie,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_1,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_2,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_3,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_4,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_5,CODE,ANY,BASE,
-cm_cash_concent_header,portefeuille_tiers,CODE,ANY,BASE,
-cm_cash_concent_header,depositaire,CODE,ANY,BASE,
-cm_cash_concent_header,depositaire_2,CODE,ANY,BASE,
-cm_cash_concent_header,emetteur,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_sender1,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_sender2,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_receiver1,CODE,ANY,BASE,
-cm_cash_concent_header,correspondant_receiver2,CODE,ANY,BASE,
+cm_cash_concent_header,entity,CODE,PARTY,BASE,
+cm_cash_concent_header,filiale,CODE,PARTY,BASE,
+cm_cash_concent_header,intermediaire,CODE,PARTY,BASE,
+cm_cash_concent_header,portefeuille,CODE,PARTY,BASE,
+cm_cash_concent_header,contrepartie,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_1,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_2,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_3,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_4,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_5,CODE,PARTY,BASE,
+cm_cash_concent_header,portefeuille_tiers,CODE,PARTY,BASE,
+cm_cash_concent_header,depositaire,CODE,PARTY,BASE,
+cm_cash_concent_header,depositaire_2,CODE,PARTY,BASE,
+cm_cash_concent_header,emetteur,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_sender1,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_sender2,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_receiver1,CODE,PARTY,BASE,
+cm_cash_concent_header,correspondant_receiver2,CODE,PARTY,BASE,
 cm_deal_deal,compte_tiers,CODE,BANK_ACCOUNT,BASE,
 cm_deal_deal,compte_entite,CODE,BANK_ACCOUNT,BASE,
 cm_deal_deal,compte_filiale,CODE,BANK_ACCOUNT,BASE,
 cm_deal_deal,compte_tiers_2,CODE,BANK_ACCOUNT,BASE,
-cm_deal_deal,entity,CODE,ANY,BASE,
-cm_deal_deal,filiale,CODE,ANY,BASE,
-cm_deal_deal,intermediaire,CODE,ANY,BASE,
-cm_deal_deal,portefeuille,CODE,ANY,BASE,
-cm_deal_deal,portefeuille_deposit,CODE,ANY,BASE,
-cm_deal_deal,contrepartie,CODE,ANY,BASE,
-cm_deal_deal,correspondant_1,CODE,ANY,BASE,
-cm_deal_deal,correspondant_2,CODE,ANY,BASE,
-cm_deal_deal,correspondant_3,CODE,ANY,BASE,
-cm_deal_deal,correspondant_4,CODE,ANY,BASE,
-cm_deal_deal,correspondant_5,CODE,ANY,BASE,
-cm_deal_deal,correspondant_6,CODE,ANY,BASE,
-cm_deal_deal,correspondant_7,CODE,ANY,BASE,
-cm_deal_deal,correspondant_8,CODE,ANY,BASE,
-cm_deal_deal,correspondant_9,CODE,ANY,BASE,
-cm_deal_deal,correspondant_10,CODE,ANY,BASE,
-cm_deal_deal,portefeuille_tiers,CODE,ANY,BASE,
-cm_deal_deal,depositaire,CODE,ANY,BASE,
-cm_deal_deal,depositaire_2,CODE,ANY,BASE,
-cm_deal_deal,emetteur,CODE,ANY,BASE,
-cm_deal_deal,correspondant_sender1,CODE,ANY,BASE,
-cm_deal_deal,correspondant_sender2,CODE,ANY,BASE,
-cm_deal_deal,correspondant_receiver1,CODE,ANY,BASE,
-cm_deal_deal,correspondant_receiver2,CODE,ANY,BASE,
-cm_deal_deal,compensateur,CODE,ANY,BASE,
-cm_deal_deal,depositaire_bis,CODE,ANY,BASE,
-cm_deal_deal,depositaire_2_bis,CODE,ANY,BASE,
-cm_deal_deal,corresp_inter_sender1,CODE,ANY,BASE,
-cm_deal_deal,corresp_inter_sender2,CODE,ANY,BASE,
-cm_deal_deal,corresp_inter_receiver1,CODE,ANY,BASE,
-cm_deal_deal,corresp_inter_receiver2,CODE,ANY,BASE,
-cm_deal_deal,clearing_member,CODE,ANY,BASE,
-cm_fli_flow,entity,CODE,ANY,BASE,
-cm_fli_flow,portfolio,CODE,ANY,BASE,
+cm_deal_deal,entity,CODE,PARTY,BASE,
+cm_deal_deal,filiale,CODE,PARTY,BASE,
+cm_deal_deal,intermediaire,CODE,PARTY,BASE,
+cm_deal_deal,portefeuille,CODE,PARTY,BASE,
+cm_deal_deal,portefeuille_deposit,CODE,PARTY,BASE,
+cm_deal_deal,contrepartie,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_1,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_2,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_3,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_4,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_5,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_6,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_7,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_8,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_9,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_10,CODE,PARTY,BASE,
+cm_deal_deal,portefeuille_tiers,CODE,PARTY,BASE,
+cm_deal_deal,depositaire,CODE,PARTY,BASE,
+cm_deal_deal,depositaire_2,CODE,PARTY,BASE,
+cm_deal_deal,emetteur,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_sender1,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_sender2,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_receiver1,CODE,PARTY,BASE,
+cm_deal_deal,correspondant_receiver2,CODE,PARTY,BASE,
+cm_deal_deal,compensateur,CODE,PARTY,BASE,
+cm_deal_deal,depositaire_bis,CODE,PARTY,BASE,
+cm_deal_deal,depositaire_2_bis,CODE,PARTY,BASE,
+cm_deal_deal,corresp_inter_sender1,CODE,PARTY,BASE,
+cm_deal_deal,corresp_inter_sender2,CODE,PARTY,BASE,
+cm_deal_deal,corresp_inter_receiver1,CODE,PARTY,BASE,
+cm_deal_deal,corresp_inter_receiver2,CODE,PARTY,BASE,
+cm_deal_deal,clearing_member,CODE,MIXED,BASE,MIXED - same field as the other clearing_member columns
+cm_fli_flow,entity,CODE,PARTY,BASE,
+cm_fli_flow,portfolio,CODE,PARTY,BASE,
 cm_fli_flow,account,CODE,BANK_ACCOUNT,BASE,
-cm_fli_flow,counterparty,CODE,ANY,BASE,
-cm_flow_to_pay_rules,entity,CODE,ANY,BASE,
-cm_flow_to_pay_rules,bank,CODE,ANY,BASE,
-cm_foi_forecast,entity,CODE,ANY,BASE,
-cm_foi_forecast,bank,CODE,ANY,BASE,
-cm_forecast,entity,CODE,ANY,BASE,
-cm_forecast,portfolio,CODE,ANY,BASE,
-cm_forecast,bank,CODE,ANY,BASE,
-cm_forecast,branch,CODE,ANY,BASE,
-cm_forecast,subsidiary_cpty,CODE,ANY,BASE,
-cm_forecast,corresp_receiver1,CODE,ANY,BASE,
-cm_forecast,corresp_receiver2,CODE,ANY,BASE,
-cm_forecast,corresp_sender1,CODE,ANY,BASE,
-cm_forecast,corresp_sender2,CODE,ANY,BASE,
-cm_payt_payment,portfolio,CODE,ANY,BASE,
+cm_fli_flow,counterparty,CODE,PARTY,BASE,
+cm_flow_to_pay_rules,entity,CODE,PARTY,BASE,
+cm_flow_to_pay_rules,bank,CODE,PARTY,BASE,
+cm_foi_forecast,entity,CODE,PARTY,BASE,
+cm_foi_forecast,bank,CODE,PARTY,BASE,
+cm_forecast,entity,CODE,PARTY,BASE,
+cm_forecast,portfolio,CODE,PARTY,BASE,
+cm_forecast,bank,CODE,PARTY,BASE,
+cm_forecast,branch,CODE,PARTY,BASE,
+cm_forecast,subsidiary_cpty,CODE,PARTY,BASE,
+cm_forecast,corresp_receiver1,CODE,PARTY,BASE,
+cm_forecast,corresp_receiver2,CODE,PARTY,BASE,
+cm_forecast,corresp_sender1,CODE,PARTY,BASE,
+cm_forecast,corresp_sender2,CODE,PARTY,BASE,
+cm_payt_payment,portfolio,CODE,PARTY,BASE,
 cm_payt_payment,cpty_account_code,CODE,BANK_ACCOUNT,BASE,
-cm_payt_payment,corresp_receiver1,CODE,ANY,BASE,
-cm_payt_payment,corresp_receiver2,CODE,ANY,BASE,
-cm_payt_payment,corresp_sender1,CODE,ANY,BASE,
-cm_payt_payment,corresp_sender2,CODE,ANY,BASE,
-cm_pooling_convention,entity,CODE,ANY,BASE,
-cm_pooling_convention,counterparty,CODE,ANY,BASE,
-cm_process,entity,CODE,ANY,BASE,
-cms_file_bkd,entity,CODE,ANY,BASE,
-cms_file_bkd,counterparty,CODE,ANY,BASE,
-cm_cms_exceptions,entity,CODE,ANY,BASE,
-cm_cms_exceptions,portfolio,CODE,ANY,BASE,
-cm_cms_exceptions,counterparty,CODE,ANY,BASE,
-cm_cms_exceptions,issuer,CODE,ANY,BASE,
-dm_hedge_request,entity,CODE,ANY,BASE,
-dm_hedge_request,portfolio,CODE,ANY,BASE,
-dm_hedge_request,counterparty,CODE,ANY,BASE,
-dm_hr_autovalid_bkd,entity,CODE,ANY,BASE,
-dm_hr_ctrp_map,counterparty,CODE,ANY,BASE,
-dm_hr_cutoff_bkd,entity,CODE,ANY,BASE,
-dm_hr_cutoff_bkd,portfolio,CODE,ANY,BASE,
-dm_hr_cutoff_bkd,counterparty,CODE,ANY,BASE,
-dm_hr_limit_bkd,entity,CODE,ANY,BASE,
-dm_hr_limit_bkd,portfolio,CODE,ANY,BASE,
-dm_hr_ptf_bkd,issuer,CODE,ANY,BASE,
-dm_hr_ptf_bkd,cts_counterparty,CODE,ANY,BASE,
-dm_hr_quotation,entity,CODE,ANY,BASE,
+cm_payt_payment,corresp_receiver1,CODE,PARTY,BASE,
+cm_payt_payment,corresp_receiver2,CODE,PARTY,BASE,
+cm_payt_payment,corresp_sender1,CODE,PARTY,BASE,
+cm_payt_payment,corresp_sender2,CODE,PARTY,BASE,
+cm_pooling_convention,entity,CODE,PARTY,BASE,
+cm_pooling_convention,counterparty,CODE,PARTY,BASE,
+cm_process,entity,CODE,PARTY,BASE,
+cms_file_bkd,entity,CODE,PARTY,BASE,
+cms_file_bkd,counterparty,CODE,PARTY,BASE,
+cm_cms_exceptions,entity,CODE,PARTY,BASE,
+cm_cms_exceptions,portfolio,CODE,PARTY,BASE,
+cm_cms_exceptions,counterparty,CODE,PARTY,BASE,
+cm_cms_exceptions,issuer,CODE,PARTY,BASE,
+dm_hedge_request,entity,CODE,PARTY,BASE,
+dm_hedge_request,portfolio,CODE,PARTY,BASE,
+dm_hedge_request,counterparty,CODE,PARTY,BASE,
+dm_hr_autovalid_bkd,entity,CODE,PARTY,BASE,
+dm_hr_ctrp_map,counterparty,CODE,PARTY,BASE,
+dm_hr_cutoff_bkd,entity,CODE,PARTY,BASE,
+dm_hr_cutoff_bkd,portfolio,CODE,PARTY,BASE,
+dm_hr_cutoff_bkd,counterparty,CODE,PARTY,BASE,
+dm_hr_limit_bkd,entity,CODE,PARTY,BASE,
+dm_hr_limit_bkd,portfolio,CODE,PARTY,BASE,
+dm_hr_ptf_bkd,issuer,CODE,PARTY,BASE,
+dm_hr_ptf_bkd,cts_counterparty,CODE,PARTY,BASE,
+dm_hr_quotation,entity,CODE,PARTY,BASE,
 dm_hr_quotation,account,CODE,BANK_ACCOUNT,BASE,
-dm_hr_quotation,bank,CODE,ANY,BASE,
-tp_comm_entity_dim,entity,CODE,ANY,BASE,
+dm_hr_quotation,bank,CODE,PARTY,BASE,
+tp_comm_entity_dim,entity,CODE,PARTY,BASE,
 tp_comm_entity_dim,account,CODE,BANK_ACCOUNT,BASE,
-tp_comm_entity_dim,bank,CODE,ANY,BASE,
-tp_contact,entity,CODE,ANY,BASE,
+tp_comm_entity_dim,bank,CODE,PARTY,BASE,
+tp_contact,entity,CODE,PARTY,BASE,
 tp_contact,bank_account,CODE,BANK_ACCOUNT,BASE,
-tp_data_profile_bankaccount,counterparty,CODE,ANY,BASE,
-tp_data_profile_ctrp,entity,CODE,ANY,BASE,
-tp_data_profile_entity,portfolio,CODE,ANY,BASE,
+tp_data_profile_bankaccount,counterparty,CODE,PARTY,BASE,
+tp_data_profile_ctrp,entity,CODE,PARTY,BASE,
+tp_data_profile_entity,portfolio,CODE,PARTY,BASE,
 tp_data_profile_ptf,account,CODE,BANK_ACCOUNT,BASE,
-tp_data_profile_ptf,bank,CODE,ANY,BASE,
-tp_pos_snapshot,entity,CODE,ANY,BASE,
+tp_data_profile_ptf,bank,CODE,PARTY,BASE,
+tp_pos_snapshot,entity,CODE,PARTY,BASE,
 tp_pos_snapshot,account,CODE,BANK_ACCOUNT,BASE,
-tp_pos_snapshot_results,entity,CODE,ANY,BASE,
+tp_pos_snapshot_results,entity,CODE,PARTY,BASE,
 tp_pos_snapshot_results,account,CODE,BANK_ACCOUNT,BASE,
-tp_tenant_entity,entity,CODE,ANY,BASE,
-tp_users,entity,CODE,ANY,BASE,
-tp_users,counterparty,CODE,ANY,BASE,
-tp_wv_mailing_rule,entity,CODE,ANY,BASE,
-tp_wv_mailing_rule,counterparty,CODE,ANY,BASE,
-tp_wv_transition_rule,entity,CODE,ANY,BASE,
-tp_wv_transition_rule,counterparty,CODE,ANY,BASE,
+tp_tenant_entity,entity,CODE,PARTY,BASE,
+tp_users,entity,CODE,PARTY,BASE,
+tp_users,counterparty,CODE,PARTY,BASE,
+tp_wv_mailing_rule,entity,CODE,PARTY,BASE,
+tp_wv_mailing_rule,counterparty,CODE,PARTY,BASE,
+tp_wv_transition_rule,entity,CODE,PARTY,BASE,
+tp_wv_transition_rule,counterparty,CODE,PARTY,BASE,
 
 # ============================================================================
 # SECTION 8 - FREE TEXT AND PII (NULL_OUT)
@@ -688,14 +753,11 @@ uaa_users,phone_number,NULL_OUT,NONE,BASE,
 # ############################################################################
 # ############################################################################
 # ##                                                                        ##
-# ##   PART B - GATED BY FLAGS IN anonymization.ini                         ##
+# ##   PART B - LABELS AND ATTRIBUTES                                       ##
 # ##                                                                        ##
-# ##   Everything ABOVE this banner is applied on every run regardless of    ##
-# ##   configuration. Everything BELOW can be switched off.                  ##
-# ##                                                                        ##
-# ##   These 8 rows are the ONLY rows in this file that a flag can turn      ##
-# ##   off. Review list for deciding what else should become optional:       ##
-# ##   docs/08_open_questions.md                                             ##
+# ##   Gated by ANONYMIZE_<CATEGORY>_DESCRIPTION and _ATTRIBUTES of the     ##
+# ##   identity that owns each row - independently of whether that          ##
+# ##   identity's code is renamed.                                          ##
 # ##                                                                        ##
 # ############################################################################
 # ############################################################################
@@ -703,37 +765,36 @@ uaa_users,phone_number,NULL_OUT,NONE,BASE,
 # ============================================================================
 # SECTION 9 - DESCRIPTION LABELS          [gated: ANONYMIZE_*_DESCRIPTION]
 # ============================================================================
-# Overwritten with the anonymized code of the row itself rather than nulled, so
+# Overwritten with the owning identity's replacement rather than nulled, so
 # screens and reports stay readable: a counterparty shows as T_0000412 rather
-# than blank.
+# than blank. Written even when the identifier itself is kept - the label then
+# shows the replacement, never the original code.
 #
-# Resolved per row from whichever category matched in the mapping.
 # Was EntD / FoldD / TierD / CpteD in the original config.ini.
 # ============================================================================
-structure,description,DESCRIPTION,ANY,BASE,
-tiers,description,DESCRIPTION,ANY,BASE,
+structure,description,DESCRIPTION,NODE_ROLE,BASE,Account node or party node - by its role
+tiers,description,DESCRIPTION,PARTY,BASE,
 compte_banque,description,DESCRIPTION,BANK_ACCOUNT,BASE,
 
 # ============================================================================
 # SECTION 10 - ADDRESS LINES              [gated: ANONYMIZE_*_ATTRIBUTES]
 # ============================================================================
-# Overwritten with the anonymized code of the owning row. Same privacy effect as
+# Overwritten with the owning identity's replacement. Same privacy effect as
 # NULL_OUT, but leaves the column populated so application-side NOT NULL and
-# format checks still pass.
+# format checks still pass. An empty address line stays empty.
 #
-# These are vendor-default behaviour, not a site choice: the original package
-# always cleared adresse1-adresse5 as part of the description flag, so they were
-# never one of the five configurable slots.
+# PARTY: every party category, unclassified (X_) parties included - an
+# address is personal data whatever the party's category.
 #
-# OPEN QUESTION for the original developer: v2 tied these to the DESCRIPTION
-# flag (EntD); v4 ties them to ATTRIBUTES because they are PII rather than
-# labels. See docs/08_open_questions.md, item 2.
+# DECIDED 2026-10-20: addresses follow the ATTRIBUTES switch. The original
+# package cleared them under its description flag (EntD); v4 keeps them with
+# the other personal attributes. Both switches default to y.
 # ============================================================================
-tiers,adresse1,SELF_CODE,ANY,BASE,
-tiers,adresse2,SELF_CODE,ANY,BASE,
-tiers,adresse3,SELF_CODE,ANY,BASE,
-tiers,adresse4,SELF_CODE,ANY,BASE,
-tiers,adresse5,SELF_CODE,ANY,BASE,
+tiers,adresse1,SELF_CODE,PARTY,BASE,
+tiers,adresse2,SELF_CODE,PARTY,BASE,
+tiers,adresse3,SELF_CODE,PARTY,BASE,
+tiers,adresse4,SELF_CODE,PARTY,BASE,
+tiers,adresse5,SELF_CODE,PARTY,BASE,
 
 # ============================================================================
 # SECTION 11 - MOVED OUT: per-entity PII attribute columns
@@ -749,28 +810,16 @@ tiers,adresse5,SELF_CODE,ANY,BASE,
 # Transferred 2026-08-10. Pending review with the original developer.
 # See docs/08_open_questions.md, item 1.
 #
-# For reference, the rows now living in inventory_op_custom.csv:
+# For reference, the rows now living in inventory_op_custom.csv - with the
+# owner category each one had in the old config.ini slot:
 #
-#   was Ent1-5   tiers,telephone,SELF_CODE,ENTITY
-#                tiers,fax,SELF_CODE,ENTITY
-#                tiers,email_adress,SELF_CODE,ENTITY
-#                tiers,nom_pp,SELF_CODE,ENTITY
-#                tiers,prenom_pp,SELF_CODE,ENTITY
-#
-#   was Fold1-5  tiers,groupe_1,SELF_CODE,PORTFOLIO
-#                tiers,groupe_2,SELF_CODE,PORTFOLIO
-#                tiers,groupe_3,SELF_CODE,PORTFOLIO
-#                tiers,flag_pp,SELF_CODE,PORTFOLIO
-#                tiers,dpt_naissance,SELF_CODE,PORTFOLIO
-#
-#   was Tier1-4  tiers,sector,SELF_CODE,COUNTERPARTY
-#                tiers,seniority,SELF_CODE,COUNTERPARTY
-#                tiers,telex,SELF_CODE,COUNTERPARTY
-#                tiers,type_interne,SELF_CODE,COUNTERPARTY
+#   was Ent1-5   tiers,telephone / fax / email_adress / nom_pp / prenom_pp
+#   was Fold1-5  tiers,groupe_1 / groupe_2 / groupe_3 / flag_pp / dpt_naissance
+#   was Tier1-4  tiers,sector / seniority / telex / type_interne
 #                (Tier5 was 'n' - no fifth column)
-#
-#   was Cpte1-3  compte_banque,groupe_1,SELF_CODE,BANK_ACCOUNT
-#                compte_banque,groupe_2,SELF_CODE,BANK_ACCOUNT
-#                compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT
+#   was Cpte1-3  compte_banque,groupe_1 / groupe_2 / groupe_3
 #                (Cpte4 and Cpte5 were 'n' - no fourth or fifth column)
+#
+# Since 2026-10-20 the tiers rows apply to EVERY party (category PARTY) - see
+# the note in inventory_op_custom.csv - and tiers.flag_pp is left out.
 # ============================================================================

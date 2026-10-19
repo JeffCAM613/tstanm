@@ -88,7 +88,12 @@ but they are working documents and are not part of a release.
   for a restored copy.
 - **OP must complete before EPF.** EPF cascades read the code mapping OP produces.
 - **The mapping is the only link back to the original values.** `anon_meta.code_map` maps old code →
-  new code. v4 never drops it as part of a run. If you drop it, a partially anonymized database
-  cannot be reconciled.
+  new code, per category; `anon_meta.identity_inventory` records what each original was — party or
+  bank account, its category, and why an unclassified (X_) party is one. v4 never drops either as
+  part of a run. If you drop them, a partially anonymized database cannot be reconciled, and a
+  later run refuses to start on it rather than translate a translation.
+- **A result is PASS only when nothing is left.** Values whose role cannot be established are left
+  unchanged and reported as REVIEW REQUIRED; a switched-off protection gives INCOMPLETE. Neither is
+  presented as complete anonymization.
 - All triggers on the target schema are disabled for the duration of a run and re-enabled at the
   end, including on failure.

@@ -81,7 +81,8 @@ $include = @(
    'tests/manual/row_counts.sql',
    'tests/manual/check_tables_exist.sql',
    'tests/manual/check_locks.sql',
-   'tests/manual/inspect_code_map.sql'
+   'tests/manual/inspect_code_map.sql',
+   'tests/manual/typed_identity_diagnostics.sql'
 )
 
 # ------------------------------------------------------------------ staging --

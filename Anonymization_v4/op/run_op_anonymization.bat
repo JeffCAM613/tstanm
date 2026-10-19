@@ -4,10 +4,12 @@ setlocal enabledelayedexpansion
 REM ===========================================================================
 REM KTP OP Anonymization (v4) - entry point
 REM ===========================================================================
-REM   run_op_anonymization.bat              interactive
-REM   run_op_anonymization.bat /dryrun      interactive, rehearse only
-REM   run_op_anonymization.bat /auto        no prompts, take config as-is
-REM   run_op_anonymization.bat /auto /force no prompts, no confirmation
+REM   run_op_anonymization.bat                    interactive
+REM   run_op_anonymization.bat /dryrun            interactive, rehearse only
+REM   run_op_anonymization.bat /auto              no prompts, take config as-is
+REM   run_op_anonymization.bat /auto /force       no prompts, no confirmation
+REM   run_op_anonymization.bat /inventory <file>  write the inventory INSERT
+REM                                               file and stop - no database
 REM
 REM This script does four things and nothing more: settle the configuration,
 REM turn the inventory CSVs into loadable SQL, hand over to sqlplus, and return
@@ -16,6 +18,14 @@ REM
 REM Every path is derived from %~dp0 (the folder holding THIS file), so the
 REM package works wherever it is unpacked. In v3 the batch files resolved paths
 REM that did not match where they sat, and neither orchestrator could run.
+REM
+REM Exit codes
+REM   0  completed and verified: PASS
+REM   1  the run failed - nothing is assumed about how far it got
+REM   2  completed, verification FAILED - client data is still present
+REM   3  completed, verification REVIEW REQUIRED - values were deliberately
+REM      left unchanged because their role or domain is ambiguous
+REM   4  completed, verification INCOMPLETE - a protection was switched off
 REM ===========================================================================
 
 set "ROOT=%~dp0"
@@ -30,6 +40,12 @@ set "INVENTORY_SQL=%TEMP%\anon_inventory_%RANDOM%.sql"
 set "RUN_MODE=EXECUTE"
 set "INTERACTIVE=1"
 set "FORCE=0"
+set "INVENTORY_ONLY="
+
+REM /inventory takes the NEXT argument as its value, which the flag loop below
+REM cannot read, so it is recognised here - and only as the first argument.
+if /I "%~1"=="/inventory" goto :inventory_only
+
 for %%A in (%*) do (
     if /I "%%~A"=="/dryrun" set "RUN_MODE=DRYRUN"
     if /I "%%~A"=="/auto"   set "INTERACTIVE=0"
@@ -120,25 +136,29 @@ if "!INTERACTIVE!"=="1" echo.
 
 
 REM ===========================================================================
-REM  STEP 3 - what to anonymize
+REM  STEP 3 - rename identifiers
 REM ===========================================================================
 if "!INTERACTIVE!"=="1" (
     echo --------------------------------------------------------------------
-    echo  What to anonymize
+    echo  Rename identifiers
     echo --------------------------------------------------------------------
-    echo  These decide which kinds of identifier get replaced. A category left
-    echo  at 'n' keeps its real codes everywhere in the schema.
+    echo  Every identifier is classified ONCE, from the data, into one of five
+    echo  categories. These switches decide whether its code - and every
+    echo  reference to it - is replaced. They never move an identifier into
+    echo  another category. Descriptions and attributes have their own
+    echo  switches below and do not depend on these.
     echo.
     echo  Free text and PII is ALWAYS erased and is not affected by any answer
-    echo  below - 92 columns, listed in inventory_op.csv under NULL_OUT.
+    echo  below - the NULL_OUT rows of inventory_op.csv.
     echo.
 )
 REM No '>' or '^' in these prompt strings: inside double quotes cmd treats '^'
 REM as a literal character rather than an escape, so it would print verbatim.
-call :need_yn ANONYMIZE_ENTITY       "Anonymize entity codes,       prefix E_"  y
-call :need_yn ANONYMIZE_PORTFOLIO    "Anonymize portfolio codes,    prefix P_"  y
-call :need_yn ANONYMIZE_COUNTERPARTY "Anonymize counterparty codes, prefix T_"  y
-call :need_yn ANONYMIZE_BANK_ACCOUNT "Anonymize bank account codes, prefix CB_" y
+call :need_yn ANONYMIZE_ENTITY             "Rename entity codes,             prefix E_"  y
+call :need_yn ANONYMIZE_PORTFOLIO          "Rename portfolio codes,          prefix P_"  y
+call :need_yn ANONYMIZE_COUNTERPARTY       "Rename counterparty codes,       prefix T_"  y
+call :need_yn ANONYMIZE_UNCLASSIFIED_PARTY "Rename unclassified party codes, prefix X_"  y
+call :need_yn ANONYMIZE_BANK_ACCOUNT       "Rename bank account codes,       prefix CB_" y
 if "!INTERACTIVE!"=="1" echo.
 
 
@@ -149,40 +169,63 @@ if "!INTERACTIVE!"=="1" (
     echo --------------------------------------------------------------------
     echo  Description labels          [was EntD / FoldD / TierD / CpteD]
     echo --------------------------------------------------------------------
-    echo  Overwrites the label with the row's own anonymized code, so screens
-    echo  stay readable: a counterparty shows as T_0000412 rather than blank.
+    echo  Overwrites the label with the identifier's safe replacement, so
+    echo  screens stay readable: a counterparty shows as T_0000412 rather than
+    echo  blank. Works even when its code is NOT renamed - the label then gets
+    echo  the replacement, never the original code.
     echo.
 )
-call :flag_cols ANONYMIZE_ENTITY_DESCRIPTION       DESCRIPTION ENTITY       "Entity"       "!ANONYMIZE_ENTITY!"
-call :flag_cols ANONYMIZE_PORTFOLIO_DESCRIPTION    DESCRIPTION PORTFOLIO    "Portfolio"    "!ANONYMIZE_PORTFOLIO!"
-call :flag_cols ANONYMIZE_COUNTERPARTY_DESCRIPTION DESCRIPTION COUNTERPARTY "Counterparty" "!ANONYMIZE_COUNTERPARTY!"
-call :flag_cols ANONYMIZE_BANK_ACCOUNT_DESCRIPTION DESCRIPTION BANK_ACCOUNT "Bank account" "!ANONYMIZE_BANK_ACCOUNT!"
+call :flag_cols ANONYMIZE_ENTITY_DESCRIPTION             DESCRIPTION ENTITY             "Entity"
+call :flag_cols ANONYMIZE_PORTFOLIO_DESCRIPTION          DESCRIPTION PORTFOLIO          "Portfolio"
+call :flag_cols ANONYMIZE_COUNTERPARTY_DESCRIPTION       DESCRIPTION COUNTERPARTY       "Counterparty"
+call :flag_cols ANONYMIZE_UNCLASSIFIED_PARTY_DESCRIPTION DESCRIPTION UNCLASSIFIED_PARTY "Unclassified party"
+call :flag_cols ANONYMIZE_BANK_ACCOUNT_DESCRIPTION       DESCRIPTION BANK_ACCOUNT       "Bank account"
 
 
 REM ===========================================================================
-REM  STEP 5 - per-entity PII attributes
+REM  STEP 5 - sensitive attributes and addresses
 REM ===========================================================================
 if "!INTERACTIVE!"=="1" (
     echo --------------------------------------------------------------------
-    echo  Per-entity PII attributes   [was Ent1-5 / Fold1-5 / Tier1-5 / Cpte1-5]
+    echo  Attributes and addresses    [was Ent1-5 / Fold1-5 / Tier1-5 / Cpte1-5]
     echo --------------------------------------------------------------------
-    echo  Overwrites each column with that row's anonymized code. Same privacy
-    echo  effect as emptying it, but the column stays populated so NOT NULL and
-    echo  format checks still pass.
+    echo  Overwrites each populated column with the identifier's safe
+    echo  replacement. An empty column stays empty. Same privacy effect as
+    echo  emptying it, but the column stays populated so NOT NULL and format
+    echo  checks still pass.
     echo.
-    echo  Columns tagged [site] come from config\inventory_op_custom.csv - they
-    echo  are what this site put in the old Ent1-5 style slots. Comment a line
-    echo  out there to drop one column without disabling the whole category.
+    echo  Columns tagged [site] come from config\inventory_op_custom.csv.
+    echo  Comment a line out there to drop one column without disabling the
+    echo  whole category.
     echo.
 )
-call :flag_cols ANONYMIZE_ENTITY_ATTRIBUTES       SELF_CODE ENTITY       "Entity"       "!ANONYMIZE_ENTITY!"
-call :flag_cols ANONYMIZE_PORTFOLIO_ATTRIBUTES    SELF_CODE PORTFOLIO    "Portfolio"    "!ANONYMIZE_PORTFOLIO!"
-call :flag_cols ANONYMIZE_COUNTERPARTY_ATTRIBUTES SELF_CODE COUNTERPARTY "Counterparty" "!ANONYMIZE_COUNTERPARTY!"
-call :flag_cols ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES SELF_CODE BANK_ACCOUNT "Bank account" "!ANONYMIZE_BANK_ACCOUNT!"
+call :flag_cols ANONYMIZE_ENTITY_ATTRIBUTES             SELF_CODE ENTITY             "Entity"
+call :flag_cols ANONYMIZE_PORTFOLIO_ATTRIBUTES          SELF_CODE PORTFOLIO          "Portfolio"
+call :flag_cols ANONYMIZE_COUNTERPARTY_ATTRIBUTES       SELF_CODE COUNTERPARTY       "Counterparty"
+call :flag_cols ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES SELF_CODE UNCLASSIFIED_PARTY "Unclassified party"
+call :flag_cols ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES       SELF_CODE BANK_ACCOUNT       "Bank account"
 
 
 REM ===========================================================================
-REM  STEP 6 - run behaviour (all have defaults)
+REM  STEP 6 - scope decision for this client
+REM ===========================================================================
+if "!INTERACTIVE!"=="1" (
+    echo --------------------------------------------------------------------
+    echo  Scope decision for this client
+    echo --------------------------------------------------------------------
+    echo  A bank account is found in compte_banque and as a Compte node on the
+    echo  w_compte_banque screen. Nodes with no compte_banque row are anonymized
+    echo  as bank accounts only once you confirm that they ARE bank accounts for
+    echo  this client. If unsure answer n: a run that finds any stops before
+    echo  changing anything, and a dry run shows how many there are.
+    echo.
+)
+call :need_yn APPROVE_STRUCTURE_ONLY_ACCOUNTS "Structure-only account nodes are bank accounts here" n
+if "!INTERACTIVE!"=="1" echo.
+
+
+REM ===========================================================================
+REM  STEP 7 - run behaviour (all have defaults)
 REM ===========================================================================
 if "!INTERACTIVE!"=="1" (
     echo --------------------------------------------------------------------
@@ -192,14 +235,11 @@ if "!INTERACTIVE!"=="1" (
 call :need_default PARALLEL_DEGREE        "Parallel degree for bulk updates, 1 disables" 4
 call :need_default CUSTOM_INVENTORY       "Site-specific inventory file"                 inventory_op_custom.csv
 call :need_default FAIL_ON_MISSING_OBJECT "Abort if an inventory object is missing, y/n" n
-call :need_default MIN_CODE_LENGTH        "Shortest identifier to substitute, protects checkboxes" 2
 if "!INTERACTIVE!"=="1" echo.
-
-set "INVENTORY_CUSTOM=%ROOT%..\config\!CUSTOM_INVENTORY!"
 
 
 REM ===========================================================================
-REM  STEP 7 - summary
+REM  STEP 8 - summary: the resolved settings, before anything runs
 REM ===========================================================================
 echo ====================================================================
 echo  Summary
@@ -207,24 +247,48 @@ echo ====================================================================
 echo  Database ........ !ORACLE_SID!
 echo  Tablespaces ..... !TABLESPACE_DATA! (data)  !TABLESPACE_INDEX! (index)
 echo.
-echo  Codes ........... entity=!ANONYMIZE_ENTITY!  portfolio=!ANONYMIZE_PORTFOLIO!  counterparty=!ANONYMIZE_COUNTERPARTY!  account=!ANONYMIZE_BANK_ACCOUNT!
-echo  Descriptions .... entity=!ANONYMIZE_ENTITY_DESCRIPTION!  portfolio=!ANONYMIZE_PORTFOLIO_DESCRIPTION!  counterparty=!ANONYMIZE_COUNTERPARTY_DESCRIPTION!  account=!ANONYMIZE_BANK_ACCOUNT_DESCRIPTION!
-echo  PII attributes .. entity=!ANONYMIZE_ENTITY_ATTRIBUTES!  portfolio=!ANONYMIZE_PORTFOLIO_ATTRIBUTES!  counterparty=!ANONYMIZE_COUNTERPARTY_ATTRIBUTES!  account=!ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES!
+echo  Category                 Rename IDs   Descriptions   Attributes
+echo  Entity (E_)              !ANONYMIZE_ENTITY!            !ANONYMIZE_ENTITY_DESCRIPTION!              !ANONYMIZE_ENTITY_ATTRIBUTES!
+echo  Portfolio (P_)           !ANONYMIZE_PORTFOLIO!            !ANONYMIZE_PORTFOLIO_DESCRIPTION!              !ANONYMIZE_PORTFOLIO_ATTRIBUTES!
+echo  Counterparty (T_)        !ANONYMIZE_COUNTERPARTY!            !ANONYMIZE_COUNTERPARTY_DESCRIPTION!              !ANONYMIZE_COUNTERPARTY_ATTRIBUTES!
+echo  Unclassified party (X_)  !ANONYMIZE_UNCLASSIFIED_PARTY!            !ANONYMIZE_UNCLASSIFIED_PARTY_DESCRIPTION!              !ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES!
+echo  Bank account (CB_)       !ANONYMIZE_BANK_ACCOUNT!            !ANONYMIZE_BANK_ACCOUNT_DESCRIPTION!              !ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES!
+echo  Free text (NULL_OUT)     always
 echo.
+echo  Structure-only accounts approved .. !APPROVE_STRUCTURE_ONLY_ACCOUNTS!
 echo  Parallel ........ !PARALLEL_DEGREE!
 echo  Custom file ..... !CUSTOM_INVENTORY!
 echo  Fail on missing . !FAIL_ON_MISSING_OBJECT!
-echo  Min code length . !MIN_CODE_LENGTH!   (shorter values are treated as checkbox states)
 echo ====================================================================
 echo.
 
+REM The switches used to be nested: ANONYMIZE_<CATEGORY>=n also switched off
+REM that category's descriptions and attributes, and this script forced them
+REM to n. They are now independent, so a configuration written for the old
+REM behaviour can mask more than its author expected. Say so before running.
+for %%C in (ENTITY PORTFOLIO COUNTERPARTY UNCLASSIFIED_PARTY BANK_ACCOUNT) do (
+    set "_w="
+    if /I "!ANONYMIZE_%%C!"=="n" if /I "!ANONYMIZE_%%C_DESCRIPTION!"=="y" set "_w=1"
+    if /I "!ANONYMIZE_%%C!"=="n" if /I "!ANONYMIZE_%%C_ATTRIBUTES!"=="y" set "_w=1"
+    if defined _w (
+        echo  NOTE  ANONYMIZE_%%C=n now switches off ONLY the renaming of identifiers.
+        echo        Its descriptions and attributes are still masked, because their
+        echo        own switches are y. Older versions skipped all three. To leave the
+        echo        category untouched, set all three of its switches to n.
+        echo.
+    )
+)
+
+set "INVENTORY_CUSTOM=%ROOT%..\config\!CUSTOM_INVENTORY!"
+
 
 REM ===========================================================================
-REM  STEP 8 - turn the inventory CSVs into INSERT statements
+REM  STEP 9 - turn the inventory CSVs into INSERT statements
 REM
 REM  The CSVs are here, on the client, not necessarily on the database server,
 REM  so they cannot be read by an external table.
 REM ===========================================================================
+:build_inventory
 if not exist "%INVENTORY_BASE%" (
     echo ERROR: inventory not found:
     echo   %INVENTORY_BASE%
@@ -255,9 +319,15 @@ if !SEQ! EQU 0 (
     goto :failed
 )
 
+if defined INVENTORY_ONLY (
+    echo Inventory written to:
+    echo   !INVENTORY_SQL!
+    exit /b 0
+)
+
 
 REM ===========================================================================
-REM  STEP 9 - confirm and run
+REM  STEP 10 - confirm and run
 REM ===========================================================================
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
@@ -275,12 +345,16 @@ if "!RUN_MODE!"=="EXECUTE" if "!FORCE!"=="0" (
 sqlplus -L /nolog @"%SQL_DIR%\00_run_op_anonymization.sql" ^
     "!ORACLE_SID!" "!SYS_PASSWORD!" "!OP_PASSWORD!" ^
     "!TABLESPACE_DATA!" "!TABLESPACE_INDEX!" "!RUN_MODE!" ^
-    "!ANONYMIZE_ENTITY!" "!ANONYMIZE_PORTFOLIO!" "!ANONYMIZE_COUNTERPARTY!" "!ANONYMIZE_BANK_ACCOUNT!" ^
+    "!ANONYMIZE_ENTITY!" "!ANONYMIZE_PORTFOLIO!" "!ANONYMIZE_COUNTERPARTY!" ^
+    "!ANONYMIZE_UNCLASSIFIED_PARTY!" "!ANONYMIZE_BANK_ACCOUNT!" ^
     "!ANONYMIZE_ENTITY_DESCRIPTION!" "!ANONYMIZE_PORTFOLIO_DESCRIPTION!" ^
-    "!ANONYMIZE_COUNTERPARTY_DESCRIPTION!" "!ANONYMIZE_BANK_ACCOUNT_DESCRIPTION!" ^
+    "!ANONYMIZE_COUNTERPARTY_DESCRIPTION!" "!ANONYMIZE_UNCLASSIFIED_PARTY_DESCRIPTION!" ^
+    "!ANONYMIZE_BANK_ACCOUNT_DESCRIPTION!" ^
     "!ANONYMIZE_ENTITY_ATTRIBUTES!" "!ANONYMIZE_PORTFOLIO_ATTRIBUTES!" ^
-    "!ANONYMIZE_COUNTERPARTY_ATTRIBUTES!" "!ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES!" ^
-    "!PARALLEL_DEGREE!" "!FAIL_ON_MISSING_OBJECT!" "!MIN_CODE_LENGTH!" "%INVENTORY_SQL%"
+    "!ANONYMIZE_COUNTERPARTY_ATTRIBUTES!" "!ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES!" ^
+    "!ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES!" ^
+    "!PARALLEL_DEGREE!" "!FAIL_ON_MISSING_OBJECT!" "!APPROVE_STRUCTURE_ONLY_ACCOUNTS!" ^
+    "%INVENTORY_SQL%"
 
 set "RC=!ERRORLEVEL!"
 if !RC! EQU 0 (
@@ -296,10 +370,10 @@ REM  Verify and report - only after a real run that succeeded
 REM ===========================================================================
 REM A dry run changes nothing, so there is nothing to verify.
 REM
-REM The verifier exits non-zero when it finds exposed data, which is exactly
-REM when the report is most wanted - so its exit code is captured and the report
-REM is generated either way. The verification result is what decides the final
-REM exit code, not the report.
+REM The verifier exits non-zero whenever the result is not a clean PASS, which
+REM is exactly when the report is most wanted - so its exit code is captured
+REM and the report is generated either way. The verification result is what
+REM decides the final exit code, not the report.
 set "VRC=0"
 if !RC! EQU 0 if "!RUN_MODE!"=="EXECUTE" (
     echo.
@@ -310,11 +384,15 @@ if !RC! EQU 0 if "!RUN_MODE!"=="EXECUTE" (
     echo Building report...
     sqlplus -L -S op/"!OP_PASSWORD!"@!ORACLE_SID! @"%ROOT%verify\generate_report.sql"
 
+    REM A verifier that could not run at all is a failure of the run.
+    if !VRC! EQU 1 set "VRC=2"
     if !VRC! NEQ 0 set "RC=!VRC!"
 )
 
 echo.
 echo ====================================================================
+if !RC! EQU 3 goto :verdict_review
+if !RC! EQU 4 goto :verdict_incomplete
 if !RC! NEQ 0 (
     echo  FAILED - exit code !RC!
     echo.
@@ -337,13 +415,61 @@ if "!RUN_MODE!"=="DRYRUN" (
     echo  DRY RUN COMPLETE - no changes were made.
     echo  Re-run without /dryrun to execute.
 ) else (
-    echo  COMPLETE - verified clean
+    echo  COMPLETE - verified: PASS
     echo.
     echo  Report:  logs\report_^<timestamp^>.html      ^(open in a browser^)
 )
 echo  Full output: logs\
 echo ====================================================================
 exit /b 0
+
+:verdict_review
+echo  COMPLETE - verification: REVIEW REQUIRED
+echo.
+echo  The run finished, but some client identifiers were deliberately left
+echo  unchanged because their role or domain could not be established - a
+echo  structure node on another screen, a parent that is both a party and an
+echo  account, a value that is both in a MIXED column. They are still in
+echo  place. The report lists each one:
+echo    logs\report_^<timestamp^>.html
+echo ====================================================================
+exit /b 3
+
+:verdict_incomplete
+echo  COMPLETE - verification: INCOMPLETE
+echo.
+echo  No exposure was found where protection was switched on, but at least
+echo  one protection was switched off, so this is not full anonymization.
+echo  The report lists what was left and why:
+echo    logs\report_^<timestamp^>.html
+echo ====================================================================
+exit /b 4
+
+
+REM ===========================================================================
+REM  /inventory <file> - write the inventory INSERT file and stop.
+REM
+REM  Uses CUSTOM_INVENTORY from the configuration file if it sets one. Touches
+REM  no database: it is how the regression suite loads the shipped inventory,
+REM  and a quick way to check what a CSV edit produces.
+REM ===========================================================================
+:inventory_only
+if "%~2"=="" (
+    echo ERROR: /inventory needs the file to write, for example
+    echo   run_op_anonymization.bat /inventory "%%TEMP%%\inventory.sql"
+    exit /b 1
+)
+set "INVENTORY_ONLY=1"
+set "INVENTORY_SQL=%~f2"
+set "CUSTOM_INVENTORY="
+if exist "%CONFIG_FILE%" (
+    for /f "usebackq eol=@ tokens=1,* delims==" %%A in ("%CONFIG_FILE%") do (
+        if /I "%%A"=="CUSTOM_INVENTORY" set "CUSTOM_INVENTORY=%%B"
+    )
+)
+if not defined CUSTOM_INVENTORY set "CUSTOM_INVENTORY=inventory_op_custom.csv"
+set "INVENTORY_CUSTOM=%ROOT%..\config\!CUSTOM_INVENTORY!"
+goto :build_inventory
 
 
 REM ===========================================================================
@@ -371,12 +497,15 @@ REM --- Forget anything a previous run or the environment left behind, so that
 REM     "do not load the config" really does ask for everything.
 :clear_all
 for %%V in (ORACLE_SID SYS_PASSWORD OP_PASSWORD TABLESPACE_DATA TABLESPACE_INDEX
-            ANONYMIZE_ENTITY ANONYMIZE_PORTFOLIO ANONYMIZE_COUNTERPARTY ANONYMIZE_BANK_ACCOUNT
+            ANONYMIZE_ENTITY ANONYMIZE_PORTFOLIO ANONYMIZE_COUNTERPARTY
+            ANONYMIZE_UNCLASSIFIED_PARTY ANONYMIZE_BANK_ACCOUNT
             ANONYMIZE_ENTITY_DESCRIPTION ANONYMIZE_PORTFOLIO_DESCRIPTION
-            ANONYMIZE_COUNTERPARTY_DESCRIPTION ANONYMIZE_BANK_ACCOUNT_DESCRIPTION
+            ANONYMIZE_COUNTERPARTY_DESCRIPTION ANONYMIZE_UNCLASSIFIED_PARTY_DESCRIPTION
+            ANONYMIZE_BANK_ACCOUNT_DESCRIPTION
             ANONYMIZE_ENTITY_ATTRIBUTES ANONYMIZE_PORTFOLIO_ATTRIBUTES
-            ANONYMIZE_COUNTERPARTY_ATTRIBUTES ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES
-            PARALLEL_DEGREE CUSTOM_INVENTORY FAIL_ON_MISSING_OBJECT MIN_CODE_LENGTH) do set "%%V="
+            ANONYMIZE_COUNTERPARTY_ATTRIBUTES ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES
+            ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES APPROVE_STRUCTURE_ONLY_ACCOUNTS
+            PARALLEL_DEGREE CUSTOM_INVENTORY FAIL_ON_MISSING_OBJECT) do set "%%V="
 exit /b 0
 
 
@@ -462,9 +591,9 @@ goto :need_yn_done
 :need_yn_show
 if "!INTERACTIVE!"=="1" call :echo_set "%~1"
 :need_yn_done
-REM Normalise so later comparisons and the summary are consistent. The engine
-REM accepts y/yes/true/1 regardless; this is for display and for the
-REM "is the category on?" test below.
+REM Normalise so later comparisons and the summary are consistent. A value that
+REM is neither yes nor no is passed through unchanged: the engine refuses it
+REM rather than treating a typo as "no".
 set "_v=!%~1!"
 if defined _v set "_v=!_v:~0,1!"
 if /I "!_v!"=="y" set "%~1=y"
@@ -477,24 +606,18 @@ if /I "!_v!"=="0" set "%~1=n"
 exit /b 0
 
 
-REM --- Ask a description/attributes flag, listing the columns it governs.
+REM --- Ask a description/attributes switch, listing the columns it governs.
 REM     The list is read from the inventory CSVs at prompt time, so it is always
 REM     what will actually happen rather than a description that can drift.
 REM
-REM     Usage: call :flag_cols VARNAME RULE CATEGORY "Label" <category flag>
+REM     These switches are independent of the category's renaming switch: a
+REM     label can be masked while the identifier itself is kept.
+REM
+REM     Usage: call :flag_cols VARNAME RULE CATEGORY "Label"
 :flag_cols
 set "_var=%~1"
 set "_rule=%~2"
 set "_cat=%~3"
-set "_catflag=%~5"
-
-REM The category itself being off makes this moot: both rules write the row's
-REM anonymized code, and without a mapping there is none to write.
-if /I not "!_catflag!"=="y" (
-    set "%~1=n"
-    if "!INTERACTIVE!"=="1" echo   %~4 - skipped, that category is not being anonymized.
-    exit /b 0
-)
 
 call :is_missing "%~1"
 if "!_missing!"=="0" goto :flag_cols_show
@@ -503,6 +626,8 @@ if "!INTERACTIVE!"=="0" (
     exit /b 0
 )
 
+set "INVENTORY_CUSTOM=%ROOT%..\config\!CUSTOM_INVENTORY!"
+if not defined CUSTOM_INVENTORY set "INVENTORY_CUSTOM=%ROOT%..\config\inventory_op_custom.csv"
 echo   %~4 - columns affected:
 set "_found=0"
 call :list_cols "%INVENTORY_BASE%" "!_rule!" "!_cat!" ""
@@ -523,7 +648,8 @@ if "!INTERACTIVE!"=="1" call :echo_set "%~1"
 exit /b 0
 
 
-REM --- List inventory columns matching a rule, for this category or for ANY.
+REM --- List inventory columns a category's switch governs: its own rows, the
+REM     PARTY rows for a party category, and the structure rows (NODE_ROLE).
 REM     Usage: call :list_cols <csv> <RULE> <CATEGORY> <tag>
 :list_cols
 for /f "usebackq eol=# tokens=1-5* delims=," %%A in ("%~1") do (
@@ -533,8 +659,12 @@ for /f "usebackq eol=# tokens=1-5* delims=," %%A in ("%~1") do (
                 echo         %%A.%%B %~4
                 set "_found=1"
             )
-            if /I "%%D"=="ANY" (
-                echo         %%A.%%B %~4 - applies to every category
+            if /I "%%D"=="PARTY" if /I not "%~3"=="BANK_ACCOUNT" (
+                echo         %%A.%%B %~4 - every party category
+                set "_found=1"
+            )
+            if /I "%%D"=="NODE_ROLE" (
+                echo         %%A.%%B %~4 - structure nodes of this category
                 set "_found=1"
             )
         )
@@ -589,7 +719,7 @@ exit /b 0
 
 :failed
 echo.
-del "%INVENTORY_SQL%" 2>nul
+if not defined INVENTORY_ONLY del "%INVENTORY_SQL%" 2>nul
 exit /b 1
 
 :cleanup_ok

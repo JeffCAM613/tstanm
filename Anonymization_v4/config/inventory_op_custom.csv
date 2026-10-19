@@ -21,34 +21,44 @@
 #
 # RULE      what happens to the column
 # --------  ------------------------------------------------------------------
-# CODE      Replace the identifier using the code mapping. Use for any column
-#           holding an entity / portfolio / counterparty / bank account code.
-# NULL_OUT  Set to NULL. Use for free text and PII. Always applied.
-# SELF_CODE Overwrite with the anonymized code of the row itself. Use when the
+# CODE      Replace the identifier with its typed translation. Use for any
+#           column holding a party code or a bank-account code.
+# NULL_OUT  Set to NULL (a marker if NOT NULL). Use for free text and PII.
+#           Always applied.
+# SELF_CODE Overwrite with the owning identity's replacement. Use when the
 #           column must stay populated (NOT NULL constraint or format check).
+#           An empty field stays empty.
 #
-# CATEGORY  which codes may be substituted in
+# CATEGORY  which identifiers the column holds
 # --------  ------------------------------------------------------------------
-# ANY           Column may hold entity / portfolio / counterparty codes.
-# BANK_ACCOUNT  Column references compte_banque.code. REQUIRED for bank account
-#               columns - without it a value that also exists as a tiers code
-#               will be rewritten with the wrong mapping.
+# PARTY         Party codes - entity, portfolio, counterparty, unclassified.
+#               A bank account's replacement is never written here.
+# BANK_ACCOUNT  compte_banque codes. A party's replacement is never written
+#               here, even when a party has the same text.
+# MIXED         Only once reviewed: a column that holds BOTH. A value known
+#               as both a party and an account is left unchanged and reported.
 # NONE          Use with NULL_OUT.
-# ENTITY / PORTFOLIO / COUNTERPARTY
-#               Use with SELF_CODE to say which category owns the row.
+# ENTITY / PORTFOLIO / COUNTERPARTY / UNCLASSIFIED_PARTY
+#               SELF_CODE or DESCRIPTION only: limit the column to owners of
+#               one category. Use PARTY to cover every party - an unclassified
+#               (X_) party is covered only by PARTY or UNCLASSIFIED_PARTY.
+#
+# ANY is no longer accepted - name the domain.
 #
 # ----------------------------------------------------------------------------
 # HOW TO CHOOSE
 #
-#   Does the column hold a code that appears elsewhere as an entity, portfolio,
-#   counterparty or bank account?
-#     yes, and it is a bank account -> CODE,BANK_ACCOUNT
-#     yes, anything else            -> CODE,ANY
+#   Does the column hold a code that appears elsewhere as a party (tiers) or a
+#   bank account (compte_banque)?
+#     a bank account                -> CODE,BANK_ACCOUNT
+#     a party                       -> CODE,PARTY
+#     either, confirmed by review   -> CODE,MIXED
 #     no, it is free text or PII    -> NULL_OUT,NONE
-#     no, but it cannot be NULL     -> SELF_CODE,<owning category>
+#     no, but it cannot be NULL     -> SELF_CODE,<owning domain>
 #
-# When unsure between CODE,ANY and CODE,BANK_ACCOUNT: if the column name
-# contains compte / account / iban / rib, it is almost certainly BANK_ACCOUNT.
+# Decide from what the column HOLDS, not from its name: compte_ana contains
+# "compte" and holds party codes too. tools/analyze_flag_impact.sql measures,
+# per column, how many values belong to each category.
 #
 # ----------------------------------------------------------------------------
 # SAFETY
@@ -93,38 +103,52 @@ table_name,column_name,rule,category,source,notes
 #
 # HOW TO MAKE ONE OPTIONAL
 #   Comment out its line. That is the per-column control.
-#   To switch off a whole category at once, set the matching flag in
-#   anonymization.ini:
+#   To switch off a whole category at once, set the matching switch in
+#   anonymization.ini, for example:
 #       ANONYMIZE_ENTITY_ATTRIBUTES=n
-#       ANONYMIZE_PORTFOLIO_ATTRIBUTES=n
-#       ANONYMIZE_COUNTERPARTY_ATTRIBUTES=n
-#       ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES=n
+#       ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES=n
 #
 # NOT MOVED
 #   tiers.adresse1-adresse5 stayed in inventory_op.csv. They were never one of
 #   the five slots - the vendor package always cleared them as part of the
 #   description flag, so they are vendor default rather than a site choice.
+#
+# CHANGED 2026-10-20 - every tiers row below now applies to EVERY party
+#   Each was limited to the one category whose old slot selected it: phone and
+#   names to entities only, birth department to portfolios only, telex to
+#   counterparties only. A party the data cannot classify - UNCLASSIFIED_PARTY,
+#   X_ - matched none of them, so its contact details were never masked. Its
+#   category is unknown, so only a rule covering every party protects it; and
+#   a rule is per column, so it covers the other categories too. Each owner is
+#   still gated by its own category's ATTRIBUTES switch.
+#   To return a column to one category, change PARTY back to that category -
+#   X_ owners then keep that column's real value.
 # ----------------------------------------------------------------------------
 
-# --- ENTITY: contact details        (was Ent1=telephone Ent2=fax Ent3=email_adress Ent4=nom_pp Ent5=prenom_pp)
-tiers,telephone,SELF_CODE,ENTITY,CUSTOM,was Ent1
-tiers,fax,SELF_CODE,ENTITY,CUSTOM,was Ent2
-tiers,email_adress,SELF_CODE,ENTITY,CUSTOM,was Ent3 - vendor spelling not a typo
-tiers,nom_pp,SELF_CODE,ENTITY,CUSTOM,was Ent4 - surname of a natural person
-tiers,prenom_pp,SELF_CODE,ENTITY,CUSTOM,was Ent5 - given name of a natural person
+# --- Contact and personal details   (was Ent1=telephone Ent2=fax Ent3=email_adress Ent4=nom_pp Ent5=prenom_pp)
+tiers,telephone,SELF_CODE,PARTY,CUSTOM,was Ent1 - entities only until 2026-10-20
+tiers,fax,SELF_CODE,PARTY,CUSTOM,was Ent2 - entities only until 2026-10-20
+tiers,email_adress,SELF_CODE,PARTY,CUSTOM,was Ent3 - vendor spelling not a typo
+tiers,nom_pp,SELF_CODE,PARTY,CUSTOM,was Ent4 - surname of a natural person
+tiers,prenom_pp,SELF_CODE,PARTY,CUSTOM,was Ent5 - given name of a natural person
 
-# --- PORTFOLIO: grouping and personal attributes   (was Fold1=groupe_1 Fold2=groupe_2 Fold3=groupe_3 Fold4=flag_pp Fold5=dpt_naissance)
-tiers,groupe_1,SELF_CODE,PORTFOLIO,CUSTOM,was Fold1
-tiers,groupe_2,SELF_CODE,PORTFOLIO,CUSTOM,was Fold2
-tiers,groupe_3,SELF_CODE,PORTFOLIO,CUSTOM,was Fold3
-tiers,flag_pp,SELF_CODE,PORTFOLIO,CUSTOM,was Fold4 - natural-person flag
-tiers,dpt_naissance,SELF_CODE,PORTFOLIO,CUSTOM,was Fold5 - department of birth
+# --- Grouping and personal attributes   (was Fold1=groupe_1 Fold2=groupe_2 Fold3=groupe_3 Fold4=flag_pp Fold5=dpt_naissance)
+tiers,groupe_1,SELF_CODE,PARTY,CUSTOM,was Fold1 - portfolios only until 2026-10-20
+tiers,groupe_2,SELF_CODE,PARTY,CUSTOM,was Fold2 - portfolios only until 2026-10-20
+tiers,groupe_3,SELF_CODE,PARTY,CUSTOM,was Fold3 - portfolios only until 2026-10-20
+# EXCLUDED 2026-10-20 - tiers.flag_pp is the natural-person checkbox (O/N),
+# VARCHAR2(1). It says whether a party is a person; it identifies no one, and
+# a one-character column cannot hold any replacement - listed, preflight would
+# stop the run. It used to be skipped silently by a checkbox rule that no
+# longer exists; the decision is now here, where it can be seen and reversed.
+# tiers,flag_pp,SELF_CODE,PARTY,CUSTOM,was Fold4 - natural-person flag
+tiers,dpt_naissance,SELF_CODE,PARTY,CUSTOM,was Fold5 - department of birth
 
-# --- COUNTERPARTY: classification attributes       (was Tier1=sector Tier2=seniority Tier3=telex Tier4=type_interne Tier5=n)
-tiers,sector,SELF_CODE,COUNTERPARTY,CUSTOM,was Tier1
-tiers,seniority,SELF_CODE,COUNTERPARTY,CUSTOM,was Tier2
-tiers,telex,SELF_CODE,COUNTERPARTY,CUSTOM,was Tier3
-tiers,type_interne,SELF_CODE,COUNTERPARTY,CUSTOM,was Tier4
+# --- Classification attributes   (was Tier1=sector Tier2=seniority Tier3=telex Tier4=type_interne Tier5=n)
+tiers,sector,SELF_CODE,PARTY,CUSTOM,was Tier1 - counterparties only until 2026-10-20
+tiers,seniority,SELF_CODE,PARTY,CUSTOM,was Tier2 - counterparties only until 2026-10-20
+tiers,telex,SELF_CODE,PARTY,CUSTOM,was Tier3 - counterparties only until 2026-10-20
+tiers,type_interne,SELF_CODE,PARTY,CUSTOM,was Tier4 - counterparties only until 2026-10-20
 # Tier5 was 'n' - no fifth column was selected
 
 # --- BANK ACCOUNT: grouping attributes             (was Cpte1=groupe_1 Cpte2=groupe_2 Cpte3=groupe_3 Cpte4=n Cpte5=n)
@@ -142,7 +166,7 @@ compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte3
 # ----------------------------------------------------------------------------
 
 # A new module with entity and account references plus a free-text note field:
-# ktp_new_module_config,entity,CODE,ANY,CUSTOM,New module entity reference
+# ktp_new_module_config,entity,CODE,PARTY,CUSTOM,New module entity reference
 # ktp_new_module_config,account_id,CODE,BANK_ACCOUNT,CUSTOM,New module account
 # ktp_new_module_data,user_notes,NULL_OUT,NONE,CUSTOM,Free text entered by users
 # ktp_new_module_data,audit_user,NULL_OUT,NONE,CUSTOM,Username - PII
@@ -151,10 +175,11 @@ compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte3
 # site_contact,full_name,NULL_OUT,NONE,CUSTOM,
 # site_contact,email_address,NULL_OUT,NONE,CUSTOM,
 # site_contact,phone_number,NULL_OUT,NONE,CUSTOM,
-# site_contact,entity_code,CODE,ANY,CUSTOM,
+# site_contact,entity_code,CODE,PARTY,CUSTOM,
 
-# A column that is NOT NULL and so cannot be nulled:
-# site_entity_ext,mandatory_label,SELF_CODE,ENTITY,CUSTOM,NOT NULL - cannot be nulled
+# A column that is NOT NULL and so cannot be nulled - owned by the party whose
+# code is in the table's code column:
+# site_entity_ext,mandatory_label,SELF_CODE,PARTY,CUSTOM,NOT NULL - cannot be nulled
 
 # ----------------------------------------------------------------------------
 # ADD YOUR ROWS BELOW THIS LINE
@@ -163,9 +188,10 @@ compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte3
 # ----------------------------------------------------------------------------
 # CATEGORY CORRECTION - param_cpta_reg_gen.compte_ana
 # ----------------------------------------------------------------------------
-# Found on TANM7881, 2026-08-13, after a full run verified clean.
+# Found on TANM7881, 2026-08-13, after a full run verified clean. Kept as the
+# record of why the shipped row is now MIXED.
 #
-# inventory_op.csv declares this column CODE / BANK_ACCOUNT, inherited from v3's
+# inventory_op.csv declared this column CODE / BANK_ACCOUNT, inherited from v3's
 #   merge_codes('param_cpta_reg_gen','compte_ana', p_entity_type => 'COMPTE')
 #
 # so the engine only ever substituted bank-account codes into it. Five rows were
@@ -174,14 +200,13 @@ compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte3
 # "compte_ana" is compte analytique: an analytical / cost-centre account, not a
 # bank account. v3 classified it from the word "compte" in the name.
 #
-# A row here overrides the shipped inventory - same table and column, loaded
-# second, so this category wins.
-#
-# Widening to ANY searches the whole mapping, which still resolves genuine bank
-# account references correctly: code_map_any contains every category, and only
-# the six cross-category collisions resolve differently.
+# This file overrode it to ANY until 2026-10-20. ANY no longer exists: the
+# shipped inventory now declares the column MIXED - a reviewed field holding
+# party AND account codes - so the override is retired. A value that is both a
+# party and an account is left unchanged there and reported for review, where
+# ANY silently gave it the party's replacement.
+# param_cpta_reg_gen,compte_ana,CODE,ANY,CUSTOM,was BANK_ACCOUNT - left 5 originals on TANM7881
 # ----------------------------------------------------------------------------
-param_cpta_reg_gen,compte_ana,CODE,ANY,CUSTOM,was BANK_ACCOUNT - left 5 originals on TANM7881
 
 
 # ============================================================================

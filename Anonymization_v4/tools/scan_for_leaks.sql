@@ -19,8 +19,12 @@
 -- This script ignores the inventory entirely. It walks EVERY character column
 -- in the OP schema and asks one question:
 --
---     does this column still contain a value that appears in
---     anon_meta.code_map as an ORIGINAL, pre-anonymization code?
+--     does this column still contain a value that was recorded as an
+--     ORIGINAL identifier - a party or a bank account - before the run?
+--
+-- The originals come from anon_meta.identity_inventory, which holds every
+-- identity the run captured, whatever its domain and whether or not a switch
+-- had it renamed.
 --
 -- Any hit is a column that holds real client data and was missed.
 --
@@ -29,11 +33,16 @@
 --
 -- Not every hit is a leak. A short code can collide with an unrelated value -
 -- a currency, a status flag, a product code. Check the samples before acting.
+-- A ONE-CHARACTER identifier matches every column holding that character -
+-- every 'O' or 'X' flag in the schema - so expect noise when the client has one.
+-- Every width is scanned: there is no length exception any more, because a
+-- real one-character identifier must be found like any other.
 -- But a column with a high hit count, on a table that references entities, is
 -- almost certainly a gap in the inventory.
 --
 -- The fix for a genuine hit is one line in config/inventory_op_custom.csv, then
--- re-run. The engine is idempotent, so re-running only touches what is left.
+-- re-run - with the domain the column holds: CODE,PARTY or CODE,BANK_ACCOUNT.
+-- The engine is idempotent, so re-running only touches what is left.
 --
 -- ----------------------------------------------------------------------------
 -- COST
@@ -41,13 +50,9 @@
 -- One pass per table. Expect roughly the length of a full run - this reads
 -- everything. Set SAMPLE_PCT below to 1 for a fast first look on a large
 -- instance; sampling applies only to tables over a million rows.
---
--- Codes shorter than MIN_LEN are ignored, matching the engine: a one-character
--- value matches far too much to be evidence of anything.
 -- ============================================================================
 
 DEFINE SAMPLE_PCT = 0
-DEFINE MIN_LEN    = 3
 
 SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 SET LINESIZE 200
@@ -62,10 +67,10 @@ WHENEVER SQLERROR EXIT FAILURE
 DECLARE
    v_codes NUMBER;
 BEGIN
-   SELECT COUNT(*) INTO v_codes FROM anon_meta.code_map_any;
+   SELECT COUNT(DISTINCT old_code) INTO v_codes FROM anon_meta.identity_inventory;
    IF v_codes = 0 THEN
       RAISE_APPLICATION_ERROR(-20060,
-         'anon_meta.code_map_any is empty - nothing to search for. Run the anonymization first.');
+         'anon_meta.identity_inventory is empty - nothing to search for. Run the anonymization first.');
    END IF;
    DBMS_OUTPUT.PUT_LINE('Searching every OP character column for any of '
                      || TO_CHAR(v_codes, 'FM999,999') || ' original identifiers.');
@@ -107,7 +112,10 @@ COMMIT;
 DECLARE
    c_chunk   CONSTANT PLS_INTEGER := 20;    -- columns per statement
    v_sample  NUMBER := TO_NUMBER('&SAMPLE_PCT');
-   v_min_len NUMBER := TO_NUMBER('&MIN_LEN');
+   -- One row per original text: the same text can be a party AND an account,
+   -- and a plain join would count such a value twice.
+   c_originals CONSTANT VARCHAR2(200) :=
+      '(SELECT old_code FROM anon_meta.identity_inventory GROUP BY old_code)';
 
    v_sql      VARCHAR2(32767);
    v_sel      VARCHAR2(32767);
@@ -134,14 +142,13 @@ BEGIN
                 AND (num_rows IS NULL OR num_rows > 0)
               ORDER BY table_name) LOOP
 
-      -- Character columns wide enough to hold an identifier.
+      -- Every character column, whatever its width.
       l_col := t_names();
       FOR c IN (SELECT column_name
                   FROM all_tab_columns
                  WHERE owner = 'OP'
                    AND table_name = t.table_name
                    AND data_type IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR')
-                   AND char_length >= v_min_len
                  ORDER BY column_id) LOOP
          l_col.EXTEND;
          l_col(l_col.COUNT) := c.column_name;
@@ -155,7 +162,7 @@ BEGIN
       v_sampled := CASE WHEN v_sample > 0 AND t.num_rows > 1000000 THEN 'Y' ELSE 'N' END;
 
       -- Chunk the columns: one pass over the table per chunk, each column
-      -- resolved by a primary key lookup into code_map_any.
+      -- resolved by a lookup into the recorded originals.
       DECLARE
          v_from PLS_INTEGER := 1;
       BEGIN
@@ -164,7 +171,7 @@ BEGIN
             v_join := '';
             FOR i IN v_from .. LEAST(v_from + c_chunk - 1, l_col.COUNT) LOOP
                v_sel  := v_sel  || ', COUNT(m' || i || '.old_code)';
-               v_join := v_join || ' LEFT JOIN anon_meta.code_map_any m' || i
+               v_join := v_join || ' LEFT JOIN ' || c_originals || ' m' || i
                                 || ' ON m' || i || '.old_code = t."' || l_col(i) || '"';
             END LOOP;
 
@@ -191,7 +198,7 @@ BEGIN
                         EXECUTE IMMEDIATE
                            'SELECT COUNT(*), COUNT(m.old_code) FROM op."' || t.table_name || '" '
                         || CASE WHEN v_sampled = 'Y' THEN 'SAMPLE(' || v_sample || ') ' ELSE '' END
-                        || 't LEFT JOIN anon_meta.code_map_any m ON m.old_code = t."'
+                        || 't LEFT JOIN ' || c_originals || ' m ON m.old_code = t."'
                         || l_col(i) || '"'
                            INTO v_total, v_rows;
 
@@ -202,7 +209,7 @@ BEGIN
 
                            EXECUTE IMMEDIATE
                               'SELECT MAX(t."' || l_col(i) || '") FROM op."' || t.table_name
-                           || '" t JOIN anon_meta.code_map_any m ON m.old_code = t."'
+                           || '" t JOIN ' || c_originals || ' m ON m.old_code = t."'
                            || l_col(i) || '"' INTO v_sample_val;
 
                            INSERT INTO anon_meta.leak_scan
@@ -231,7 +238,7 @@ BEGIN
 
                   EXECUTE IMMEDIATE
                      'SELECT MAX(t."' || l_col(i) || '") FROM op."' || t.table_name
-                  || '" t JOIN anon_meta.code_map_any m ON m.old_code = t."'
+                  || '" t JOIN ' || c_originals || ' m ON m.old_code = t."'
                   || l_col(i) || '"' INTO v_sample_val;
 
                   INSERT INTO anon_meta.leak_scan
@@ -288,8 +295,10 @@ PROMPT
 PROMPT ====================================================================
 PROMPT  IN THE INVENTORY but still holding originals
 PROMPT ====================================================================
-PROMPT  Should be empty. Anything here contradicts verify_op_coverage.sql and
-PROMPT  means a column was skipped at run time - check the step log for it.
+PROMPT  Empty after a run that verified PASS. Otherwise each one should match a
+PROMPT  verifier result for the column: REVIEW - left unchanged because its role
+PROMPT  or domain is ambiguous - or DISABLED - a switch was off. One that matches
+PROMPT  neither means a column was skipped at run time: check the step log.
 PROMPT
 
 SELECT table_name, column_name, hit_rows, total_rows, sample_value

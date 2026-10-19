@@ -116,10 +116,10 @@ BEGIN
               ORDER BY DECODE(rule,'CODE',1,'NULL_OUT',2,'DESCRIPTION',3,4)) LOOP
       w('| `' || r.rule || '` | ' || r.n || ' | ' ||
         CASE r.rule
-           WHEN 'CODE'        THEN 'Identifier replaced using the code mapping'
-           WHEN 'NULL_OUT'    THEN 'Set to NULL. Always applied, never configurable'
-           WHEN 'DESCRIPTION' THEN 'Label replaced with the anonymized code of its own row'
-           WHEN 'SELF_CODE'   THEN 'PII attribute replaced with the anonymized code of its own row'
+           WHEN 'CODE'        THEN 'Identifier replaced by its typed translation'
+           WHEN 'NULL_OUT'    THEN 'Set to NULL, or a marker where NOT NULL. Always applied'
+           WHEN 'DESCRIPTION' THEN 'Label set to its owner''s replacement'
+           WHEN 'SELF_CODE'   THEN 'Attribute set to its owner''s replacement; an empty one stays empty'
         END || ' |');
    END LOOP;
    w;
@@ -132,11 +132,14 @@ BEGIN
               GROUP BY category ORDER BY category) LOOP
       w('| `' || r.category || '` | ' || r.n || ' | ' ||
         CASE r.category
-           WHEN 'ANY'          THEN 'May hold an entity, portfolio or counterparty code'
-           WHEN 'BANK_ACCOUNT' THEN 'References `compte_banque.code`; mapping restricted to bank accounts'
-           WHEN 'ENTITY'       THEN 'Owned by an entity row'
-           WHEN 'PORTFOLIO'    THEN 'Owned by a portfolio row'
-           WHEN 'COUNTERPARTY' THEN 'Owned by a counterparty row'
+           WHEN 'PARTY'        THEN 'Party identifiers only (E_, P_, T_, X_); never a bank account''s'
+           WHEN 'BANK_ACCOUNT' THEN 'Bank-account identifiers only (CB_); never a party''s'
+           WHEN 'MIXED'        THEN 'Reviewed: holds both; a value that is both is left for review'
+           WHEN 'NODE_ROLE'    THEN 'Structure tree: each node by its role, pere by its parent''s'
+           WHEN 'ENTITY'       THEN 'Owned by an entity'
+           WHEN 'PORTFOLIO'    THEN 'Owned by a portfolio'
+           WHEN 'COUNTERPARTY' THEN 'Owned by a counterparty'
+           WHEN 'UNCLASSIFIED_PARTY' THEN 'Owned by a party the data cannot classify'
            WHEN 'NONE'         THEN 'Free text; not category-dependent'
         END || ' |');
    END LOOP;
@@ -145,16 +148,22 @@ BEGIN
    -- ------------------------------------------------------- identifier form --
    w('## Generated identifiers');
    w;
-   w('| Category | Prefix | Example | Source of the original codes |');
-   w('|---|---|---|---|');
-   w('| Entity | `E_` | `E_0000001` | `structure` join `tiers`, `structure=''Entite''`, `flag_portefeuille=''N''` |');
-   w('| Portfolio | `P_` | `P_0000001` | same, `flag_portefeuille=''O''` |');
-   w('| Counterparty | `T_` | `T_0000001` | `structure`, `structure=''Compte''`, `ecran=''w_tiers''` |');
-   w('| Bank account | `CB_` | `CB_0000001` | `compte_banque` |');
+   w('Every original identifier is classified once, from the data, into one category. A party');
+   w('is a `tiers` row, a `structure` node on the `w_tiers` screen, or a confirmed reference;');
+   w('a bank account is a `compte_banque` row or a `Compte` node on `w_compte_banque`.');
    w;
-   w('Identifiers are assigned in sorted order of the original code, so the same');
-   w('source data always produces the same mapping. The mapping is kept in');
-   w('`anon_meta.code_map`.');
+   w('| Category | Prefix | Example | Rule, in this order |');
+   w('|---|---|---|---|');
+   w('| Portfolio | `P_` | `P_0000001` | `tiers.flag_portefeuille=''O''` and a `w_tiers` node of any classification |');
+   w('| Entity | `E_` | `E_0000001` | flag `N` and an `Entite` node on `w_tiers` - wins over another classification |');
+   w('| Counterparty | `T_` | `T_0000001` | flag `N` and another (non-NULL) classification on `w_tiers`, no `Entite` |');
+   w('| Unclassified party | `X_` | `X_0000001` | any other party: no `tiers` row, no node, no `w_tiers` node, unknown flag or classification - the reason is recorded |');
+   w('| Bank account | `CB_` | `CB_0000001` | `compte_banque`, and `Compte` nodes on `w_compte_banque` |');
+   w;
+   w('The same text can be a party and a bank account: each keeps its own replacement. New');
+   w('replacements are appended after the existing ones in sorted order of the original code, so');
+   w('the same data always gets the same mapping and nothing is renumbered. The mapping is kept in');
+   w('`anon_meta.code_map`, the classification in `anon_meta.identity_inventory`.');
    w;
 
    IF v_missing > 0 THEN

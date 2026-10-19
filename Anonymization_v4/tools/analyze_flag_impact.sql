@@ -8,18 +8,17 @@
 -- ----------------------------------------------------------------------------
 -- WHAT IT ANSWERS
 --
--- unofficial docs/09_flag_impact.md can say for certain what happens to 189 of the 579
--- inventory rows. The other 390 are declared CODE + ANY: they may hold entity,
--- portfolio or counterparty codes, so which flag governs them depends on what
--- is actually in the column on THIS instance.
+-- A PARTY column can hold entity, portfolio, counterparty and unclassified (X_)
+-- codes, so which switch governs its values depends on what is actually in the
+-- column on THIS instance. A column typed BANK_ACCOUNT or PARTY that holds
+-- values of the OTHER domain is a column whose type needs review.
 --
 -- This script measures it. For every CODE column it counts how many rows hold a
--- value belonging to each of the four source populations, and how many hold a
--- value belonging to none.
+-- value of each of the five categories, and how many hold a value of none.
 --
--- It deliberately builds ALL FOUR populations regardless of the current
--- configuration - the point is to show what each flag WOULD do, including the
--- ones you have switched off.
+-- The categories come from the identity plan of the latest run - a dry run is
+-- enough - which classifies every identity whatever the switches say: the
+-- point is to show what each switch WOULD do, including the ones that are off.
 --
 -- ----------------------------------------------------------------------------
 -- READ THE "unmapped" COLUMN
@@ -59,11 +58,14 @@ WHENEVER SQLERROR EXIT FAILURE
 
 DECLARE
    v_n NUMBER;
+   v_p NUMBER;
 BEGIN
    SELECT COUNT(*) INTO v_n FROM anon_meta.anon_inventory;
-   IF v_n = 0 THEN
+   SELECT COUNT(*) INTO v_p FROM anon_meta.identity_plan;
+   IF v_n = 0 OR v_p = 0 THEN
       RAISE_APPLICATION_ERROR(-20050,
-         'The inventory is empty. Run a dry run first - that is what loads the CSVs.');
+         'The inventory or the identity plan is empty. Run a dry run first - that is what '
+      || 'loads the CSVs and classifies the identities.');
    END IF;
 END;
 /
@@ -89,10 +91,25 @@ BEGIN
             n_portfolio   NUMBER,
             n_counterparty NUMBER,
             n_bank_account NUMBER,
+            n_unclassified NUMBER,
+            n_party_only  NUMBER,
+            n_account_only NUMBER,
             n_unmapped    NUMBER,
             sampled       VARCHAR2(1)
          )]';
    END IF;
+
+   -- Added with the typed identity model; a table from before has none of them.
+   FOR c IN (SELECT 'N_UNCLASSIFIED' AS col FROM dual UNION ALL
+             SELECT 'N_PARTY_ONLY' FROM dual UNION ALL
+             SELECT 'N_ACCOUNT_ONLY' FROM dual) LOOP
+      SELECT COUNT(*) INTO v_exists
+        FROM all_tab_columns
+       WHERE owner = 'ANON_META' AND table_name = 'FLAG_IMPACT' AND column_name = c.col;
+      IF v_exists = 0 THEN
+         EXECUTE IMMEDIATE 'ALTER TABLE anon_meta.flag_impact ADD (' || c.col || ' NUMBER)';
+      END IF;
+   END LOOP;
 END;
 /
 
@@ -100,10 +117,8 @@ DELETE FROM anon_meta.flag_impact;
 COMMIT;
 
 -- ----------------------------------------------------------------------------
--- Source populations, built independent of the configuration.
---
--- These are the same four queries generate_code_map uses, minus the generated
--- identifiers - we only need to know which codes belong to which category.
+-- Populations, independent of the configuration: every identity of the latest
+-- plan, by category. A text that is a party AND a bank account is in both.
 -- ----------------------------------------------------------------------------
 DECLARE
    v_exists NUMBER;
@@ -127,25 +142,9 @@ END;
 DELETE FROM anon_meta.source_population;
 
 INSERT INTO anon_meta.source_population (category, code)
-SELECT DISTINCT 'ENTITY', s.code
-  FROM op.structure s JOIN op.tiers t ON t.code = s.code
- WHERE s.structure = 'Entite' AND s.ecran = 'w_tiers'
-   AND t.flag_portefeuille = 'N' AND s.code IS NOT NULL;
-
-INSERT INTO anon_meta.source_population (category, code)
-SELECT DISTINCT 'PORTFOLIO', s.code
-  FROM op.structure s JOIN op.tiers t ON t.code = s.code
- WHERE s.structure = 'Entite' AND s.ecran = 'w_tiers'
-   AND t.flag_portefeuille = 'O' AND s.code IS NOT NULL;
-
-INSERT INTO anon_meta.source_population (category, code)
-SELECT DISTINCT 'COUNTERPARTY', code
-  FROM op.structure
- WHERE structure = 'Compte' AND ecran = 'w_tiers' AND code IS NOT NULL;
-
-INSERT INTO anon_meta.source_population (category, code)
-SELECT DISTINCT 'BANK_ACCOUNT', code
-  FROM op.compte_banque WHERE code IS NOT NULL;
+SELECT DISTINCT category, old_code
+  FROM anon_meta.identity_plan
+ WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.identity_plan);
 
 COMMIT;
 
@@ -172,7 +171,7 @@ DECLARE
       RETURN v_found > 0;
    END;
 BEGIN
-   DBMS_OUTPUT.PUT_LINE('Measuring CODE columns against the four source populations...');
+   DBMS_OUTPUT.PUT_LINE('Measuring CODE columns against the five categories...');
 
    FOR t IN (SELECT DISTINCT table_name
                FROM anon_meta.anon_inventory
@@ -209,24 +208,35 @@ BEGIN
 
       FOR i IN 1 .. l_cols.COUNT LOOP
          -- n_unmapped is counted directly rather than derived by subtraction:
-         -- the same code can legitimately belong to two categories, in which
-         -- case the four counts overlap and n_total minus them would go
-         -- negative. Counting rows where all four joins missed is exact.
+         -- the same text can be a party and a bank account, in which case
+         -- the counts overlap and n_total minus them would go negative.
+         -- Counting rows where every join missed is exact.
          v_sql := 'INSERT INTO anon_meta.flag_impact '
                || '(table_name, column_name, declared_cat, total_rows, n_entity, n_portfolio, '
-               || ' n_counterparty, n_bank_account, n_unmapped, sampled) '
+               || ' n_counterparty, n_bank_account, n_unclassified, n_party_only, n_account_only, '
+               || ' n_unmapped, sampled) '
                || 'SELECT ''' || t.table_name || ''', ''' || l_cols(i) || ''', '
                || '       (SELECT category FROM anon_meta.anon_inventory '
                || '         WHERE table_name = ''' || t.table_name || ''''
                || '           AND column_name = ''' || l_cols(i) || '''), '
-               || '       n_total, n_e, n_p, n_c, n_b, n_u, '
+               || '       n_total, n_e, n_p, n_c, n_b, n_x, n_po, n_ao, n_u, '
                || '       ''' || v_sampled || ''' '
                || '  FROM (SELECT COUNT(*) AS n_total, '
                || '               COUNT(e.code) AS n_e, COUNT(p.code) AS n_p, '
-               || '               COUNT(c.code) AS n_c, COUNT(b.code) AS n_b, '
+               || '               COUNT(c.code) AS n_c, COUNT(b.code) AS n_b, COUNT(x.code) AS n_x, '
                || '               COUNT(CASE WHEN e.code IS NULL AND p.code IS NULL '
                || '                           AND c.code IS NULL AND b.code IS NULL '
-               || '                          THEN 1 END) AS n_u '
+               || '                           AND x.code IS NULL '
+               || '                          THEN 1 END) AS n_u, '
+               -- Party only / account only: the values a column of the OTHER
+               -- domain cannot translate. A text that is both counts in neither.
+               || '               COUNT(CASE WHEN b.code IS NULL AND (e.code IS NOT NULL '
+               || '                           OR p.code IS NOT NULL OR c.code IS NOT NULL '
+               || '                           OR x.code IS NOT NULL) THEN 1 END) AS n_po, '
+               || '               COUNT(CASE WHEN b.code IS NOT NULL AND e.code IS NULL '
+               || '                           AND p.code IS NULL AND c.code IS NULL '
+               || '                           AND x.code IS NULL '
+               || '                          THEN 1 END) AS n_ao '
                -- Oracle puts the sample clause between the table and its
                -- alias: FROM op.x SAMPLE(1) t, not FROM op.x t SAMPLE(1).
                || '          FROM op.' || t.table_name || ' '
@@ -240,6 +250,8 @@ BEGIN
                || '                 ON c.code = t.' || l_cols(i) || ' AND c.category = ''COUNTERPARTY'' '
                || '          LEFT JOIN anon_meta.source_population b '
                || '                 ON b.code = t.' || l_cols(i) || ' AND b.category = ''BANK_ACCOUNT'' '
+               || '          LEFT JOIN anon_meta.source_population x '
+               || '                 ON x.code = t.' || l_cols(i) || ' AND x.category = ''UNCLASSIFIED_PARTY'' '
                || '         WHERE t.' || l_cols(i) || ' IS NOT NULL)';
 
          BEGIN
@@ -289,46 +301,75 @@ BEGIN
    w('> Companion to [09_flag_impact.md](09_flag_impact.md), which explains the model.');
    w;
    w('For every identifier column, how many rows hold a value of each category — and therefore');
-   w('exactly what each flag would leave behind. Measured with all four populations built, so the');
-   w('numbers are independent of your current configuration.');
+   w('exactly what each switch would leave behind. Measured against every identity of the latest');
+   w('plan, so the numbers are independent of your current configuration.');
    w;
-   w('`unmapped` values belong to no source population and are anonymized by **no** flag setting.');
+   w('`unmapped` values are no recorded identity and are anonymized by **no** switch setting.');
    w;
 
-   -- Headline: which columns are wholly governed by a single flag.
-   w('## Columns governed by exactly one flag');
+   -- The column's type against what it actually holds.
+   w('## Columns holding the other domain');
    w;
-   w('All of their values belong to one category, so that flag is a clean on/off switch for the');
-   w('whole column.');
+   w('A `PARTY` column holding bank-account identifiers, or a `BANK_ACCOUNT` column holding party');
+   w('identifiers. The engine writes only the column''s own domain, so those values stay as they');
+   w('are and verification fails on them. Either the column holds both - declare it `MIXED` once');
+   w('reviewed - or the values are coincidences worth a look.');
    w;
-   w('| Table | Column | Sole category | Rows | Turning that flag off leaves |');
+   w('| Table | Column | Declared | Rows | Of the other domain |');
+   w('|---|---|---|---:|---:|');
+   FOR r IN (SELECT table_name, column_name, declared_cat, total_rows,
+                    CASE declared_cat
+                       WHEN 'BANK_ACCOUNT' THEN n_party_only
+                       ELSE n_account_only END AS n_other
+               FROM anon_meta.flag_impact
+              WHERE declared_cat IN ('PARTY', 'BANK_ACCOUNT'))
+   LOOP
+      CONTINUE WHEN r.n_other = 0;
+      w('| `' || LOWER(r.table_name) || '` | `' || LOWER(r.column_name) || '` | `' || r.declared_cat
+        || '` | ' || TO_CHAR(r.total_rows, 'FM999,999,999') || ' | '
+        || TO_CHAR(r.n_other, 'FM999,999,999') || ' |');
+   END LOOP;
+   w;
+
+   -- Headline: which columns are wholly governed by a single switch.
+   w('## Columns governed by exactly one switch');
+   w;
+   w('All of their values belong to one category, so that category''s identifier switch is a clean');
+   w('on/off switch for the whole column.');
+   w;
+   w('| Table | Column | Sole category | Rows | Turning that switch off leaves |');
    w('|---|---|---|---:|---|');
    FOR r IN (SELECT table_name, column_name, total_rows,
-                    n_entity, n_portfolio, n_counterparty, n_bank_account, n_unmapped
+                    n_entity, n_portfolio, n_counterparty, n_bank_account,
+                    NVL(n_unclassified, 0) AS n_unclassified, n_unmapped
                FROM anon_meta.flag_impact
               WHERE total_rows > 0
                 AND n_unmapped = 0
                 AND (CASE WHEN n_entity       > 0 THEN 1 ELSE 0 END
                    + CASE WHEN n_portfolio    > 0 THEN 1 ELSE 0 END
                    + CASE WHEN n_counterparty > 0 THEN 1 ELSE 0 END
-                   + CASE WHEN n_bank_account > 0 THEN 1 ELSE 0 END) = 1
+                   + CASE WHEN n_bank_account > 0 THEN 1 ELSE 0 END
+                   + CASE WHEN NVL(n_unclassified, 0) > 0 THEN 1 ELSE 0 END) = 1
               ORDER BY total_rows DESC) LOOP
       w('| `' || LOWER(r.table_name) || '` | `' || LOWER(r.column_name) || '` | `'
         || CASE WHEN r.n_entity       > 0 THEN 'ENTITY'
                 WHEN r.n_portfolio    > 0 THEN 'PORTFOLIO'
                 WHEN r.n_counterparty > 0 THEN 'COUNTERPARTY'
-                ELSE 'BANK_ACCOUNT' END
+                WHEN r.n_unclassified > 0 THEN 'UNCLASSIFIED_PARTY'
+                WHEN r.n_bank_account > 0 THEN 'BANK_ACCOUNT'
+           END
         || '` | ' || TO_CHAR(r.total_rows, 'FM999,999,999') || ' | all '
         || TO_CHAR(r.total_rows, 'FM999,999,999') || ' rows unanonymized |');
    END LOOP;
    w;
 
-   -- Columns holding values no flag can touch.
+   -- Columns holding values no switch can touch.
    w('## Columns holding unmapped values');
    w;
-   w('These values are in none of the four source populations, so no configuration anonymizes');
-   w('them. Often legitimate — currency, product and system codes. Worth checking any column here');
-   w('that you believe holds client identifiers.');
+   w('These values are no recorded identity, so no configuration anonymizes them. Often');
+   w('legitimate — currency, product and system codes. A dangling reference to a party that no');
+   w('longer exists is client data, though: once reviewed, record it in');
+   w('`anon_meta.confirmed_identity` and it is classified and anonymized like any other.');
    w;
    w('| Table | Column | Rows | Unmapped | Share |');
    w('|---|---|---:|---:|---:|');
@@ -348,7 +389,8 @@ BEGIN
    w('## Full breakdown');
    w;
    FOR r IN (SELECT table_name, column_name, declared_cat, total_rows,
-                    n_entity, n_portfolio, n_counterparty, n_bank_account, n_unmapped, sampled
+                    n_entity, n_portfolio, n_counterparty, NVL(n_unclassified, 0) AS n_unclassified,
+                    n_bank_account, n_unmapped, sampled
                FROM anon_meta.flag_impact
               ORDER BY table_name, column_name) LOOP
 
@@ -356,8 +398,8 @@ BEGIN
          w;
          w('### `' || LOWER(r.table_name) || '`');
          w;
-         w('| Column | Declared | Rows | Entity | Portfolio | Cpty | Account | Unmapped |');
-         w('|---|---|---:|---:|---:|---:|---:|---:|');
+         w('| Column | Declared | Rows | Entity | Portfolio | Cpty | Unclassified | Account | Unmapped |');
+         w('|---|---|---:|---:|---:|---:|---:|---:|---:|');
          v_prev := r.table_name;
       END IF;
 
@@ -367,6 +409,7 @@ BEGIN
         || pct(r.n_entity, r.total_rows)       || ' | '
         || pct(r.n_portfolio, r.total_rows)    || ' | '
         || pct(r.n_counterparty, r.total_rows) || ' | '
+        || pct(r.n_unclassified, r.total_rows) || ' | '
         || pct(r.n_bank_account, r.total_rows) || ' | '
         || pct(r.n_unmapped, r.total_rows)     || ' |');
    END LOOP;

@@ -1,0 +1,722 @@
+V4 FIX INSTRUCTIONS: TYPED PARTY AND BANK-ACCOUNT MAPPING
+=======================================================
+Prepared: 2026-10-16.
+Decisions updated: 2026-10-20 (PARTY/X_, precedence, independent masking switches).
+Status: implementation instructions only. No engine, configuration, or data
+repair is implemented by this document. Do not rerun anonymization unchanged.
+
+Evidence: 24_OP_Anonymization_Engineering_Investigation.md and the subsequent
+read-only checks on EPFPG785. Do not include raw customer identifiers, mapping
+pairs, contact/account values, or credentials in implementation reports.
+
+1. TWO DIFFERENT DEFECTS TO FIX
+-----------------------------
+A. Account mapping used for a party (the CB masking mistake).
+
+ TIERS.CODE and party-reference columns currently use CODE/ANY. If an input
+ has only a BANK_ACCOUNT mapping, ANY can substitute that account's CB value
+ into the party/reference. The text changed, but no proper party translation
+ was created. The 754 account-mapped TIERS records in the raw-input baseline
+ have no saved ENTITY/PORTFOLIO/COUNTERPARTY alternative.
+
+ Required fix: party-reference lookups must accept only approved party
+ mappings. Discover/classify missing parties separately; simply excluding
+ BANK_ACCOUNT leaves those raw party identifiers unchanged. Do not infer
+ COUNTERPARTY solely from the table/column name or assign every missed ID T_.
+
+B. Party mapping used for a genuine account STRUCTURE node.
+
+ COMPTE_BANQUE.CODE uses BANK_ACCOUNT, but STRUCTURE.CODE uses ANY. When the
+ same raw text identifies both a party and an account, ANY prefers E/P/T.
+ The account node can receive the party replacement while COMPTE_BANQUE
+ receives its different CB replacement. EPFPG785 has two verified
+ Compte/w_compte_banque nodes with this discrepancy.
+
+ Required fix: account nodes must use the same BANK_ACCOUNT translation as
+ their corresponding account master, regardless of a coincidental party key.
+ Adding more account mappings alone does not fix the unrestricted lookup.
+
+2. BUILD THE COMPLETE ACCOUNT CANDIDATE INVENTORY
+------------------------------------------------
+Use the union below on the approved raw/pre-update snapshot. It includes
+accounts without a STRUCTURE node and account nodes without a current master:
+
+```sql
+-- ACCOUNT_CANDIDATE_SOURCE
+SELECT code
+FROM (
+ SELECT code FROM op.compte_banque
+ UNION
+ SELECT code FROM op.structure
+ WHERE structure = 'Compte'
+ AND ecran = 'w_compte_banque'
+)
+WHERE code IS NOT NULL;
+```
+
+UNION deduplicates matching account keys; it does not merge them with party
+identities. Generate one stable BANK_ACCOUNT replacement per distinct approved
+account code. A party with identical text must retain its separate party map.
+The identity lookup key is (category/domain, old_code), not old_code alone.
+The current CODE_MAP primary key already permits the same old_code in different
+categories. Keep replacement values globally unique as well.
+
+This union is a deliberate coverage extension: the original row-by-row and
+current v4 bank sources use COMPTE_BANQUE only. Do not describe the STRUCTURE
+addition as unchanged legacy behavior. Confirm that Compte/w_compte_banque
+denotes an account identity for this client. Record source membership as
+MASTER_ONLY, BOTH, or STRUCTURE_ONLY and report the counts. If an account-node
+population is not yet approved, stop for scope review before any updates.
+
+A STRUCTURE_ONLY identity is not automatically invalid or out of privacy scope.
+It can have an approved account mapping without inserting or repairing an
+account master. Master-data repair is a separate client decision.
+
+Do not filter on FLAG_GERE: O, N, and NULL are not selection gates in either
+current script. On this schema the flag belongs to COMPTE_BANQUE, not TIERS.
+Do not require every COMPTE_BANQUE row to have a STRUCTURE node. Do not add
+STRUCTURE nodes from w_tiers to the bank source: Compte/w_tiers is the current
+counterparty selector, not the account-screen selector.
+
+Preserve exact identifier text. Do not TRIM, uppercase, or otherwise merge keys
+without an explicitly approved normalization policy. Include genuine one-character
+identifiers. Remove the checkbox safeguards and substitution-length exclusions
+as specified in section 5A; do not require short-ID exceptions.
+
+2A. APPROVED PARTY CLASSIFICATION AND X_ FALLBACK
+------------------------------------------------
+Build the party candidate inventory from approved sensitive OP.TIERS records,
+approved party nodes in OP.STRUCTURE on ecran='w_tiers', and any separately
+confirmed sensitive reference-only identities. Do not silently exclude candidates
+because a master or structure entry is absent. Do not treat every STRUCTURE node
+or every unknown string as sensitive; account-screen nodes remain in the separate
+BANK_ACCOUNT domain even if their code text equals a party code.
+
+Classify once per original party identity, examining ALL of its linked nodes.
+Allocate exactly one of these categories, in the following exclusive order:
+
+1. PORTFOLIO / P_: a matching TIERS master has flag_portefeuille='O' and at
+ least one node has ecran='w_tiers'. The structure classification is not
+ restricted to Entite; custom or NULL classification does not defeat a known
+ portfolio flag when the required party screen node exists.
+2. ENTITY / E_: a matching TIERS master has flag_portefeuille='N' and at least
+ one node has structure='Entite' AND ecran='w_tiers'.
+3. COUNTERPARTY / T_: a matching TIERS master has flag_portefeuille='N', at
+ least one node has a non-NULL structure<>'Entite' AND ecran='w_tiers', and
+ no node qualifies for ENTITY. The classification is no longer restricted
+ to Compte. Other screens do not satisfy these party classification rules.
+4. UNCLASSIFIED_PARTY / X_: the identity is confirmed sensitive but cannot be
+ categorized by the above rules. Include NULL/unknown portfolio flags,
+ missing TIERS masters, confirmed sensitive TIERS records with no STRUCTURE
+ node, and records without enough qualifying party classification context.
+ A NULL structure is not automatically a non-Entite counterparty: with flag N
+ and no other qualifying node it falls back to X_.
+
+Missing TIERS master is an X_ case even for Compte/w_tiers: this intentionally
+changes the old counterparty selector, which required no master. Missing master
+data is not itself a third masking defect or a repair prerequisite. Do not invent
+a TIERS row or infer a missing portfolio flag from account-text overlap.
+
+Approved overlap decision: for ONE party identity with flag N and both Entite
+and non-Entite party-screen nodes, ENTITY takes precedence. Log the overlap but
+create only its ENTITY mapping. Apply that same E_ value to all approved nodes
+and references for the party, not a separate T_ or X_ for another node.
+
+This preserves legacy's first ENTITY result for the master, not legacy's
+inconsistent later node updates. Legacy can leave custom nodes unchanged or
+change a Compte/w_tiers node to T_ after the master is already E_. Do not reproduce
+that split. An identical raw account key still has its own BANK_ACCOUNT mapping;
+ENTITY precedence never overrides an account node's required domain.
+
+Record X_ reasons as non-sensitive metadata: MISSING_MASTER, NO_STRUCTURE,
+UNKNOWN_FLAG, NO_PARTY_SCREEN, or UNKNOWN_CLASSIFICATION. Classification is based
+on source facts and the approved policy, not on which switches are enabled.
+Disabling ENTITY code renaming must not recategorize a known entity as X_ to
+bypass that ID switch. Description/attribute switches remain independent.
+
+Read-only baseline check on 2026-10-20 (database clock 2026-10-19): EPFPG785 has
+zero flag-N parties with both Entite and non-Entite nodes on w_tiers. Nine entity
+parties have other classifications only on different screens; those are not
+conflicts under these rules. Three unmapped flag-N TIERS records have no STRUCTURE
+entry at all, all have populated descriptions, and two have address data. Those
+confirmed sensitive records require X_ and masking of their sensitive fields.
+
+2B. PARTY IS A LOOKUP POLICY, NOT A REPLACEMENT CATEGORY
+------------------------------------------------------
+Decision: add and enforce PARTY as an explicit allowed mapping set:
+
+ ENTITY, PORTFOLIO, COUNTERPARTY, UNCLASSIFIED_PARTY
+
+PARTY must never accept BANK_ACCOUNT. UNCLASSIFIED_PARTY is a real mapping
+category with prefix X_; PARTY is only the column/row lookup policy. Do not
+generate PARTY mappings or choose a winner between E/P/T/X: section 2A must
+already have assigned one category per approved party identity.
+
+Use PARTY for confirmed party master/reference fields and approved party
+STRUCTURE nodes. Resolve directly from the allowed set; do not first pick ANY's
+winner and then filter it. Keep genuine account fields BANK_ACCOUNT-only and
+reviewed mixed fields explicit. Do not mass-replace every ANY rule or force
+STRUCTURE.CODE/PERE into one domain. No additional fixed multiple-party-category
+subset is currently required; add a validated allowed set only if a reviewed
+field contract actually needs one.
+
+Implement UNCLASSIFIED_PARTY consistently in mapping generation, category gates,
+description/attribute handling, active/default configuration, loader/parser,
+run metadata, preflight, dry-run, verifier, report, helper tools, and tests.
+Extend inventory category constraints for PARTY and UNCLASSIFIED_PARTY on both
+new and existing metadata. CODE_MAP currently has no category CHECK; preserve
+its (category, old_code) key and globally unique new_code. Audit every category
+CASE/ELSE and enabled-category list: X must not fall into BANK_ACCOUNT handling,
+be silently disabled, or tie with BANK_ACCOUNT under the old ELSE priority.
+
+Include X_ in generated-value/prefix diagnostics, while validating recorded
+mapping membership and category rather than accepting a prefix as proof.
+Validate replacement width, uniqueness, and old/new collisions for X_ too.
+An existing X_ replacement must not silently become E/P/T on a rerun if master
+data later changes; preserve the existing identity or plan a consistent migration
+of every dependent value. Detect incompatible previous party maps before updates.
+
+ID masking is not enough: approved X_ owners' descriptions, names, addresses,
+phone/fax/email and other sensitive fields need effective rules. Existing
+ENTITY-only contact rules do not automatically protect X_ or all other parties.
+Show X_ counts and fallback reasons in the report without claiming the business
+category is known. Disabled coverage must remain explicit, not a privacy PASS.
+
+3. APPLY THE MAP BY IDENTITY DOMAIN AND ROW CONTEXT
+-------------------------------------------------
+Implement these disjoint rules from the SAME pre-update identity inventory:
+
+ Target Allowed mapping
+ ------------------------------------------ -------------------------------
+ COMPTE_BANQUE.CODE BANK_ACCOUNT only
+ STRUCTURE.CODE where structure='Compte' BANK_ACCOUNT only, using the
+ and ecran='w_compte_banque' original account node code
+ TIERS.CODE and confirmed party references PARTY (approved E/P/T/X only)
+ Approved party STRUCTURE nodes PARTY (approved E/P/T/X only)
+ Other STRUCTURE nodes / mixed references Explicit reviewed domain policy;
+ never infer from text alone
+
+When account-ID renaming is enabled, write exactly the SAME BANK_ACCOUNT.new_code
+to the approved key's COMPTE_BANQUE.CODE and Compte/w_compte_banque STRUCTURE.CODE
+rows. A mapping generated only for descriptions/attributes must not rename IDs.
+For a matching raw party key, write that party's different E/P/T/X replacement
+only to its approved party master, nodes, and references. A shared key is not
+evidence that the party and account are the same object.
+
+Do not solve this by changing all of STRUCTURE.CODE to BANK_ACCOUNT: it stores
+party and account nodes. Do not solve it by processing account nodes first and
+then running generic ANY over the column: ordering is not domain enforcement.
+Replace the generic handling with mutually exclusive context-aware handling;
+validate that no target row can be processed by conflicting rules. Keep unknown
+nodes visible as REVIEW_REQUIRED rather than silently treating them as clean.
+
+Choose a small explicit STRUCTURE handler, or extend the inventory with a
+validated row-domain selector. The present inventory primary key is
+(table_name, column_name), so duplicate CSV rows are not independent conditional
+rules. Custom rows override base rows. Do not add competing duplicate rows and
+assume both predicates will run.
+
+Party-only lookup must also be implemented in apply_code. Today only
+BANK_ACCOUNT is enforced; every other CODE category uses CODE_MAP_ANY. Merely
+changing a CSV row to ENTITY/PORTFOLIO/COUNTERPARTY does not enforce that domain.
+Implement PARTY in metadata constraints, loader, inventory validation, preflight,
+engine, verifier, and report together, using the set defined in section 2B.
+
+Resolve multiple qualifying party categories before allocation under section 2A:
+ENTITY takes precedence for an approved overlapping flag-N party identity.
+Do not rely on generic ANY priority or use party precedence for a bank node.
+Correct missing source selection and enforce typed application separately.
+
+4. HANDLE STRUCTURE.PERE AND OTHER REFERENCES SEPARATELY
+------------------------------------------------------
+Do not assume the domain of PERE is always the domain of the child row. Resolve
+the intended parent identity from the hierarchy/application contract and the
+pre-update context. Use the parent's typed translation. If party/account keys
+coincide and the parent role cannot be established, require explicit review;
+neither generic ANY nor blind inheritance of the child screen is sufficient.
+
+The legacy account CODE update filters Compte/w_compte_banque. Its PERE update
+filters only structure='Compte', without ECRAN; do not copy that weaker rule as
+proof of correct parent-role handling.
+
+Review account-reference columns and mixed/analytical fields individually.
+Do not convert every ANY column containing the word compte to BANK_ACCOUNT.
+PARAM_CPTA_REG_GEN.COMPTE_ANA is a known analytical/general-field exception.
+This fix concerns identity codes, not BBANs or actual account numbers: those
+need separate effective field-specific rules.
+
+5. PREFLIGHT, MAP REUSE, AND EXISTING MASKED COPIES
+------------------------------------------------
+Before modifying any target row:
+
+1. Capture a consistent dataset identity and the complete approved candidate
+ population, source membership, target-row roles, and parent roles.
+2. Resolve or explicitly exclude unknown/conflicting roles. Check required
+ objects, target widths, enabled categories, uniqueness,
+ and old/new overlap. Do not borrow another domain's map when a flag is off.
+3. Allocate all missing typed mappings before applying any CODE updates. Reuse
+ existing translations for the same dataset, but append newly approved
+ inputs; never regenerate/reorder earlier replacements. Current
+ generate_one_category returns when any category mappings already exist,
+ so replacing its source query alone will NOT extend an existing bank map.
+4. Check every approved account candidate and party candidate has exactly one
+ permitted translation, and every required target has an unambiguous plan.
+ Run dry-run estimates against that plan, not stale/empty persistent maps.
+
+Prefer validation on a fresh approved raw import with its mappings preserved.
+For an already-masked copy, do not build a new union of current E/P/T/X and CB
+values and treat them as raw identities: the wrong account-node replacements
+would become extra false account identities. Use preserved category-specific
+old_code/new_code provenance and original node roles, or reimport raw data.
+Changing future lookup logic does not reverse existing incorrect substitutions.
+Any in-place repair needs a reviewed consistent migration of masters, nodes,
+references, labels, and mappings. Do not repair by prefix substitution.
+
+5A. REMOVE ALL CHECKBOX SAFEGUARDS
+---------------------------------
+Decision: checkbox safeguards are no longer required. Remove both automatic
+heuristics throughout v4, not just for bank accounts:
+
+- Remove is_flag_column and its width-based exclusions from preflight, CODE,
+ NULL_OUT, DESCRIPTION, SELF_CODE, dry-run, and verification paths. A declared
+ width of one character must not automatically skip an inventoried column.
+- Remove MIN_CODE_LENGTH / g_min_code_length and all corresponding LENGTH
+ filters from mapping application, dry-run estimates, and residual checks.
+ A genuine one-character identifier must be mapped, substituted, and verified
+ under its normal domain rule, without an exception list.
+- Remove this setting from active configuration templates, argument/config
+ parsing, defaults, validation, and newly recorded run configuration. Historical
+ run metadata need not be rewritten; its old minimum must not control new
+ checks. Do not merely change the default while retaining the exclusions.
+- Remove checkbox-specific SKIPPED/CHECKBOX results, short-code exemptions,
+ warning-only treatment, and report/documentation text that describes those
+ values as deliberately unmodified or outside verification.
+
+Apply only the explicit inventory rules and reviewed row/domain scope. If a
+control field is intentionally not a target, represent that decision explicitly
+in the inventory/scope, not through width or value-length guesses. A listed
+field is processed according to its rule even if it looks like a checkbox.
+
+Keep actual schema-capacity and constraint checks. If a planned replacement
+cannot fit a target column, surface a preflight error requiring a corrected
+rule/schema decision; do not silently skip the field or truncate the value.
+Removing checkbox heuristics does not remove typed lookup, enabled-category,
+uniqueness, provenance, or unknown-role checks.
+
+Update all affected engine, verifier, loader/configuration, report, dry-run,
+and documentation paths together. Regression tests must prove that one-character
+identifiers are no longer excluded and that no checkbox-specific bypass remains.
+
+5B. APPROVED MASKING SWITCHES AND DEFAULTS
+-----------------------------------------
+Decision: support ID, description, and attribute masking independently. Ship
+all three switches ON (y) for ENTITY, PORTFOLIO, COUNTERPARTY, BANK_ACCOUNT,
+and UNCLASSIFIED_PARTY. Apply those defaults consistently in the working config,
+template, and program defaults; validate resolved values and record them per run.
+
+For each category, the existing names have these separate meanings:
+ ANONYMIZE_<CATEGORY> Rename IDs and their typed references.
+ ANONYMIZE_<CATEGORY>_DESCRIPTION Mask descriptions/display labels.
+ ANONYMIZE_<CATEGORY>_ATTRIBUTES Mask sensitive attributes, including addresses.
+
+After implementing these fixes, setting only ANONYMIZE_<CATEGORY>=n disables
+ID renaming, not every operation for that category. To disable all three
+configurable operations, set all three
+switches n; NULL_OUT remains independent. Warn on migration of configurations
+that relied on the old master-switch behavior and display the resolved operation
+settings before execution. Do not silently reinterpret an old exclusion as full
+protection or claim that the flag contract has not changed.
+
+For example, the default entity settings remain:
+ ANONYMIZE_ENTITY=y
+ ANONYMIZE_ENTITY_DESCRIPTION=y
+ ANONYMIZE_ENTITY_ATTRIBUTES=y
+
+Example of deliberately partial masking, NOT the default:
+ ANONYMIZE_ENTITY=n
+ ANONYMIZE_ENTITY_DESCRIPTION=y
+ ANONYMIZE_ENTITY_ATTRIBUTES=y
+Expected after implementation: entity master/reference IDs remain unchanged;
+enabled descriptions and populated sensitive attributes use the safe ENTITY
+mapping value, not the original ID. NULL attributes stay NULL. Report retained
+identifiers as partial/disabled coverage, not complete anonymization.
+
+Add the corresponding X_ category settings, also all ON by default:
+ ANONYMIZE_UNCLASSIFIED_PARTY=y
+ ANONYMIZE_UNCLASSIFIED_PARTY_DESCRIPTION=y
+ ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES=y
+
+Historical comparison: the checked-in original Anonymization_OP/sql/config.ini
+has EntC/FoldC/TierC/CpteC=y and EntD/FoldD/TierD/CpteD=y. Its optional attributes
+are selected by column names in slots, not a separate ATTRIBUTES boolean;
+unused slots are n. V4's checked-in working config and template currently set
+all existing ID/description/attribute switches to y, but still couple their
+operation in the engine. These are verified shipped values, not proof that every
+historical site/run used the same settings. X_ has no legacy equivalent.
+
+Implement the independent behavior as follows:
+
+- Determine the identity's category from source facts first. Generate/reuse its
+ safe typed replacement when ANY of ID, DESCRIPTION, or ATTRIBUTES is enabled.
+ Do not gate all mapping generation or field masking solely on the ID switch.
+- Apply CODE updates and reference renames ONLY when the ID switch is enabled.
+ Existing or newly allocated mapping rows must not bypass an ID switch set n.
+- Mask DESCRIPTION/SELF_CODE using the saved mapping.new_code, not blindly the
+ current row CODE. When ID masking is off, the current CODE is still original
+ and must not be copied into a description or attribute as a supposed mask.
+- Locate owners using the planned original/current identity according to the
+ ID phase and preserved run provenance. Labels-only processing must work when
+ current CODE is old_code; normal renamed processing uses the same identity's
+ new_code. Detect overlap/ambiguity rather than accepting arbitrary old/new
+ matches. Use that same typed mapping consistently across masters and nodes.
+- Preserve each NULL SELF_CODE field independently, including address lines:
+ conceptually CASE WHEN field IS NOT NULL THEN mapping.new_code ELSE NULL END.
+ The grouped WHERE condition alone does not preserve sibling NULLs. DESCRIPTION
+ keeps its separate label semantics and may populate a selected NULL label.
+- Keep addresses under ATTRIBUTES, not DESCRIPTION. Inventory/rule scope still
+ determines which fields are sensitive; defaults do not add unlisted fields.
+- Keep NULL_OUT independent of these category switches for every approved
+ whole-column free-text target. For nullable targets use NULL; for NOT NULL
+ character targets use a fixed marker fitting declared width and constraints.
+ If no valid masking value is available, block preflight/acceptance rather than
+ silently skip sensitive content or claim it is clean. Do not remove unrelated
+ constraints or invent unsupported values for other data types.
+- Keep one ordinary typed identity mapping for compensateur references when
+ they refer to that same identity. Do not restore legacy's independent COLNPENS
+ random replacement. Any genuinely separate domain needs explicit evidence.
+- Report each disabled protection and the remaining sensitive population. A
+ description/attribute-only run intentionally retains original identifiers:
+ show partial/disabled coverage, never an unqualified full-anonymization PASS.
+
+Test all eight operation combinations for EACH category, including X_:
+
+ ID DESCRIPTION ATTRIBUTES Map needed Rename IDs Mask labels Mask attributes
+ -- ----------- ---------- ---------- ---------- ----------- ---------------
+ n n n no no no no
+ n n y yes no no yes
+ n y n yes no yes no
+ n y y yes no yes yes
+ y n n yes yes no no
+ y n y yes yes no yes
+ y y n yes yes yes no
+ y y y yes yes yes yes
+
+The last row is the shipped default. No new map is needed solely for a category
+with all three switches n, but any previous map must remain preserved and unused
+by those disabled operations. Approved NULL_OUT work is still independent.
+Apply capacity, uniqueness, provenance, and domain checks to generated field-only
+masking values as well as values used to rename identifiers.
+
+6. REQUIRED ACCEPTANCE CHECKS
+-----------------------------
+Evaluate against the pre-update candidate/role inventory, not only current
+joins or absence of recorded originals. Produce aggregate results only.
+
+- Every approved distinct account input from the union has one BANK_ACCOUNT
+ map, including approved STRUCTURE_ONLY and non-managed master accounts.
+- Each account target equals its planned BANK_ACCOUNT.new_code. Every account
+ node with an actual master counterpart has the SAME replacement as that
+ counterpart, including when a party shares the original text.
+- Approved STRUCTURE_ONLY account nodes have their own typed translation;
+ do not require a nonexistent master join to pass their masking check.
+- Zero BANK_ACCOUNT substitutions in party-only fields, and zero party
+ substitutions in account-only nodes/fields, except explicit reviewed mixed
+ semantics. Test category provenance, not prefixes alone.
+- Protected party nodes remain in the party namespace when their text matches
+ an account. Parent references resolve to their intended typed identity.
+- Each approved party identity has exactly one E/P/T/X translation. An Entite
+ plus non-Entite flag-N overlap gives one E_ value across its approved party
+ nodes/references; bank nodes sharing the text remain separately CB_.
+- NULL/unknown flags, missing party masters, and confirmed sensitive TIERS
+ records without STRUCTURE get X_ with a recorded reason, not a silent skip.
+ Their in-scope sensitive fields are masked as well as their identifiers.
+- PARTY lookups accept E/P/T/X and never BANK_ACCOUNT; category disablement
+ cannot be bypassed by recategorizing a known identity as X_. Independent
+ description/attribute operations may still use its original assigned category.
+- An existing bank map is safely extended when new account inputs are added;
+ a second run on the same dataset preserves replacements and changes no
+ already-correct values. Disabled categories cannot leak through reused maps.
+- Unmapped sensitive inputs, ambiguous roles, missing checks, or incompatible
+ mapping history prevent a privacy PASS. Surface REVIEW_REQUIRED/INCOMPLETE
+ instead of presenting a zero-residual result as complete privacy coverage.
+- No inventory target or mapped original is excluded solely because its width
+ or value length is one. One-character identifiers participate in masking,
+ dry-run, and verification; actual target-capacity failures remain explicit.
+- All operation switches default ON for all five categories. Test section 5B's
+ eight combinations: ID-off leaves master/reference IDs unchanged while enabled
+ field masking uses a safe mapped replacement, not the original identifier.
+- A changed sibling attribute/address never populates a NULL SELF_CODE field.
+ Addresses follow ATTRIBUTES; whole-column NULL_OUT remains independent and
+ unsupported masking outcomes block acceptance instead of silently passing.
+- Compensateur references to the same identity match its ordinary replacement;
+ no extra random compensateur-only identity is generated.
+
+Regression cases: master-only O/N/NULL-flag account; matching master+node;
+STRUCTURE_ONLY account; duplicate account source rows; same original text for
+an account and a party; missing/ambiguous party category; mixed hierarchy parent;
+Entite plus custom/Compte party-screen overlap with ENTITY precedence; O flag
+with custom classification; NULL classification; missing-master Compte/w_tiers;
+no-STRUCTURE TIERS; X_ with later repaired master data; masked X_ contact fields;
+one-character account and party IDs; width-1 inventoried targets with fitting
+or oversized replacements; partly populated existing map; disabled
+category with old maps; and already-masked data without trustworthy provenance.
+
+7. FICTIONAL DESIGN CHECK (SELECT-ONLY, NOT THE FIXED ENGINE)
+----------------------------------------------------------
+This checks the proposed union and typed lookup rule with no private data or
+database writes. It does not demonstrate that the engine is already fixed.
+Expected: 3 account candidates, 0 inconsistent account targets, and 1 separately
+protected party node. The shared raw text has different account/party values.
+
+```sql
+-- TYPED_ACCOUNT_DESIGN_CHECK
+WITH sample_bank AS (
+ SELECT 'DEMO_SHARED' AS code, 'O' AS flag_gere FROM dual
+ UNION ALL SELECT 'DEMO_BANK_ONLY', 'N' FROM dual
+), sample_structure AS (
+ SELECT 'DEMO_SHARED' AS code, 'Compte' AS structure,
+ 'w_compte_banque' AS ecran FROM dual
+ UNION ALL SELECT 'DEMO_NODE_ONLY', 'Compte', 'w_compte_banque' FROM dual
+ UNION ALL SELECT 'DEMO_SHARED', 'Entite', 'w_tiers' FROM dual
+), account_candidates AS (
+ SELECT code FROM sample_bank
+ UNION
+ SELECT code FROM sample_structure
+ WHERE structure='Compte' AND ecran='w_compte_banque'
+), planned_map AS (
+ SELECT 'BANK_ACCOUNT' AS category, 'DEMO_SHARED' AS old_code,
+ 'CB_DEMO_SHARED' AS new_code FROM dual
+ UNION ALL SELECT 'BANK_ACCOUNT','DEMO_BANK_ONLY','CB_DEMO_BANK' FROM dual
+ UNION ALL SELECT 'BANK_ACCOUNT','DEMO_NODE_ONLY','CB_DEMO_NODE' FROM dual
+ UNION ALL SELECT 'ENTITY','DEMO_SHARED','E_DEMO_PARTY' FROM dual
+), target_plan AS (
+ SELECT 'BANK_MASTER' AS target_kind, code AS old_code,
+ 'BANK_ACCOUNT' AS required_category FROM sample_bank
+ UNION ALL
+ SELECT 'ACCOUNT_NODE', code, 'BANK_ACCOUNT' FROM sample_structure
+ WHERE structure='Compte' AND ecran='w_compte_banque'
+ UNION ALL
+ SELECT 'PARTY_NODE', code, 'ENTITY' FROM sample_structure
+ WHERE structure='Entite' AND ecran='w_tiers'
+), resolved AS (
+ SELECT target.*, mapping.new_code
+ FROM target_plan target
+ LEFT JOIN planned_map mapping ON mapping.old_code=target.old_code
+ AND mapping.category=target.required_category
+)
+SELECT (SELECT COUNT(*) FROM account_candidates) AS account_candidates,
+ (SELECT COUNT(*) FROM resolved target
+ WHERE target.required_category='BANK_ACCOUNT'
+ AND (target.new_code IS NULL OR NOT EXISTS (
+ SELECT 1 FROM planned_map account_map
+ WHERE account_map.category='BANK_ACCOUNT'
+ AND account_map.old_code=target.old_code
+ AND account_map.new_code=target.new_code
+ ))) AS inconsistent_account_targets,
+ (SELECT COUNT(*) FROM resolved party_node
+ JOIN planned_map account_map ON account_map.old_code=party_node.old_code
+ AND account_map.category='BANK_ACCOUNT'
+ WHERE party_node.target_kind='PARTY_NODE'
+ AND party_node.new_code<>account_map.new_code) AS separate_party_nodes
+FROM dual;
+```
+
+7A. FICTIONAL PARTY CLASSIFICATION CHECK (SELECT-ONLY)
+-----------------------------------------------------
+All inputs below represent already-approved sensitive party candidates. Account
+identities are outside this fixture and must remain in BANK_ACCOUNT. This tests
+the proposed policy, not the current engine implementation or customer data.
+Expected: 16 cases, 0 mismatches, 4 ENTITY, 3 PORTFOLIO, 1 COUNTERPARTY, 8 X_.
+
+```sql
+-- PARTY_CLASSIFICATION_DESIGN_CHECK
+WITH sample_party AS (
+ SELECT 'ENTITY_N' AS case_id, 1 AS has_master, 'N' AS portfolio_flag,
+ 'ENTITY' AS expected_category FROM dual
+ UNION ALL SELECT 'PORTFOLIO_CUSTOM',1,'O','PORTFOLIO' FROM dual
+ UNION ALL SELECT 'COUNTERPARTY_N',1,'N','COUNTERPARTY' FROM dual
+ UNION ALL SELECT 'ENTITY_OVERLAP',1,'N','ENTITY' FROM dual
+ UNION ALL SELECT 'PORTFOLIO_OVERLAP',1,'O','PORTFOLIO' FROM dual
+ UNION ALL SELECT 'NULL_FLAG',1,NULL,'UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'INVALID_FLAG',1,'?','UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NO_MASTER_ENTITE',0,NULL,'UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NO_MASTER_COMPTE',0,NULL,'UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NO_STRUCTURE_N',1,'N','UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NO_STRUCTURE_O',1,'O','UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NULL_CLASS_N',1,'N','UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NULL_CLASS_O',1,'O','PORTFOLIO' FROM dual
+ UNION ALL SELECT 'OTHER_SCREEN_N',1,'N','UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'ENTITY_OTHER_SCREEN',1,'N','ENTITY' FROM dual
+ UNION ALL SELECT 'DUPLICATE_ENTITY',1,'N','ENTITY' FROM dual
+), sample_node AS (
+ SELECT case_id, 'Entite' AS structure, 'w_tiers' AS ecran
+ FROM sample_party
+ WHERE case_id IN ('ENTITY_N','ENTITY_OVERLAP','PORTFOLIO_OVERLAP',
+ 'NULL_FLAG','INVALID_FLAG','NO_MASTER_ENTITE','ENTITY_OTHER_SCREEN',
+ 'DUPLICATE_ENTITY')
+ UNION ALL
+ SELECT case_id,'CustomClass','w_tiers' FROM sample_party
+ WHERE case_id IN ('PORTFOLIO_CUSTOM','COUNTERPARTY_N','ENTITY_OVERLAP',
+ 'PORTFOLIO_OVERLAP')
+ UNION ALL SELECT 'NO_MASTER_COMPTE','Compte','w_tiers' FROM dual
+ UNION ALL SELECT case_id,NULL,'w_tiers' FROM sample_party
+ WHERE case_id IN ('NULL_CLASS_N','NULL_CLASS_O')
+ UNION ALL SELECT 'OTHER_SCREEN_N','Entite','other_screen' FROM dual
+ UNION ALL SELECT 'ENTITY_OTHER_SCREEN','CustomClass','other_screen' FROM dual
+ UNION ALL SELECT 'DUPLICATE_ENTITY','Entite','w_tiers' FROM dual
+), party_facts AS (
+ SELECT party.*,
+ CASE WHEN EXISTS (
+ SELECT 1 FROM sample_node node
+ WHERE node.case_id=party.case_id AND node.ecran='w_tiers'
+ ) THEN 1 ELSE 0 END AS has_party_node,
+ CASE WHEN EXISTS (
+ SELECT 1 FROM sample_node node
+ WHERE node.case_id=party.case_id AND node.ecran='w_tiers'
+ AND node.structure='Entite'
+ ) THEN 1 ELSE 0 END AS has_entity_node,
+ CASE WHEN EXISTS (
+ SELECT 1 FROM sample_node node
+ WHERE node.case_id=party.case_id AND node.ecran='w_tiers'
+ AND node.structure<>'Entite'
+ ) THEN 1 ELSE 0 END AS has_non_entity_node
+ FROM sample_party party
+), classified AS (
+ SELECT facts.*,
+ CASE WHEN has_master=0 THEN 'UNCLASSIFIED_PARTY'
+ WHEN portfolio_flag='O' AND has_party_node=1 THEN 'PORTFOLIO'
+ WHEN portfolio_flag='N' AND has_entity_node=1 THEN 'ENTITY'
+ WHEN portfolio_flag='N' AND has_non_entity_node=1
+ AND has_entity_node=0 THEN 'COUNTERPARTY'
+ ELSE 'UNCLASSIFIED_PARTY' END AS assigned_category
+ FROM party_facts facts
+)
+SELECT COUNT(*) AS tested_cases,
+ COUNT(CASE WHEN assigned_category<>expected_category THEN 1 END) AS mismatches,
+ COUNT(CASE WHEN assigned_category='ENTITY' THEN 1 END) AS entity_cases,
+ COUNT(CASE WHEN assigned_category='PORTFOLIO' THEN 1 END) AS portfolio_cases,
+ COUNT(CASE WHEN assigned_category='COUNTERPARTY' THEN 1 END) AS counterparty_cases,
+ COUNT(CASE WHEN assigned_category='UNCLASSIFIED_PARTY' THEN 1 END) AS x_cases
+FROM classified;
+```
+
+8. IMPLEMENTATION LOCATIONS
+---------------------------
+Anonymization_v4/op/sql/30_install_engine.sql:
+ generate_code_map / generate_one_category: complete typed candidates and
+ stable append-only map allocation; apply_code: enforced domain-specific
+ lookup; replace generic STRUCTURE.CODE/PERE handling with reviewed row roles.
+ Remove checkbox/short-code bypasses from all rule handlers and preflight.
+ Separate mapping-needed, ID-enabled, description-enabled, and attribute-enabled
+ sets; use the typed mapped value for fields even when CODE remains original.
+ Preserve NULL per SELF_CODE assignment; validate marker/constraint outcomes.
+
+Anonymization_v4/op/sql/10_create_metadata_schema.sql:
+ inventory PARTY/UNCLASSIFIED_PARTY category constraints, migration of existing
+ constraints, and any approved row-role and X_ reason metadata.
+Anonymization_v4/op/sql/21_validate_inventory.sql:
+ validate permitted domains, non-overlapping row roles, and required coverage.
+Anonymization_v4/config/inventory_op.csv and inventory_op_custom.csv:
+ reviewed typed targets; no unrestricted fallback for known single domains.
+Anonymization_v4/config/anonymization.ini and anonymization.template.ini:
+ remove MIN_CODE_LENGTH and obsolete checkbox-protection guidance.
+ Add explicit UNCLASSIFIED_PARTY category/description/attribute handling so X_
+ protection is included in the configured scope and cannot be silently skipped.
+ Ship ID/DESCRIPTION/ATTRIBUTES=y for every category; remove wording that fields
+ require ID renaming. Addresses remain ATTRIBUTES-controlled.
+Anonymization_v4/op/run_op_anonymization.bat:
+ update parsing/loading if the inventory format gains domain selectors.
+ Remove minimum-code-length configuration handling and checkbox exclusions.
+Anonymization_v4/op/verify/verify_op_coverage.sql and generate_report.sql:
+ independent completeness, typed consistency, parent-role checks, and honest
+ incomplete/review outcomes. A mapping-only residual PASS is insufficient.
+ Remove checkbox/short-ID skips, filters, exemptions, and misleading messages.
+
+Maintain one authoritative set of typed mapping values for each identity domain
+and use it consistently. Inventory completeness and context-aware application
+are both required; neither one substitutes for the other.
+
+9. ORIGINAL-LEGACY / V4 DIFFERENCES: DECISIONS AND REMAINING REVIEW
+----------------------------------------------------------------
+The agreed identity fixes above do not establish full legacy/v4 equivalence.
+The following source-level differences explain the additional decisions. Items
+A-E are now approved as specified in section 5B; item F remains comparison/review
+context, not authorization for further output-format or inventory changes.
+Compare only 02pack_anonym_number.sql plus start_anonymous.sql/config.ini with
+v4; the later legacy set-based implementation is not the reference here.
+
+A. Grouped SELF_CODE can fill previously NULL attributes or addresses.
+ Legacy guards each attribute/address separately with IS NOT NULL. V4 sets
+ every field in a group to the row code when any member has a non-NULL
+ mismatch. A populated telephone can therefore cause a NULL fax to become
+ populated; an entirely NULL group stays untouched. This contradicts the
+ intended NULL-preserving behavior stated in the v4 comment.
+ Source: 02pack_anonym_number.sql:110-142;
+ 30_install_engine.sql:979-1001,1037-1043.
+ A SELECT-only model with three fictional rows gives two NULL second fields
+ under legacy but only one under v4; one NULL sibling is populated by v4.
+ This is source-derived behavior, not a measured customer before/after count.
+ Decision approved: preserve NULL per SELF_CODE SET expression,
+ not merely in the grouped WHERE predicate. DESCRIPTION has different NULL
+ semantics; do not apply that change indiscriminately to descriptions.
+
+B. Address masking uses a different switch.
+ Legacy's effective adresse1-adresse5 updates are under EntD/FoldD/TierD
+ (the description flag). V4 lists them as SELF_CODE/ANY and uses ATTRIBUTES.
+ DESC=y/ATTR=n and DESC=n/ATTR=y therefore produce different protection.
+ Source: 02pack_anonym_number.sql:103-118;
+ config/inventory_op.csv:717-736; 30_install_engine.sql:941.
+ Decision approved: retain v4's ATTRIBUTES gating for addresses and document
+ the distinction from DESCRIPTION. Both masking switches default ON.
+
+C. Description/attribute-only operation depends on code anonymization in v4.
+ Legacy can process selected descriptions and optional fields with its code
+ flag off. V4's description/attribute enabled lists require the corresponding
+ category flag, and apply_self_code selects rows by saved replacement IDs.
+ Source: 02pack_anonym_number.sql:103-145;
+ 30_install_engine.sql:344-347,349-352,1025-1029.
+ Decision approved: restore independent operation with safe mapped field
+ values, without requiring ID renaming; defaults are ON. The current engine
+ still needs the changes in section 5B, so do not claim present flag parity.
+
+D. Some free-text scope and constraint behavior is broader/different in v4.
+ Legacy's global clears for UTILISATEUR.DESCRIPTION and import descriptions/
+ labels execute only when their containing selected-record CODE branch runs.
+ V4 NULL_OUT rules execute independently of category/source availability.
+ Many history fields were ALREADY globally cleared by the legacy launcher's
+ 05_op_performance_boost.sql pre-clear; do not call those a new v4 difference.
+ Legacy attempts literal NULL. V4 uses a width-limited ANONYMIZED marker for
+ NOT NULL character fields and skips unsupported NOT NULL non-character
+ fields. Decision approved: keep independent clearing and safe markers, but
+ do not silently skip unsupported masking outcomes or present them as clean.
+ Validate actual constraints and block unacceptable outcomes as in section 5B.
+ Sources: 02pack_anonym_number.sql:517-520,741;
+ start_anonymous.sql:68; 05_op_performance_boost.sql:69;
+ 30_install_engine.sql:844-864,1063-1070.
+
+E. Compensateur references do not use the same legacy generated value.
+ Legacy generates independent COLN and COLNPENS random values, then uses
+ COLNPENS for compensateur fields while the master/ordinary references use
+ COLN. V4 uses the ordinary saved identity mapping for these fields.
+ Source: 02pack_anonym_number.sql:94-98,387-388;
+ config/inventory_op.csv:292; 30_install_engine.sql:770-773.
+ Decision approved: retain v4's one translation for the same confirmed identity,
+ not the independent legacy random value;
+ a distinct identity/domain would need an explicit business justification.
+
+F. Identifier suffix format and inventory scope also differ.
+ Legacy uses random, unpadded suffixes; v4 uses zero-padded seven-digit
+ sequential allocations. That is an output-format difference, not by itself
+ an omission. Preserve stable mappings and schema-capacity checks.
+ V4 also includes extra NULL_OUT targets absent from the original package,
+ for example VAL_SECURITY_ACCOUNT.NUMERO_COMPTE, CTI RIB/IBAN fields, and
+ personal fields in UAA_USERS/TP_* tables. These are coverage extensions,
+ not proof of identical original behavior. Review applicability per schema.
+ Sources: 02pack_anonym_number.sql:94-98;
+ 30_install_engine.sql:24-25,622-627;
+ config/inventory_op.csv:618,656-686.
+
+Known BBAN/actual-number omissions and incomplete contact coverage remain
+separate field-level concerns. Classification, namespace, and checkbox fixes
+do not automatically solve them. This comparison proves the listed differences;
+it does not certify that every rule or all application behavior is equivalent.

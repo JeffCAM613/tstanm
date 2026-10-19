@@ -2,6 +2,25 @@
 
 **KTP Payment Factory · OP schema · version 4**
 
+> **Out of date in parts — being rewritten.** This guide describes v4 before the typed-identity
+> fix of 2026-10-20. Where it disagrees with the following, the following is right — and so are
+> `config/anonymization.template.ini` and the headers of the two inventory CSVs:
+>
+> - **Identifiers are typed.** Every party — entity `E_`, portfolio `P_`, counterparty `T_`, and
+>   the new *unclassified party* `X_`, with the reason recorded — and every bank account `CB_` is
+>   classified once, from the data, before anything changes. A column only ever receives the
+>   translation of the domain it holds: `PARTY`, `BANK_ACCOUNT`, `MIXED` (reviewed columns holding
+>   both) or `NODE_ROLE` (the structure tree, by each node's role). The category `ANY` is gone.
+> - **The three switches of a category are independent.** `ANONYMIZE_<CATEGORY>` renames
+>   identifiers only; `_DESCRIPTION` and `_ATTRIBUTES` mask labels and attributes even when the
+>   identifier is kept. Five categories, every switch on by default.
+> - **No checkbox exceptions.** `MIN_CODE_LENGTH` and the one-character column rule are gone:
+>   every listed column is processed, a one-character identifier is anonymized like any other, and
+>   a column that must not be touched is left out of the inventory.
+> - **A new scope decision**, `APPROVE_STRUCTURE_ONLY_ACCOUNTS`, for account nodes that have no
+>   `compte_banque` row.
+> - **Four verdicts**: PASS, FAIL, REVIEW REQUIRED, INCOMPLETE — exit codes 0, 2, 3, 4.
+
 This guide is for the person who runs the tool. It covers everything you need to complete a run
 successfully: what to prepare, what to type, what you will see, and how to confirm it worked.
 

@@ -51,16 +51,25 @@ SELECT 'replacements are unique' AS issue,
        CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' DUPLICATED' END AS result
   FROM (SELECT new_code FROM anon_meta.code_map GROUP BY new_code HAVING COUNT(*) > 1)
 UNION ALL
-SELECT 'originals spanning two categories',
-       CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' ambiguous' END
-  FROM (SELECT old_code FROM anon_meta.code_map
-         GROUP BY old_code HAVING COUNT(DISTINCT category) > 1)
+SELECT 'party with two party translations in use',
+       CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' IMPOSSIBLE' END
+  FROM (SELECT i.old_code FROM anon_meta.identity_inventory i
+          JOIN anon_meta.code_map c ON c.old_code = i.old_code
+                                   AND c.category = i.map_category
+         WHERE i.domain = 'PARTY'
+         GROUP BY i.old_code HAVING COUNT(*) > 1)
 UNION ALL
-SELECT 'resolved lookup table is complete',
-       CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' MISSING' END
-  FROM (SELECT DISTINCT old_code FROM anon_meta.code_map
-        MINUS
-        SELECT old_code FROM anon_meta.code_map_any)
+SELECT 'translation of the wrong domain',
+       CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' WRONG' END
+  FROM anon_meta.identity_inventory
+ WHERE (domain = 'ACCOUNT' AND map_category <> 'BANK_ACCOUNT')
+    OR (domain = 'PARTY'   AND map_category = 'BANK_ACCOUNT')
+UNION ALL
+SELECT 'earlier translations no identity uses',
+       CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' superseded (kept, unused)' END
+  FROM anon_meta.code_map c
+ WHERE NOT EXISTS (SELECT 1 FROM anon_meta.identity_inventory i
+                    WHERE i.old_code = c.old_code AND i.map_category = c.category)
 UNION ALL
 SELECT 'original still equals its replacement',
        CASE WHEN COUNT(*) = 0 THEN 'ok' ELSE COUNT(*) || ' NOT ANONYMIZED' END
@@ -68,12 +77,12 @@ SELECT 'original still equals its replacement',
 
 PROMPT
 PROMPT ====================================================================
-PROMPT  Originals belonging to more than one category
+PROMPT  Originals with more than one translation
 PROMPT ====================================================================
-PROMPT  Legal, but it means an unrestricted lookup had to choose. Resolved by
-PROMPT  priority: entity, then portfolio, then counterparty, then bank account.
-PROMPT  This is exactly where a wrong choice would silently mis-map a column,
-PROMPT  so it is worth confirming these are what you expect.
+PROMPT  Expected for a text that is both a party and a bank account: each
+PROMPT  object has its own translation, used only in its own domain. Two PARTY
+PROMPT  translations for one text come from an earlier version; only the one
+PROMPT  recorded in identity_inventory is used.
 
 SELECT * FROM (
    SELECT old_code,
