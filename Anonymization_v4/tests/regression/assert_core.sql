@@ -94,7 +94,7 @@ BEGIN
    check_eq('shared text: account master holds the ACCOUNT translation',
       'SELECT COUNT(*) FROM op.compte_banque WHERE code = ' || tr('ACCOUNT', 'SHRD'), '1');
    check_eq('shared text: account node holds the SAME account translation',
-      'SELECT COUNT(*) FROM op.structure WHERE structure = ''Compte'' AND ecran = ''w_compte_banque'''
+      'SELECT COUNT(*) FROM op.structure WHERE ecran = ''w_compte_banque'''
    || ' AND code = ' || tr('ACCOUNT', 'SHRD'), '1');
    check_eq('shared text: party node keeps the PARTY translation',
       'SELECT COUNT(*) FROM op.structure WHERE ecran = ''w_tiers'' AND code = ' || tr('PARTY', 'SHRD'), '1');

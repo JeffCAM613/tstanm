@@ -326,8 +326,8 @@ BEGIN
          'SELECT COUNT(*) FROM anon_meta.identity_plan p WHERE p.run_id = ' || v_run
       || ' AND p.domain = ''ACCOUNT'' AND p.id_on = ''Y'' AND p.has_account_node = ''Y'''
       || ' AND NOT EXISTS (SELECT 1 FROM op.structure s WHERE s.code = p.new_code'
-      || ' AND s.structure = ''Compte'' AND s.ecran = ''w_compte_banque'')',
-         'Compte/w_compte_banque nodes without the CB_ replacement of their account');
+      || ' AND s.ecran = ''w_compte_banque'')',
+         'w_compte_banque nodes without the CB_ replacement of their account');
 
       expect_zero('IDENTITY', 'party masters carry their translation',
          'SELECT COUNT(*) FROM anon_meta.identity_plan p WHERE p.run_id = ' || v_run
@@ -524,14 +524,13 @@ BEGIN
          END IF;
 
          IF r.category = 'NODE_ROLE' AND r.column_name = 'CODE' THEN
-            scan(r.table_name, r.column_name, 'ACCOUNT',
-                 't.structure = ''Compte'' AND t.ecran = ''w_compte_banque''');
+            -- A node's role is its screen alone.
+            scan(r.table_name, r.column_name, 'ACCOUNT', 't.ecran = ''w_compte_banque''');
             judge(v_obj || ' [account nodes]', 'ACCOUNT', FALSE);
             scan(r.table_name, r.column_name, 'PARTY', 't.ecran = ''w_tiers''');
             judge(v_obj || ' [party nodes]', 'PARTY', FALSE);
             scan(r.table_name, r.column_name, 'OTHER_NODE',
-                 'NOT (NVL(t.structure, ''~'') = ''Compte'' AND NVL(t.ecran, ''~'') = ''w_compte_banque'')'
-              || ' AND NVL(t.ecran, ''~'') <> ''w_tiers''');
+                 'NVL(t.ecran, ''~'') NOT IN (''w_compte_banque'', ''w_tiers'')');
             judge(v_obj || ' [other screens]', 'OTHER_NODE', FALSE);
          ELSIF r.category = 'NODE_ROLE' AND r.column_name = 'PERE' THEN
             scan(r.table_name, r.column_name, 'PERE', NULL);
@@ -715,8 +714,7 @@ BEGIN
 
          IF r.category = 'NODE_ROLE' THEN
             check_owned(r.table_name, r.column_name, r.rule, 'ACCOUNT', NULL,
-                        't.structure = ''Compte'' AND t.ecran = ''w_compte_banque''',
-                        v_obj || ' [account nodes]');
+                        't.ecran = ''w_compte_banque''', v_obj || ' [account nodes]');
             check_owned(r.table_name, r.column_name, r.rule, 'PARTY', NULL,
                         't.ecran = ''w_tiers''', v_obj || ' [party nodes]');
          ELSIF r.category = 'BANK_ACCOUNT' THEN

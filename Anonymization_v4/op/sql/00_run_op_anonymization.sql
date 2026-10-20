@@ -66,7 +66,10 @@ SET LINESIZE 200
 SET TAB OFF
 SET PAGESIZE 0
 SET TRIMSPOOL ON
-SET SERVEROUTPUT ON SIZE UNLIMITED
+-- FORMAT WRAPPED keeps the engine's indentation and blank lines. The default
+-- (WORD_WRAPPED) strips both, which flattens the tables and the queries the
+-- run prints.
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 
 -- Any error from here on aborts the run and returns a non-zero exit code.
 -- v3 had no such policy: a failure scrolled past and the script reported
@@ -114,7 +117,7 @@ SET TERMOUT ON
 SET HEADING OFF
 SELECT 'Connected as ' || USER || ' on ' || SYS_CONTEXT('USERENV', 'DB_NAME')
        || ' (session ' || SYS_CONTEXT('USERENV', 'SID') || ')' AS connected FROM dual;
-SET SERVEROUTPUT ON SIZE UNLIMITED
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 SET FEEDBACK OFF
 SET VERIFY OFF
 SET HEADING OFF

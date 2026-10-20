@@ -495,6 +495,73 @@ BEGIN
    END LOOP;
    w('</tbody></table></section>');
 
+   ---------------------------------------------------- unclassified parties --
+   -- Counts by reason, with the reason in words, and where their X_ values
+   -- went by table. From the run's plan and step log - no identifier, and no
+   -- check of its own.
+   SELECT COUNT(*) INTO v_shown
+     FROM anon_meta.identity_plan
+    WHERE run_id = v_run_id AND domain = 'PARTY' AND category = 'UNCLASSIFIED_PARTY';
+   IF v_shown > 0 THEN
+      DECLARE
+         v_x_rows NUMBER;
+      BEGIN
+         SELECT NVL(SUM(x_rows), 0) INTO v_x_rows
+           FROM anon_meta.anon_step_log
+          WHERE run_id = v_run_id AND phase = 'CODE' AND x_rows > 0;
+
+         w('<section><div class="shead"><h2>Unclassified parties (X_)</h2>');
+         w('<span class="tally">' || n(v_shown) || ' parties &middot; ' || n(v_x_rows)
+           || ' identifier rows renamed to X_ by this run</span></div>');
+         w('<div class="note">Parties whose kind &mdash; entity, portfolio or counterparty &mdash; the '
+           || 'data does not establish. They are anonymized like every other party, with an X_ value; '
+           || 'the reason says what the data was missing. <b>Tiers</b>, <b>w_tiers node</b> and '
+           || '<b>Other screen</b> count the parties found there, not rows.</div>');
+         w('<div class="scroll"><table><thead><tr><th>Reason</th><th class="num">Parties</th>'
+           || '<th class="num">Tiers</th><th class="num">w_tiers node</th><th class="num">Other screen</th>'
+           || '<th>Why they are X_</th></tr></thead><tbody>');
+         FOR r IN (SELECT p.x_reason, NVL(MAX(d.label), LOWER(p.x_reason)) AS label, MAX(d.why) AS why,
+                          COUNT(*)                                                   AS parties,
+                          COUNT(CASE WHEN p.has_master = 'Y' THEN 1 END)            AS in_tiers,
+                          COUNT(CASE WHEN p.has_party_node = 'Y' THEN 1 END)        AS party_node,
+                          COUNT(CASE WHEN p.has_other_screen_node = 'Y' THEN 1 END) AS other_screen
+                     FROM anon_meta.identity_plan p
+                     LEFT JOIN anon_meta.unclassified_reason d ON d.x_reason = p.x_reason
+                    WHERE p.run_id = v_run_id AND p.domain = 'PARTY'
+                      AND p.category = 'UNCLASSIFIED_PARTY'
+                    GROUP BY p.x_reason
+                    ORDER BY MAX(d.sort_order), p.x_reason) LOOP
+            w('<tr><td class="col-name">' || esc(INITCAP(SUBSTR(r.label, 1, 1)) || SUBSTR(r.label, 2))
+              || '</td><td class="num">' || n(r.parties) || '</td><td class="num">' || n(r.in_tiers)
+              || '</td><td class="num">' || n(r.party_node) || '</td><td class="num">' || n(r.other_screen)
+              || '</td><td>' || esc(r.why) || '</td></tr>');
+         END LOOP;
+         w('</tbody></table></div>');
+
+         w('<div class="note">Where their X_ values went: identifier rows renamed by this run, by '
+           || 'table.</div>');
+         w('<table><thead><tr><th>Table</th><th class="num">Columns</th>'
+           || '<th class="num">Rows renamed to X_</th></tr></thead><tbody>');
+         IF v_x_rows = 0 THEN
+            w('<tr><td colspan="3">None by this run &mdash; already renamed by an earlier run, or '
+              || 'renaming of unclassified parties was switched off.</td></tr>');
+         END IF;
+         -- n_x, not x_rows: an alias with the column's name would shadow it in
+         -- ORDER BY.
+         FOR t IN (SELECT REGEXP_SUBSTR(object_name, '^[^.]+')                AS table_name,
+                          COUNT(DISTINCT REGEXP_SUBSTR(object_name, '^[^ ]+')) AS cols,
+                          SUM(x_rows)                                          AS n_x
+                     FROM anon_meta.anon_step_log
+                    WHERE run_id = v_run_id AND phase = 'CODE' AND x_rows > 0
+                    GROUP BY REGEXP_SUBSTR(object_name, '^[^.]+')
+                    ORDER BY n_x DESC, table_name) LOOP
+            w('<tr><td class="tbl-name">' || esc(t.table_name) || '</td><td class="num">' || n(t.cols)
+              || '</td><td class="num">' || n(t.n_x) || '</td></tr>');
+         END LOOP;
+         w('</tbody></table></section>');
+      END;
+   END IF;
+
    -------------------------------------------------------- the switches --
    w('<section><div class="shead"><h2>Switches used</h2>');
    w('<span class="tally">run #' || v_run_id || '</span></div>');

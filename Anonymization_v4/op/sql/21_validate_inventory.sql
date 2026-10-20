@@ -38,7 +38,7 @@
 --   parties and compte_banque ones to accounts.
 -- ============================================================================
 
-SET SERVEROUTPUT ON SIZE UNLIMITED
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 SET FEEDBACK OFF
 SET VERIFY OFF
 SET ECHO OFF

@@ -213,8 +213,8 @@ if "!INTERACTIVE!"=="1" (
     echo --------------------------------------------------------------------
     echo  Scope decision for this client
     echo --------------------------------------------------------------------
-    echo  A bank account is found in compte_banque and as a Compte node on the
-    echo  w_compte_banque screen. Nodes with no compte_banque row are anonymized
+    echo  A bank account is found in compte_banque and as a structure node on
+    echo  the w_compte_banque screen. Nodes with no compte_banque row are anonymized
     echo  as bank accounts only once you confirm that they ARE bank accounts for
     echo  this client. If unsure answer n: a run that finds any stops before
     echo  changing anything, and a dry run shows how many there are.

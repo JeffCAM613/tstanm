@@ -33,7 +33,7 @@
 #   PARTY    tiers.code, the w_tiers structure nodes, confirmed references
 #              ENTITY E_ . PORTFOLIO P_ . COUNTERPARTY T_ .
 #              UNCLASSIFIED_PARTY X_ (the data cannot say which; reason kept)
-#   ACCOUNT  compte_banque.code, the Compte/w_compte_banque structure nodes
+#   ACCOUNT  compte_banque.code, the structure nodes on the w_compte_banque screen
 #              BANK_ACCOUNT CB_
 #
 # The same text can be a party AND an account. They are different objects:
@@ -111,7 +111,7 @@ table_name,column_name,rule,category,source,notes
 # The party and account master tables. Everything else references these.
 #
 # structure holds BOTH kinds of node - a party node on the w_tiers screen, an
-# account node as Compte on w_compte_banque - so neither of its code columns
+# account node on the w_compte_banque screen - so neither of its code columns
 # can have one domain. NODE_ROLE types each row by its own role, and pere by
 # its parent's, decided before anything is renamed. A node on any other screen
 # is left unchanged and reported for review.

@@ -45,14 +45,15 @@ SELECT 'structure.code looking generated', COUNT(*)
   FROM op.structure WHERE REGEXP_LIKE(code, '^(E|P|T|X|CB)_[0-9]{7}$');
 
 PROMPT
-PROMPT ==== 2. Bank accounts: compte_banque UNION Compte/w_compte_banque nodes ======
+PROMPT ==== 2. Bank accounts: compte_banque UNION w_compte_banque nodes =============
+PROMPT A node is an account node by its screen alone, whatever its classification.
 PROMPT STRUCTURE_ONLY needs APPROVE_STRUCTURE_ONLY_ACCOUNTS=y.
 WITH acc AS (
    SELECT code, MAX(m) AS m, MAX(nd) AS nd
      FROM (SELECT code, 1 AS m, 0 AS nd FROM op.compte_banque WHERE code IS NOT NULL
            UNION ALL
            SELECT code, 0, 1 FROM op.structure
-            WHERE structure = 'Compte' AND ecran = 'w_compte_banque' AND code IS NOT NULL)
+            WHERE ecran = 'w_compte_banque' AND code IS NOT NULL)
     GROUP BY code)
 SELECT CASE WHEN m = 1 AND nd = 1 THEN 'BOTH'
             WHEN m = 1 THEN 'MASTER_ONLY'
@@ -81,8 +82,7 @@ WITH k AS (
           (SELECT COUNT(*) FROM op.structure s WHERE s.code = k.code AND s.ecran = 'w_tiers'
               AND s.structure <> 'Entite') AS n_other_class,
           (SELECT COUNT(*) FROM op.structure s WHERE s.code = k.code
-              AND NVL(s.ecran, '~') <> 'w_tiers'
-              AND NOT (NVL(s.structure, '~') = 'Compte' AND NVL(s.ecran, '~') = 'w_compte_banque')) AS n_other_screen
+              AND NVL(s.ecran, '~') NOT IN ('w_tiers', 'w_compte_banque')) AS n_other_screen
      FROM k
 ), c AS (
    SELECT CASE WHEN n_master = 0                              THEN 'UNCLASSIFIED_PARTY'
@@ -111,7 +111,7 @@ PROMPT Each keeps its own translation. In a MIXED column such a value is left fo
 SELECT COUNT(*) AS same_text
   FROM (SELECT code FROM op.tiers UNION SELECT code FROM op.structure WHERE ecran = 'w_tiers') p
   JOIN (SELECT code FROM op.compte_banque
-        UNION SELECT code FROM op.structure WHERE structure = 'Compte' AND ecran = 'w_compte_banque') a
+        UNION SELECT code FROM op.structure WHERE ecran = 'w_compte_banque') a
     ON a.code = p.code;
 
 PROMPT
@@ -120,14 +120,13 @@ PROMPT An other-screen node holding an identifier is left unchanged and reported
 PROMPT review. Which screens they sit on decides the reviewed policy to add next.
 WITH s AS (
    SELECT x.structure, x.ecran,
-          CASE WHEN x.structure = 'Compte' AND x.ecran = 'w_compte_banque' THEN 'ACCOUNT NODE'
+          CASE WHEN x.ecran = 'w_compte_banque' THEN 'ACCOUNT NODE'
                WHEN x.ecran = 'w_tiers' THEN 'PARTY NODE'
                ELSE 'OTHER' END AS role,
           CASE WHEN EXISTS (SELECT 1 FROM op.tiers t WHERE t.code = x.code)
                  OR EXISTS (SELECT 1 FROM op.compte_banque b WHERE b.code = x.code)
                  OR EXISTS (SELECT 1 FROM op.structure s2 WHERE s2.code = x.code
-                             AND (s2.ecran = 'w_tiers'
-                                  OR (s2.structure = 'Compte' AND s2.ecran = 'w_compte_banque')))
+                             AND s2.ecran IN ('w_tiers', 'w_compte_banque'))
                THEN 1 ELSE 0 END AS is_identifier
      FROM op.structure x
 )
@@ -143,7 +142,7 @@ PROMPT For each child role, the roles of the nodes its pere could point at. A pa
 PROMPT text carried by more than one role is AMBIGUOUS and left for review.
 WITH n AS (
    SELECT code, pere,
-          CASE WHEN structure = 'Compte' AND ecran = 'w_compte_banque' THEN 'ACCOUNT'
+          CASE WHEN ecran = 'w_compte_banque' THEN 'ACCOUNT'
                WHEN ecran = 'w_tiers' THEN 'PARTY' ELSE 'OTHER' END AS role
      FROM op.structure
 ), pr AS (

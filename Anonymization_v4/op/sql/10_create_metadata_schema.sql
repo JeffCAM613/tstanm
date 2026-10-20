@@ -21,7 +21,7 @@
 DEFINE tbs_data  = &1
 DEFINE tbs_index = &2
 
-SET SERVEROUTPUT ON SIZE UNLIMITED
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 SET FEEDBACK OFF
 SET VERIFY OFF
 SET ECHO OFF
@@ -318,6 +318,10 @@ BEGIN
    add_column('code_map', 'run_id',     'NUMBER');
    add_column('code_map', 'id_applied', 'VARCHAR2(1)');
    add_column('anon_run', 'dataset_json', 'VARCHAR2(2000)');
+   -- Of the rows a CODE step changed (or a dry run would change), how many got
+   -- an unclassified party's X_ value. Counts only; the run summary and the
+   -- report add them up by table.
+   add_column('anon_step_log', 'x_rows', 'NUMBER');
 
    -- code_map_any - REMOVED.
    --
@@ -343,7 +347,7 @@ BEGIN
    -- and X_ reason recorded here. That is what keeps a replacement stable.
    --
    --   domain        PARTY    tiers.code, w_tiers nodes, confirmed references
-   --                 ACCOUNT  compte_banque.code, Compte/w_compte_banque nodes
+   --                 ACCOUNT  compte_banque.code, w_compte_banque nodes
    --   category      ENTITY | PORTFOLIO | COUNTERPARTY | UNCLASSIFIED_PARTY
    --                 for a party; BANK_ACCOUNT for an account
    --   x_reason      why a party is UNCLASSIFIED_PARTY (X_); never NULL for one
@@ -549,8 +553,111 @@ BEGIN
          pere_bad   VARCHAR2(1),
          CONSTRAINT pk_verify_key PRIMARY KEY (key_code) USING INDEX TABLESPACE &tbs_index
       )]');
+
+   -- unclassified_reason - why a party is UNCLASSIFIED_PARTY (X_), in words.
+   --
+   -- One row per x_reason: the general reason, what would let the data
+   -- classify the party, and a query that lists the parties of one run with
+   -- that reason (:run_id). The run output, the report and anyone querying
+   -- the metadata read the same text. Refreshed below on every run.
+   create_table('unclassified_reason', q'[
+      CREATE TABLE anon_meta.unclassified_reason (
+         x_reason    VARCHAR2(30)   NOT NULL,
+         sort_order  NUMBER         NOT NULL,
+         label       VARCHAR2(40)   NOT NULL,
+         why         VARCHAR2(1000) NOT NULL,
+         fix         VARCHAR2(1000) NOT NULL,
+         list_sql    VARCHAR2(4000) NOT NULL,
+         CONSTRAINT pk_unclassified_reason PRIMARY KEY (x_reason) USING INDEX TABLESPACE &tbs_index
+      )]');
 END;
 /
+
+-- The reasons, in the order the classification tests them. The queries list
+-- original client identifiers: they are printed for the operator to run, never
+-- run by the engine into a log.
+MERGE INTO anon_meta.unclassified_reason d
+USING (
+   SELECT 'MISSING_MASTER' AS x_reason, 1 AS sort_order, 'missing master' AS label,
+          'The code is a party in the structure tree (a w_tiers node) or a confirmed '
+       || 'reference, but tiers has no row for it - so there is no flag_portefeuille to '
+       || 'tell a portfolio from an entity or a counterparty.' AS why,
+          'Add the missing tiers row with its flag_portefeuille, or correct the node''s code '
+       || 'if it is a typo. A node left over from a deleted party can stay X_.' AS fix,
+          q'{SELECT p.old_code AS code, p.membership, s.ecran, s.structure, s.pere
+  FROM anon_meta.identity_plan p
+  LEFT JOIN op.structure s
+         ON s.code = p.old_code AND NVL(s.ecran, '~') <> 'w_compte_banque'
+ WHERE p.run_id = :run_id AND p.domain = 'PARTY'
+   AND p.category = 'UNCLASSIFIED_PARTY' AND p.x_reason = 'MISSING_MASTER'
+ ORDER BY p.old_code, s.ecran, s.structure;}' AS list_sql
+     FROM dual
+   UNION ALL
+   SELECT 'NO_STRUCTURE', 2, 'no structure',
+          'The tiers row has no node in the structure tree. A party''s kind comes from its '
+       || 'w_tiers node (Entite, or another classification), so with none it cannot be told '
+       || 'apart. A w_compte_banque node with the same text is a bank account, not this party.',
+          'Add its w_tiers node in the structure tree if it is a live party; otherwise leave it X_.',
+          q'{SELECT t.*
+  FROM op.tiers t
+ WHERE t.code IN (SELECT p.old_code FROM anon_meta.identity_plan p
+                   WHERE p.run_id = :run_id AND p.domain = 'PARTY'
+                     AND p.category = 'UNCLASSIFIED_PARTY' AND p.x_reason = 'NO_STRUCTURE')
+ ORDER BY t.code;}'
+     FROM dual
+   UNION ALL
+   SELECT 'NO_PARTY_SCREEN', 3, 'no party screen',
+          'The tiers row has structure nodes, but none on the w_tiers screen. A node on '
+       || 'another screen does not classify a party, and is itself left for review.',
+          'Add a w_tiers node if it belongs in the party tree; otherwise leave it X_ and decide '
+       || 'what its nodes on the other screens are.',
+          q'{SELECT s.code, s.ecran, s.structure, s.pere, t.flag_portefeuille
+  FROM op.structure s
+  JOIN op.tiers t ON t.code = s.code
+ WHERE s.code IN (SELECT p.old_code FROM anon_meta.identity_plan p
+                   WHERE p.run_id = :run_id AND p.domain = 'PARTY'
+                     AND p.category = 'UNCLASSIFIED_PARTY' AND p.x_reason = 'NO_PARTY_SCREEN')
+   AND NVL(s.ecran, '~') <> 'w_compte_banque'
+ ORDER BY s.code, s.ecran, s.structure;}'
+     FROM dual
+   UNION ALL
+   SELECT 'UNKNOWN_FLAG', 4, 'unknown flag',
+          'flag_portefeuille is neither O nor N - empty, another value, or different on two '
+       || 'tiers rows with the same code - so it is not known whether the party is a portfolio.',
+          'Set flag_portefeuille to O (portfolio) or N (entity or counterparty); remove a '
+       || 'duplicate tiers row.',
+          q'{SELECT t.*
+  FROM op.tiers t
+ WHERE t.code IN (SELECT p.old_code FROM anon_meta.identity_plan p
+                   WHERE p.run_id = :run_id AND p.domain = 'PARTY'
+                     AND p.category = 'UNCLASSIFIED_PARTY' AND p.x_reason = 'UNKNOWN_FLAG')
+ ORDER BY t.code;}'
+     FROM dual
+   UNION ALL
+   SELECT 'UNKNOWN_CLASSIFICATION', 5, 'unknown classification',
+          'flag_portefeuille is N, but every w_tiers node of the party has an empty structure '
+       || 'classification - so it is neither an entity (Entite) nor a counterparty (another '
+       || 'classification).',
+          'Set structure on its w_tiers node: Entite for an entity, the counterparty '
+       || 'classification otherwise.',
+          q'{SELECT s.code, s.ecran, s.structure, s.pere, t.flag_portefeuille
+  FROM op.structure s
+  JOIN op.tiers t ON t.code = s.code
+ WHERE s.code IN (SELECT p.old_code FROM anon_meta.identity_plan p
+                   WHERE p.run_id = :run_id AND p.domain = 'PARTY'
+                     AND p.category = 'UNCLASSIFIED_PARTY'
+                     AND p.x_reason = 'UNKNOWN_CLASSIFICATION')
+   AND s.ecran = 'w_tiers'
+ ORDER BY s.code;}'
+     FROM dual
+) s
+ON (d.x_reason = s.x_reason)
+WHEN MATCHED THEN UPDATE SET d.sort_order = s.sort_order, d.label = s.label, d.why = s.why,
+                             d.fix = s.fix, d.list_sql = REPLACE(s.list_sql, CHR(13))
+WHEN NOT MATCHED THEN INSERT (x_reason, sort_order, label, why, fix, list_sql)
+                      VALUES (s.x_reason, s.sort_order, s.label, s.why, s.fix,
+                              REPLACE(s.list_sql, CHR(13)));
+COMMIT;
 
 -- ----------------------------------------------------------------------------
 -- Clear the inventory, ready for the generated INSERT file to repopulate it.
@@ -680,6 +787,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.field_baseline     TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.anon_step_log      TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.verify_result      TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.verify_key         TO op;
+GRANT SELECT                          ON anon_meta.unclassified_reason TO op;
 GRANT SELECT                          ON anon_meta.seq_anon_run      TO op;
 GRANT SELECT                          ON atrace.ref_tables_modif     TO op;
 

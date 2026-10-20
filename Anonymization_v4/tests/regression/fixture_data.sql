@@ -61,7 +61,8 @@ SELECT 'Z',    'N', 'One-char entity',  NULL, NULL, NULL, NULL, NULL, NULL, NULL
 --   NMEN  an Entite node on w_tiers with NO tiers row       -> X_ MISSING_MASTER
 --   NMCP  a Compte node on w_tiers with NO tiers row        -> X_ MISSING_MASTER
 --         (the old engine made it a counterparty)
---   account nodes (Compte on w_compte_banque):
+--   account nodes (on w_compte_banque; all classified Compte here - S18 adds
+--   nodes with another classification):
 --     SHRD     same text as the party SHRD - must get the ACCOUNT's CB_
 --     NODEONLY no compte_banque row: STRUCTURE_ONLY, needs approval
 --     BKDUP    twice, plus a compte_banque row: one identity, BOTH

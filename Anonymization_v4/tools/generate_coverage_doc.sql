@@ -150,7 +150,7 @@ BEGIN
    w;
    w('Every original identifier is classified once, from the data, into one category. A party');
    w('is a `tiers` row, a `structure` node on the `w_tiers` screen, or a confirmed reference;');
-   w('a bank account is a `compte_banque` row or a `Compte` node on `w_compte_banque`.');
+   w('a bank account is a `compte_banque` row or a `structure` node on the `w_compte_banque` screen.');
    w;
    w('| Category | Prefix | Example | Rule, in this order |');
    w('|---|---|---|---|');
@@ -158,7 +158,7 @@ BEGIN
    w('| Entity | `E_` | `E_0000001` | flag `N` and an `Entite` node on `w_tiers` - wins over another classification |');
    w('| Counterparty | `T_` | `T_0000001` | flag `N` and another (non-NULL) classification on `w_tiers`, no `Entite` |');
    w('| Unclassified party | `X_` | `X_0000001` | any other party: no `tiers` row, no node, no `w_tiers` node, unknown flag or classification - the reason is recorded |');
-   w('| Bank account | `CB_` | `CB_0000001` | `compte_banque`, and `Compte` nodes on `w_compte_banque` |');
+   w('| Bank account | `CB_` | `CB_0000001` | `compte_banque`, and `structure` nodes on `w_compte_banque` |');
    w;
    w('The same text can be a party and a bank account: each keeps its own replacement. New');
    w('replacements are appended after the existing ones in sorted order of the original code, so');

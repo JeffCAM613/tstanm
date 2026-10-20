@@ -5,6 +5,10 @@
 -- union with typed lookup, and the party classification order) - not the
 -- engine, which assert_core.sql checks on real tables. Runs on any database.
 --
+-- One change from the specification: an account node is any node on the
+-- w_compte_banque screen. The specification also required structure =
+-- 'Compte'; the business confirmed (2026-10-20) that the screen alone decides.
+--
 -- Expected:
 --   TYPED_ACCOUNT_DESIGN_CHECK          3 candidates, 0 inconsistent, 1 party node
 --   PARTY_CLASSIFICATION_DESIGN_CHECK   16 cases, 0 mismatches, 4 E, 3 P, 1 T, 8 X
@@ -29,7 +33,7 @@ WITH sample_bank AS (
  SELECT code FROM sample_bank
  UNION
  SELECT code FROM sample_structure
- WHERE structure='Compte' AND ecran='w_compte_banque'
+ WHERE ecran='w_compte_banque'
 ), planned_map AS (
  SELECT 'BANK_ACCOUNT' AS category, 'DEMO_SHARED' AS old_code,
  'CB_DEMO_SHARED' AS new_code FROM dual
@@ -41,7 +45,7 @@ WITH sample_bank AS (
  'BANK_ACCOUNT' AS required_category FROM sample_bank
  UNION ALL
  SELECT 'ACCOUNT_NODE', code, 'BANK_ACCOUNT' FROM sample_structure
- WHERE structure='Compte' AND ecran='w_compte_banque'
+ WHERE ecran='w_compte_banque'
  UNION ALL
  SELECT 'PARTY_NODE', code, 'ENTITY' FROM sample_structure
  WHERE structure='Entite' AND ecran='w_tiers'

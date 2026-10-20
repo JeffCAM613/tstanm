@@ -51,6 +51,8 @@ The last line says `passed N, failed M`; the exit code is 0 only when nothing fa
 | S15 | A switch that is neither y nor n | refused |
 | S16 | A dangling party reference, then confirmed | a warning until confirmed; then X_ MISSING_MASTER, renamed, PASS |
 | S17 | Resume after a run that stopped partway | no re-classification; restored originals get the same translations; PASS |
+| S18 | Account nodes classified other than `Compte`, or not at all | still account nodes (the screen alone decides): CB_, account parent, labels masked, nothing for review; PASS |
+| S19 | Unclassified parties in a dry run, then in EXECUTE, then with X_ renaming off | dry run: counts by reason and where found, the reasons, the fixes and one query per reason - each query runs and lists them; EXECUTE: counts and reasons only; X_ identifiers by table in both, in the step log and in the report; no identifier in any output |
 
 ## Files
 

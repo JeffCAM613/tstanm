@@ -21,7 +21,9 @@
 --              ENTITY             E_  flag 'N' + an Entite w_tiers node
 --              COUNTERPARTY       T_  flag 'N' + another w_tiers node, no Entite
 --              UNCLASSIFIED_PARTY X_  anything else, with a recorded reason
---   ACCOUNT  a compte_banque row or a Compte/w_compte_banque node.
+--   ACCOUNT  a compte_banque row or a structure node on the w_compte_banque
+--            screen - the screen alone decides; the node's own classification
+--            (normally Compte) does not.
 --              BANK_ACCOUNT       CB_
 --
 -- The same text can be a party AND an account. They are different objects and
@@ -235,14 +237,16 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       p_status  IN VARCHAR2,
       p_rows    IN NUMBER   DEFAULT NULL,
       p_ms      IN NUMBER   DEFAULT NULL,
-      p_message IN VARCHAR2 DEFAULT NULL)
+      p_message IN VARCHAR2 DEFAULT NULL,
+      p_x_rows  IN NUMBER   DEFAULT NULL)
    IS
       PRAGMA AUTONOMOUS_TRANSACTION;
    BEGIN
       INSERT INTO anon_meta.anon_step_log
-         (run_id, phase, object_name, rule, status, rows_affected, elapsed_ms, message)
+         (run_id, phase, object_name, rule, status, rows_affected, elapsed_ms, message, x_rows)
       VALUES
-         (g_run_id, p_phase, p_object, p_rule, p_status, p_rows, p_ms, SUBSTR(p_message, 1, 4000));
+         (g_run_id, p_phase, p_object, p_rule, p_status, p_rows, p_ms, SUBSTR(p_message, 1, 4000),
+          p_x_rows);
       COMMIT;
 
       -- Preflight is logged but NOT counted. It reports on every inventory item
@@ -280,8 +284,11 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
 
    -- Report one inventory item on screen in a fixed-width form so a long run
    -- stays readable.
-   PROCEDURE report(p_object IN VARCHAR2, p_status IN VARCHAR2, p_rows IN NUMBER DEFAULT NULL) IS
-      v_detail VARCHAR2(60);
+   -- p_x_rows: how many of the rows got (or would get) an unclassified
+   -- party's X_ value.
+   PROCEDURE report(p_object IN VARCHAR2, p_status IN VARCHAR2, p_rows IN NUMBER DEFAULT NULL,
+                    p_x_rows IN NUMBER DEFAULT NULL) IS
+      v_detail VARCHAR2(80);
    BEGIN
       v_detail := CASE
                      WHEN p_status = 'OK'     THEN TO_CHAR(p_rows, 'FM999,999,999') || ' rows'
@@ -289,9 +296,40 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
                      WHEN p_status = 'NOOP'   THEN 'no rows matched'
                      WHEN p_status = 'REVIEW' THEN TO_CHAR(p_rows, 'FM999,999,999') || ' rows left for review'
                      ELSE ''
-                  END;
+                  END
+               || CASE WHEN p_x_rows > 0 THEN ', ' || TO_CHAR(p_x_rows, 'FM999,999,999') || ' to X_' END;
       say('    ' || RPAD(SUBSTR(p_object, 1, 52), 54) || RPAD(p_status, 10) || v_detail);
    END report;
+
+
+   -- A paragraph under a label, wrapped so a long reason stays readable in
+   -- the run output and the log.
+   PROCEDURE say_wrapped(p_indent IN PLS_INTEGER, p_label IN VARCHAR2, p_label_width IN PLS_INTEGER,
+                         p_text IN VARCHAR2) IS
+      c_width CONSTANT PLS_INTEGER := 100;
+      v_room  PLS_INTEGER := c_width - p_indent - p_label_width;
+      v_rest  VARCHAR2(4000) := TRIM(p_text);
+      v_line  VARCHAR2(4000);
+      v_cut   PLS_INTEGER;
+      v_first BOOLEAN := TRUE;
+   BEGIN
+      WHILE v_rest IS NOT NULL LOOP
+         IF LENGTH(v_rest) <= v_room THEN
+            v_line := v_rest;
+            v_rest := NULL;
+         ELSE
+            v_cut := INSTR(SUBSTR(v_rest, 1, v_room + 1), ' ', -1);
+            IF v_cut <= 1 THEN
+               v_cut := v_room + 1;
+            END IF;
+            v_line := RTRIM(SUBSTR(v_rest, 1, v_cut - 1));
+            v_rest := LTRIM(SUBSTR(v_rest, v_cut));
+         END IF;
+         say(RPAD(' ', p_indent) || RPAD(CASE WHEN v_first THEN p_label ELSE ' ' END, p_label_width)
+             || v_line);
+         v_first := FALSE;
+      END LOOP;
+   END say_wrapped;
 
 
    -- A preflight finding that makes the run unsafe: logged, shown, counted.
@@ -736,14 +774,16 @@ WITH pmap AS (
     WHERE x.code IS NOT NULL
     GROUP BY NVL(m.old_code, x.code)
 ), nd AS (
-   SELECT CASE WHEN x.structure = 'Compte' AND x.ecran = 'w_compte_banque' THEN 'A'
+   -- A node's role is its screen: w_compte_banque an account, w_tiers a
+   -- party, any other screen neither.
+   SELECT CASE WHEN x.ecran = 'w_compte_banque' THEN 'A'
                WHEN x.ecran = 'w_tiers' THEN 'P'
                ELSE 'O' END AS role,
           x.structure AS cls,
-          CASE WHEN x.structure = 'Compte' AND x.ecran = 'w_compte_banque' THEN NVL(am.old_code, x.code)
+          CASE WHEN x.ecran = 'w_compte_banque' THEN NVL(am.old_code, x.code)
                WHEN x.ecran = 'w_tiers' THEN NVL(pm.old_code, x.code)
                ELSE x.code END AS k,
-          CASE WHEN x.structure = 'Compte' AND x.ecran = 'w_compte_banque' THEN NVL2(am.old_code, 1, 0)
+          CASE WHEN x.ecran = 'w_compte_banque' THEN NVL2(am.old_code, 1, 0)
                WHEN x.ecran = 'w_tiers' THEN NVL2(pm.old_code, 1, 0)
                ELSE 0 END AS r
      FROM op.structure x
@@ -1127,7 +1167,7 @@ SELECT :run_id, domain, k,
          AND membership = 'STRUCTURE_ONLY';
       IF v_n > 0 AND NOT g_approve_structure_only THEN
          block('account scope',
-               v_n || ' Compte/w_compte_banque structure node(s) have no compte_banque row. Confirm '
+               v_n || ' w_compte_banque structure node(s) have no compte_banque row. Confirm '
             || 'that these nodes are bank-account identities for this client, then set '
             || 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=y. Scope review needed before any update.', v_n);
       END IF;
@@ -1169,6 +1209,108 @@ SELECT :run_id, domain, k,
          block('mapping', v_n || ' identit(ies) needing a translation have none of their own domain.', v_n);
       END IF;
    END validate_plan;
+
+
+   -- The unclassified parties: how many, why, and where they were found.
+   --
+   -- Every run shows the counts by reason with the reason in words. A dry run
+   -- - the time to act on them - also says what would let the data classify
+   -- them, and prints one query per reason that lists them, so they can be
+   -- fixed in the data before the real run or knowingly left X_. The queries
+   -- are printed, not run: the run output never holds an identifier.
+   PROCEDURE report_unclassified IS
+      v_total NUMBER;
+
+      PROCEDURE say_sql(p_sql IN VARCHAR2) IS
+         v_rest VARCHAR2(4000) := REPLACE(p_sql, ':run_id', TO_CHAR(g_run_id));
+         v_pos  PLS_INTEGER;
+      BEGIN
+         LOOP
+            v_pos := INSTR(v_rest, CHR(10));
+            EXIT WHEN v_pos = 0;
+            say('        ' || SUBSTR(v_rest, 1, v_pos - 1));
+            v_rest := SUBSTR(v_rest, v_pos + 1);
+         END LOOP;
+         IF v_rest IS NOT NULL THEN
+            say('        ' || v_rest);
+         END IF;
+      END say_sql;
+   BEGIN
+      SELECT COUNT(*) INTO v_total
+        FROM anon_meta.identity_plan
+       WHERE run_id = g_run_id AND domain = 'PARTY' AND category = 'UNCLASSIFIED_PARTY';
+      IF v_total = 0 THEN
+         RETURN;
+      END IF;
+
+      say('    Unclassified parties (X_) ' || n(v_total));
+      say('      The data does not say which kind of party these are. By reason, and by');
+      say('      where each party was found (parties, not rows):');
+      say('');
+      say('      reason                     parties      tiers   w_tiers node   other screen');
+      FOR r IN (SELECT p.x_reason, NVL(MAX(d.label), LOWER(p.x_reason)) AS label,
+                       COUNT(*)                                                   AS parties,
+                       COUNT(CASE WHEN p.has_master = 'Y' THEN 1 END)            AS in_tiers,
+                       COUNT(CASE WHEN p.has_party_node = 'Y' THEN 1 END)        AS party_node,
+                       COUNT(CASE WHEN p.has_other_screen_node = 'Y' THEN 1 END) AS other_screen
+                  FROM anon_meta.identity_plan p
+                  LEFT JOIN anon_meta.unclassified_reason d ON d.x_reason = p.x_reason
+                 WHERE p.run_id = g_run_id AND p.domain = 'PARTY'
+                   AND p.category = 'UNCLASSIFIED_PARTY'
+                 GROUP BY p.x_reason
+                 ORDER BY MAX(d.sort_order), p.x_reason) LOOP
+         say('      ' || RPAD(r.label, 25) || LPAD(n(r.parties), 9) || LPAD(n(r.in_tiers), 11)
+             || LPAD(n(r.party_node), 15) || LPAD(n(r.other_screen), 15));
+         log_step('PREFLIGHT', 'unclassified: ' || r.label, NULL, 'OK', r.parties, NULL,
+                  'parties found in tiers ' || r.in_tiers || ', on a w_tiers node ' || r.party_node
+               || ', on another screen ' || r.other_screen);
+      END LOOP;
+
+      IF g_id('UNCLASSIFIED_PARTY') = 'N' THEN
+         say('');
+         say('      ANONYMIZE_UNCLASSIFIED_PARTY=n: their codes are kept everywhere. Their labels');
+         say('      and attributes follow their own switches.');
+      END IF;
+
+      say('');
+      say('      Why they are X_:');
+      FOR r IN (SELECT d.label, d.why
+                  FROM anon_meta.unclassified_reason d
+                 WHERE d.x_reason IN (SELECT p.x_reason FROM anon_meta.identity_plan p
+                                       WHERE p.run_id = g_run_id AND p.domain = 'PARTY'
+                                         AND p.category = 'UNCLASSIFIED_PARTY')
+                 ORDER BY d.sort_order) LOOP
+         say_wrapped(8, r.label, 25, r.why);
+      END LOOP;
+
+      IF g_dry_run THEN
+         say('');
+         say('      Before the real run, fix the data or leave them X_:');
+         FOR r IN (SELECT d.label, d.fix
+                     FROM anon_meta.unclassified_reason d
+                    WHERE d.x_reason IN (SELECT p.x_reason FROM anon_meta.identity_plan p
+                                          WHERE p.run_id = g_run_id AND p.domain = 'PARTY'
+                                            AND p.category = 'UNCLASSIFIED_PARTY')
+                    ORDER BY d.sort_order) LOOP
+            say_wrapped(8, r.label, 25, r.fix);
+         END LOOP;
+
+         say('');
+         say('      To list them - one query per reason. They read this dry run''s plan, so');
+         say('      run them before the next run starts:');
+         FOR r IN (SELECT d.label, d.list_sql
+                     FROM anon_meta.unclassified_reason d
+                    WHERE d.x_reason IN (SELECT p.x_reason FROM anon_meta.identity_plan p
+                                          WHERE p.run_id = g_run_id AND p.domain = 'PARTY'
+                                            AND p.category = 'UNCLASSIFIED_PARTY')
+                    ORDER BY d.sort_order) LOOP
+            say('');
+            say('        -- ' || r.label);
+            say_sql(r.list_sql);
+         END LOOP;
+      END IF;
+      say('');
+   END report_unclassified;
 
 
    -- Counts only: never an identifier.
@@ -1216,19 +1358,10 @@ SELECT :run_id, domain, k,
          SELECT COUNT(*) INTO v_n
            FROM anon_meta.identity_plan
           WHERE run_id = g_run_id AND domain = 'PARTY' AND category = v_cat;
-         v_line := NULL;
-         IF v_cats(i) = 'UNCLASSIFIED_PARTY' THEN
-            SELECT LISTAGG(LOWER(REPLACE(x_reason, '_', ' ')) || ' ' || TO_CHAR(cnt, 'FM999,999,999'), ' . ')
-                      WITHIN GROUP (ORDER BY x_reason)
-              INTO v_line
-              FROM (SELECT x_reason, COUNT(*) AS cnt
-                      FROM anon_meta.identity_plan
-                     WHERE run_id = g_run_id AND category = 'UNCLASSIFIED_PARTY'
-                     GROUP BY x_reason);
-         END IF;
          say('        ' || RPAD(LOWER(label_of(v_cats(i))) || ' (' || prefix_of(v_cats(i)) || ') ', 24, '.')
-             || ' ' || RPAD(n(v_n), 10) || v_line);
-         log_step('PREFLIGHT', 'identities: ' || LOWER(v_cats(i)), NULL, 'OK', v_n, NULL, v_line);
+             || ' ' || n(v_n)
+             || CASE WHEN v_cat = 'UNCLASSIFIED_PARTY' AND v_n > 0 THEN '   (by reason below)' END);
+         log_step('PREFLIGHT', 'identities: ' || LOWER(v_cats(i)), NULL, 'OK', v_n);
       END LOOP;
 
       SELECT COUNT(*) INTO v_n
@@ -1292,6 +1425,8 @@ SELECT :run_id, domain, k,
                   'earlier translations of an identity that are not its one translation');
       END IF;
       say('');
+
+      report_unclassified;
 
       -- The dataset, as counts, so the run record says what it ran against.
       SELECT MAX(TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS')) INTO v_created
@@ -1520,6 +1655,10 @@ SELECT :run_id, domain, k,
    -- One typed lookup over one column, optionally limited to the rows of one
    -- role. The lookup domain is the ONLY source of replacements: there is no
    -- fallback to another domain when this one has no translation.
+   --
+   -- Also counts how many of the rows get an unclassified party's X_ value,
+   -- in the same pass: a dry run in its count, an EXECUTE run in the UPDATE's
+   -- RETURNING clause. The run summary adds them up by table.
    PROCEDURE apply_lookup(
       p_table   IN VARCHAR2,
       p_column  IN VARCHAR2,
@@ -1528,9 +1667,15 @@ SELECT :run_id, domain, k,
       p_object  IN VARCHAR2,
       p_enabled IN BOOLEAN)
    IS
-      v_start NUMBER := DBMS_UTILITY.GET_TIME;
-      v_where VARCHAR2(4000);
-      v_rows  NUMBER;
+      v_start  NUMBER := DBMS_UTILITY.GET_TIME;
+      v_where  VARCHAR2(4000);
+      v_update VARCHAR2(4000);
+      v_rows   NUMBER;
+      v_x      NUMBER;
+      -- X_ followed by anything; ESCAPE because '_' is a LIKE wildcard.
+      v_x_like VARCHAR2(20) := REPLACE(c_prefix_unclassified, '_', '\_') || '%';
+      e_returning_unsupported EXCEPTION;
+      PRAGMA EXCEPTION_INIT(e_returning_unsupported, -22816);
    BEGIN
       IF NOT p_enabled THEN
          log_step('CODE', p_object, 'CODE', 'DISABLED', NULL, NULL,
@@ -1544,26 +1689,48 @@ SELECT :run_id, domain, k,
               || CASE WHEN p_filter IS NOT NULL THEN ' AND ' || p_filter END;
 
       IF g_dry_run THEN
-         EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM op.' || p_table || ' t WHERE ' || v_where INTO v_rows;
-         log_step('CODE', p_object, 'CODE', 'DRYRUN', v_rows, elapsed_ms(v_start));
-         report(p_object, 'DRYRUN', v_rows);
+         -- A join rather than IN: each (domain, old_code) is in the lookup
+         -- once, so it counts the same rows - and can see their replacement.
+         EXECUTE IMMEDIATE
+            'SELECT COUNT(*), COUNT(CASE WHEN l.new_code LIKE ''' || v_x_like || ''' ESCAPE ''\'' THEN 1 END)'
+         || '  FROM op.' || p_table || ' t'
+         || '  JOIN anon_meta.code_lookup l ON l.domain = ''' || p_lookup || ''''
+         || '   AND l.old_code = t.' || p_column
+         || CASE WHEN p_filter IS NOT NULL THEN ' WHERE ' || p_filter END
+            INTO v_rows, v_x;
+         log_step('CODE', p_object, 'CODE', 'DRYRUN', v_rows, elapsed_ms(v_start), NULL, v_x);
+         report(p_object, 'DRYRUN', v_rows, v_x);
          RETURN;
       END IF;
 
       -- A correlated UPDATE rather than a MERGE: MERGE cannot update a column
       -- that appears in its ON clause (ORA-38104).
-      EXECUTE IMMEDIATE
+      v_update :=
          'UPDATE ' || parallel_hint(p_table) || 'op.' || p_table || ' t '
       || '   SET t.' || p_column || ' = (SELECT l.new_code FROM anon_meta.code_lookup l'
       || '                                WHERE l.domain = ''' || p_lookup || ''''
       || '                                  AND l.old_code = t.' || p_column || ') '
       || ' WHERE ' || v_where;
+      BEGIN
+         -- A single-set aggregate in RETURNING counts the X_ values written
+         -- without a second scan.
+         EXECUTE IMMEDIATE v_update
+            || ' RETURNING COUNT(CASE WHEN t.' || p_column || ' LIKE ''' || v_x_like
+            || ''' ESCAPE ''\'' THEN 1 END) INTO :x'
+            RETURNING INTO v_x;
+      EXCEPTION
+         WHEN e_returning_unsupported THEN
+            -- A view with an INSTEAD OF trigger takes no RETURNING clause. The
+            -- failed statement changed nothing; update without the count.
+            EXECUTE IMMEDIATE v_update;
+            v_x := NULL;
+      END;
       v_rows := SQL%ROWCOUNT;
       COMMIT;
 
       log_step('CODE', p_object, 'CODE',
-               CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows, elapsed_ms(v_start));
-      report(p_object, CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows);
+               CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows, elapsed_ms(v_start), NULL, v_x);
+      report(p_object, CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows, v_x);
 
    EXCEPTION
       WHEN OTHERS THEN
@@ -1602,11 +1769,9 @@ SELECT :run_id, domain, k,
    -- One CODE column, by its domain.
    PROCEDURE apply_code(p_table IN VARCHAR2, p_column IN VARCHAR2, p_category IN VARCHAR2) IS
       v_object   VARCHAR2(300) := LOWER(p_table) || '.' || LOWER(p_column);
-      c_account  CONSTANT VARCHAR2(100) := 't.structure = ''Compte'' AND t.ecran = ''w_compte_banque''';
+      c_account  CONSTANT VARCHAR2(100) := 't.ecran = ''w_compte_banque''';
       c_party    CONSTANT VARCHAR2(100) := 't.ecran = ''w_tiers''';
-      c_other    CONSTANT VARCHAR2(200) := 'NOT (NVL(t.structure, ''~'') = ''Compte'' AND '
-                                        || 'NVL(t.ecran, ''~'') = ''w_compte_banque'') '
-                                        || 'AND NVL(t.ecran, ''~'') <> ''w_tiers''';
+      c_other    CONSTANT VARCHAR2(200) := 'NVL(t.ecran, ''~'') NOT IN (''w_compte_banque'', ''w_tiers'')';
    BEGIN
       IF NOT column_exists(p_table, p_column) THEN
          log_step('CODE', v_object, 'CODE', 'SKIPPED', NULL, NULL, 'object not found');
@@ -1864,7 +2029,7 @@ SELECT :run_id, domain, k,
       v_columns  t_names := t_names();
       v_names    VARCHAR2(1000);
       v_switches t_flags;
-      c_account  CONSTANT VARCHAR2(100) := 't.structure = ''Compte'' AND t.ecran = ''w_compte_banque''';
+      c_account  CONSTANT VARCHAR2(100) := 't.ecran = ''w_compte_banque''';
       c_party    CONSTANT VARCHAR2(100) := 't.ecran = ''w_tiers''';
    BEGIN
       v_object := LOWER(p_table) || '.[' || LOWER(p_rule) || '/' || LOWER(p_category) || ']';
@@ -2068,6 +2233,52 @@ SELECT :run_id, domain, k,
    -- Summary
    -- =========================================================================
 
+   -- Where the unclassified parties' X_ values went - or would go - by table,
+   -- from the counts each CODE step logged. Counts only.
+   PROCEDURE print_unclassified_by_table IS
+      v_parties NUMBER;
+      v_rows    NUMBER := 0;
+      v_tables  PLS_INTEGER := 0;
+   BEGIN
+      SELECT COUNT(*) INTO v_parties
+        FROM anon_meta.identity_plan
+       WHERE run_id = g_run_id AND domain = 'PARTY' AND category = 'UNCLASSIFIED_PARTY';
+      IF v_parties = 0 THEN
+         RETURN;
+      END IF;
+
+      say('');
+      say('    Unclassified parties (X_): ' || n(v_parties) || ' - identifiers '
+          || CASE WHEN g_dry_run THEN 'that would be renamed to X_' ELSE 'renamed to X_ by this run' END
+          || ', by table');
+      -- The total is NOT aliased x_rows: an alias with the column's name
+      -- shadows it in ORDER BY and nests the SUM (ORA-00935).
+      FOR t IN (SELECT REGEXP_SUBSTR(object_name, '^[^.]+')                     AS table_name,
+                       SUM(x_rows)                                               AS n_x,
+                       COUNT(DISTINCT REGEXP_SUBSTR(object_name, '^[^ ]+'))      AS cols
+                  FROM anon_meta.anon_step_log
+                 WHERE run_id = g_run_id AND phase = 'CODE' AND x_rows > 0
+                 GROUP BY REGEXP_SUBSTR(object_name, '^[^.]+')
+                 ORDER BY n_x DESC, table_name) LOOP
+         say('      ' || RPAD(t.table_name || ' ', 38, '.') || ' ' || RPAD(n(t.n_x) || ' row'
+             || CASE WHEN t.n_x <> 1 THEN 's' END, 14) || t.cols || ' column'
+             || CASE WHEN t.cols <> 1 THEN 's' END);
+         v_rows   := v_rows + t.n_x;
+         v_tables := v_tables + 1;
+      END LOOP;
+
+      IF v_tables = 0 THEN
+         say('      none' || CASE WHEN g_id('UNCLASSIFIED_PARTY') = 'N'
+                                THEN ' - ANONYMIZE_UNCLASSIFIED_PARTY=n keeps their codes' END);
+      ELSE
+         say('      ' || RPAD('total ', 38, '.') || ' ' || n(v_rows) || ' row' || CASE WHEN v_rows <> 1 THEN 's' END
+             || ' in ' || v_tables || ' table' || CASE WHEN v_tables <> 1 THEN 's' END);
+      END IF;
+      say('      Why each is X_ is under "Unclassified parties (X_)" in Preflight'
+          || CASE WHEN g_dry_run THEN ', with one query per reason to list them.' ELSE '.' END);
+   END print_unclassified_by_table;
+
+
    PROCEDURE print_summary IS
       v_elapsed NUMBER;
    BEGIN
@@ -2106,6 +2317,8 @@ SELECT :run_id, domain, k,
          say('      SELECT object_name FROM anon_meta.anon_step_log');
          say('       WHERE run_id = ' || g_run_id || ' AND status = ''NOOP'';');
       END IF;
+
+      print_unclassified_by_table;
       say('');
    END print_summary;
 

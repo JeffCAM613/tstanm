@@ -303,6 +303,8 @@ if wanted S13; then
   check "code_map gained run_id and id_applied" \
         "$(val "SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META' AND table_name = 'CODE_MAP' AND column_name IN ('RUN_ID', 'ID_APPLIED')")" "2"
   check "the untyped code_map_any is gone" "$(val "SELECT COUNT(*) FROM dba_tables WHERE owner = 'ANON_META' AND table_name = 'CODE_MAP_ANY'")" "0"
+  check "anon_step_log gained x_rows" \
+        "$(val "SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META' AND table_name = 'ANON_STEP_LOG' AND column_name = 'X_ROWS'")" "1"
   check "the inventory accepts the new categories" \
         "$(val "SELECT COUNT(*) FROM anon_meta.anon_inventory WHERE category IN ('PARTY', 'MIXED', 'NODE_ROLE')")" "396"
   check "the earlier run record is kept" "$(val "SELECT COUNT(*) FROM anon_meta.anon_run WHERE config_json LIKE '%min_code_length%'")" "1"
@@ -378,7 +380,7 @@ if wanted S17; then
   # Put some originals back, as if the run had stopped before reaching them:
   # a reference, an account node and a party master.
   sysrun "UPDATE op.histo_operation SET entite = 'ENTN' WHERE id = 1;
-          UPDATE op.structure SET code = 'SHRD' WHERE structure = 'Compte' AND ecran = 'w_compte_banque'
+          UPDATE op.structure SET code = 'SHRD' WHERE ecran = 'w_compte_banque'
              AND code = (SELECT new_code FROM anon_meta.code_map WHERE category = 'BANK_ACCOUNT' AND old_code = 'SHRD');
           UPDATE op.tiers SET code = 'CPTC' WHERE code = (SELECT new_code FROM anon_meta.code_map WHERE category = 'COUNTERPARTY' AND old_code = 'CPTC');
           COMMIT;"
@@ -392,6 +394,85 @@ if wanted S17; then
                     + (SELECT COUNT(*) FROM op.tiers t JOIN anon_meta.code_map c ON c.new_code = t.code
                          WHERE c.old_code = 'CPTC' AND c.category = 'COUNTERPARTY') FROM dual")" "3"
   verify; check "verification: PASS" "$RC" "0"
+fi
+
+# --- S18 --------------------------------------------------------------------------
+if wanted S18; then
+  section "S18 an account node is any node on w_compte_banque, whatever its classification"
+  fresh
+  sysrun "INSERT INTO op.compte_banque (code, flag_gere, description) VALUES ('BKNC', 'O', 'Account, node not Compte');
+          INSERT INTO op.structure (code, structure, ecran, pere, description) VALUES ('BKNC', 'Banque', 'w_compte_banque', 'ENTN', 'Bank node');
+          INSERT INTO op.structure (code, structure, ecran, pere, description) VALUES ('BKNS', NULL, 'w_compte_banque', 'BKNC', 'No class, no master');
+          COMMIT;"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "both nodes are bank-account identities, not other-screen nodes" \
+        "$(val "SELECT LISTAGG(old_code || '/' || membership, ',') WITHIN GROUP (ORDER BY old_code)
+                FROM anon_meta.identity_inventory WHERE domain = 'ACCOUNT' AND old_code IN ('BKNC', 'BKNS')")" \
+        "BKNC/BOTH,BKNS/STRUCTURE_ONLY"
+  check "the node and its master hold the same CB_" \
+        "$(val "SELECT (SELECT COUNT(*) FROM op.structure s JOIN anon_meta.code_map c ON c.new_code = s.code
+                         WHERE s.ecran = 'w_compte_banque' AND c.category = 'BANK_ACCOUNT' AND c.old_code = 'BKNC')
+                    + (SELECT COUNT(*) FROM op.compte_banque b JOIN anon_meta.code_map c ON c.new_code = b.code
+                         WHERE c.category = 'BANK_ACCOUNT' AND c.old_code = 'BKNC') FROM dual")" "2"
+  check "the node with no classification and no master got its own CB_" \
+        "$(val "SELECT COUNT(*) FROM op.structure s JOIN anon_meta.code_map c ON c.new_code = s.code
+                WHERE c.category = 'BANK_ACCOUNT' AND c.old_code = 'BKNS'")" "1"
+  check "its parent, an account node, got the account translation" \
+        "$(val "SELECT COUNT(*) FROM op.structure s JOIN anon_meta.code_map c ON c.new_code = s.pere
+                WHERE c.category = 'BANK_ACCOUNT' AND c.old_code = 'BKNC'")" "1"
+  check "their labels masked" "$(val "SELECT COUNT(*) FROM op.structure WHERE description IN ('Bank node', 'No class, no master')")" "0"
+  check "nothing left for review" "$(val "SELECT COUNT(*) FROM anon_meta.anon_step_log WHERE status = 'REVIEW'
+        AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "0"
+  verify; check "verification: PASS" "$RC" "0"
+fi
+
+# --- S19 --------------------------------------------------------------------------
+if wanted S19; then
+  section "S19 unclassified parties are reported by reason and by table"
+  fresh; sysfile @tests/regression/fixture_review.sql >/dev/null     # adds a NO_PARTY_SCREEN party
+  x_codes='NMEN|NMCP|NSTN|NSTO|NFLG|IFLG|NCLN|OSCN'
+  by_reason() { grep -cE '^ +(missing master +2 +0 +2 +0|no structure +2 +2 +0 +0|no party screen +1 +1 +0 +1|unknown flag +2 +2 +2 +0|unknown classification +1 +1 +1 +0) *$' "$WORK/last.log"; }
+  # The SQL the dry run printed under "-- <reason>", up to its ';'.
+  printed_query() { awk -v lbl="$1" '$0 ~ "^ +-- " lbl " *$" {on = 1; next} on {print; if ($0 ~ /; *$/) exit}' "$WORK/last.log" | sed 's/; *$//'; }
+
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y; check "dry run completes" "$RC" "0"
+  check "dry run: X_ parties counted by reason and where found" "$(by_reason)" "5"
+  check "  ... each reason in words" "$(grep -c 'Why they are X_:' "$WORK/last.log")" "1"
+  check "  ... what would classify them" "$(grep -c 'Before the real run, fix the data or leave them X_:' "$WORK/last.log")" "1"
+  check "  ... and one query per reason" "$(grep -c "p.x_reason = '" "$WORK/last.log")" "5"
+  for pair in "missing master:2" "no structure:2" "no party screen:1" "unknown flag:2" "unknown classification:1"; do
+    check "  ... the printed '${pair%%:*}' query runs and lists them" \
+          "$(val "SELECT COUNT(*) FROM ($(printed_query "${pair%%:*}"))")" "${pair##*:}"
+  done
+  check "  ... X_ identifiers that would be renamed, by table" \
+        "$(grep -cE 'tiers [.]+ 6 rows|structure [.]+ 5 rows|histo_operation [.]+ 2 rows|compte_regle [.]+ 1 row |total [.]+ 14 rows in 4 tables' "$WORK/last.log")" "5"
+  check "  ... and no identifier in the run output" "$(grep -cwE "$x_codes" "$WORK/last.log")" "0"
+
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "EXECUTE: X_ parties counted by reason, with the reason" \
+        "$(( $(by_reason) + $(grep -c 'Why they are X_:' "$WORK/last.log") ))" "6"
+  check "  ... no fixes and no queries" \
+        "$(( $(grep -c 'Before the real run' "$WORK/last.log") + $(grep -c "p.x_reason = '" "$WORK/last.log") ))" "0"
+  check "  ... X_ identifiers renamed by this run, by table" \
+        "$(grep -cE 'renamed to X_ by this run, by table|total [.]+ 14 rows in 4 tables' "$WORK/last.log")" "2"
+  check "  ... the same counts in the step log" \
+        "$(val "SELECT SUM(x_rows) FROM anon_meta.anon_step_log WHERE phase = 'CODE'
+                AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "14"
+  check "  ... and no identifier in the run output" "$(grep -cwE "$x_codes" "$WORK/last.log")" "0"
+  verify; check "verification: REVIEW REQUIRED (the review fixture)" "$RC" "3"
+  docker exec -w /tmp/v4/op "$CT" sqlplus -L -S "op/op@$SVC" @verify/generate_report.sql > "$WORK/report.log" 2>&1
+  report="$(docker exec -w /tmp/v4/op "$CT" bash -c 'ls -t logs/report_*.html | head -1')"
+  rgrep() { docker exec -w /tmp/v4/op "$CT" grep -c "$@" "$report"; }
+  check "report: an Unclassified parties section" "$(rgrep 'Unclassified parties (X_)</h2>')" "1"
+  check "  ... the reasons in words" "$(rgrep -e 'tell a portfolio from an entity' -e 'not known whether the party is a portfolio')" "2"
+  check "  ... the rows renamed, by table" \
+        "$(rgrep -e '14 identifier rows renamed to X_' -e '<td class="tbl-name">tiers</td><td class="num">1</td><td class="num">6</td>')" "2"
+  check "  ... and no identifier" "$(docker exec -w /tmp/v4/op "$CT" grep -cwE "$x_codes" "$report")" "0"
+
+  fresh
+  run EXECUTE "y y y n y" "y y y y y" "y y y y y" y; check "renaming of X_ off: EXECUTE completes" "$RC" "0"
+  check "  ... the output says their codes are kept" \
+        "$(grep -cE 'ANONYMIZE_UNCLASSIFIED_PARTY=n: their codes are kept|none - ANONYMIZE_UNCLASSIFIED_PARTY=n keeps their codes' "$WORK/last.log")" "2"
 fi
 
 # --- Result ---------------------------------------------------------------------

@@ -92,6 +92,10 @@ but they are working documents and are not part of a release.
   bank account, its category, and why an unclassified (X_) party is one. v4 never drops either as
   part of a run. If you drop them, a partially anonymized database cannot be reconciled, and a
   later run refuses to start on it rather than translate a translation.
+- **Look at the unclassified (X_) parties before the real run.** A dry run counts them by reason and
+  by where they were found, says what would let the data classify each kind, and prints one query
+  per reason that lists them: fix the data first, or knowingly leave them X_. The real run and its
+  report give the counts, by reason and by table, with the reasons.
 - **A result is PASS only when nothing is left.** Values whose role cannot be established are left
   unchanged and reported as REVIEW REQUIRED; a switched-off protection gives INCOMPLETE. Neither is
   presented as complete anonymization.
