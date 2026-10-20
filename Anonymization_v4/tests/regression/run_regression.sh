@@ -149,6 +149,12 @@ if wanted S3; then
   check "nothing renamed, nothing persisted" \
         "$(val "SELECT (SELECT COUNT(*) FROM op.tiers WHERE code = 'ENTN') || '/' || (SELECT COUNT(*) FROM anon_meta.code_map)
                 || '/' || (SELECT COUNT(*) FROM anon_meta.identity_inventory) FROM dual")" "1/0/0"
+  # Left unset, they are allowed: the default is y.
+  sysrun "BEGIN op.anon_engine.configure(p_mode => 'DRYRUN'); op.anon_engine.start_run; op.anon_engine.finish_run('COMPLETED'); END;
+          /"
+  check "left unset, structure-only accounts are allowed (default y)" \
+        "$(val "SELECT CASE WHEN INSTR(config_json, 'approve_structure_only_accounts\":\"Y') > 0 THEN 'Y' ELSE 'N' END
+                FROM anon_meta.anon_run WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "Y"
 fi
 
 # --- S4 ---------------------------------------------------------------------------

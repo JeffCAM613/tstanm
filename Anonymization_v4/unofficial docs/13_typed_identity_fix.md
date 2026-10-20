@@ -12,7 +12,7 @@
 | Specification | `fixes+needed_in_v4.txt` — prepared 2026-10-16, decisions updated 2026-10-20 |
 | Business confirmation | 2026-10-20: an account node is any node on the `w_compte_banque` screen — section 2.4 |
 | Code | branch `v4-typed-identity-fix`: commit `20b687f` (the fix), then a follow-up commit — account nodes by screen (2.4) and the X_ results (2.5) |
-| Tested | 20 scenarios, 512 checks, all passing, on a disposable Oracle 21c XE with fictional data — `tests/regression/` |
+| Tested | 20 scenarios, 513 checks, all passing, on a disposable Oracle 21c XE with fictional data — `tests/regression/` |
 | Not yet | run on a client database. EPFPG785 as it is now was anonymized by the previous v4, and the new engine refuses it by design (section 5 of the specification): it needs a fresh raw import |
 
 ## Contents
@@ -98,22 +98,21 @@ the union of both, and records where each account was found:
 
 STRUCTURE_ONLY accounts are new scope: neither the legacy package nor the previous v4 anonymized
 them as accounts (the previous v4 renamed such a node only if its text happened to match some other
-map). The specification asks to confirm, per client, that such a node really is a bank account, and
-to stop for scope review until then. That is the setting `APPROVE_STRUCTURE_ONLY_ACCOUNTS`:
+map). The specification asked to confirm, per client, that such a node really is a bank account, and
+to stop for scope review until then. **Decided 2026-10-20: they are bank accounts by default.** The
+setting `APPROVE_STRUCTURE_ONLY_ACCOUNTS` remains, to refuse them for a client where they are not:
 
-- `y` — confirmed. Each structure-only node gets its own CB_ translation, written to the node and to
-  every account column referring to it.
-- `n` — not confirmed. If the data has structure-only nodes, preflight stops the run before
-  changing anything and says how many; a dry run shows the same count. If the data has none, `n`
-  changes nothing.
+- `y` — the default. Each structure-only node gets its own CB_ translation, written to the node and
+  to every account column referring to it.
+- `n` — they are not bank accounts here. If the data has structure-only nodes, preflight stops the
+  run before changing anything and says how many; a dry run shows the same count. If the data has
+  none, `n` changes nothing.
 
 Where the value comes from:
 
-- `config/anonymization.template.ini` sets it to `n`.
-- The working `config/anonymization.ini` leaves it **blank**. The batch file asks for every blank
-  value when run interactively — *"Structure-only account nodes are bank accounts here [n]"*, Enter
-  meaning `n`. With `/auto` nothing is asked and `n` applies.
-- A configuration written before this fix has no such line, which behaves as blank.
+- `config/anonymization.template.ini` and the working `config/anonymization.ini` set it to `y`.
+- The batch file never asks for it. If the line is blank or missing — a configuration written
+  before this fix has none — `y` applies. The engine's own default is `y` too.
 
 It only matters when structure-only accounts exist. Section 2 of
 `tests/manual/typed_identity_diagnostics.sql` counts them, read-only, before any run.
@@ -356,7 +355,7 @@ Engine procedures are in `op/sql/30_install_engine.sql`; "verifier" is
 | *Changed 2026-10-20 by business confirmation:* an account node is identified by `ecran = 'w_compte_banque'` alone, not also by `structure = 'Compte'` — section 2.4 | role A is the screen alone, in the engine, the verifier and the diagnostics | S18 |
 | The union deduplicates; one stable CB_ per distinct code; a party with the same text keeps its own; key (category, old_code); replacements globally unique | identity key `(domain, old_code)`; `code_map` primary key `(category, old_code)` and unique index on `new_code` kept; a unique index on the plan; `validate_plan` collision checks | S1 "duplicate account nodes: both rows, one identity", "shared text: party and account translations differ" |
 | Record MASTER_ONLY, BOTH, STRUCTURE_ONLY and report the counts | `identity_inventory.membership`; printed by preflight (`report_plan`); verifier PART 1 | S1 "account sources: MASTER_ONLY 3, BOTH 3, STRUCTURE_ONLY 1" |
-| Stop for scope review until the account-node population is approved | `APPROVE_STRUCTURE_ONLY_ACCOUNTS`; `validate_plan` blocks new structure-only accounts unless `y` — section 2.1 | S3 |
+| Stop for scope review until the account-node population is approved | `APPROVE_STRUCTURE_ONLY_ACCOUNTS`; `validate_plan` blocks new structure-only accounts when it is `n`. *Changed 2026-10-20:* allowed by default (`y`) — section 2.1 | S3 |
 | A STRUCTURE_ONLY identity stays in scope; no master is inserted or repaired | its own CB_; no master created | S1 "structure-only account node renamed with its own translation" |
 | FLAG_GERE is no gate; no node is required; w_tiers nodes are not account sources | no such filter; role A only | S1 "FLAG_GERE is no selection gate" |
 | Exact text; one-character identifiers included, with no exception list | no TRIM or UPPER anywhere; no length filter | S1 "one-character account Q ..." |
@@ -551,7 +550,7 @@ package was itself wrong.
 |---|---|---|---|
 | 5.1 | Every tiers attribute row (contact, names, birth department, grouping, classification, telex) and the tiers description and addresses apply to **every party** — category PARTY | Each row used to cover the one category whose old slot chose it, so an X_ party, whose category is unknown, was covered by none. A rule is per column, so covering X_ covers E, P and T too. Each owner is still gated by its own category's ATTRIBUTES switch | change PARTY back to one category in `inventory_op_custom.csv` — X_ owners then keep that column's real value |
 | 5.2 | `tiers.flag_pp` and the three `tiers_entite` columns excluded from the inventory | One-character flags (`O`/`N`, `T`/`E`), VARCHAR2(1) on TANM7881; no replacement can fit; listed, preflight would stop every run. The old checkbox rule skipped them silently | uncomment them — preflight then stops on the width |
-| 5.3 | `APPROVE_STRUCTURE_ONLY_ACCOUNTS` is `n` by default, blank in the working config | "Stop for scope review" until the client confirms — section 2.1 | set `y` once confirmed |
+| 5.3 | `APPROVE_STRUCTURE_ONLY_ACCOUNTS` is `y` by default, in both config files and in the engine | **Decided by the user, 2026-10-20**: structure-only account nodes are bank accounts unless a client says otherwise — section 2.1 | set `n` for a client where they are not |
 | 5.4 | Values whose role cannot be established are left and reported REVIEW, not translated | Section 2.3. Leaving them keeps the client value in place until reviewed; the verdict says so | MIXED columns: retype the column. Screens and parents: needs the setting proposed for the improvement phase |
 | 5.5 | An identity whose classification has changed since it was recorded keeps its translation; the run continues; the verdict is REVIEW | "Preserve the existing identity or plan a consistent migration" (2B). Stopping the run would block every import whose master data was corrected | — |
 | 5.6 | Earlier translations (from the previous v4 or an earlier import) are reused when they agree with the identity; when a party has two and one matches its category, that one is used and the other counted as superseded; when none matches, the run stops | Reuse keeps replacements stable across imports; a choice between two non-matching ones would silently change values already written | drop `anon_meta` to start without history |
@@ -568,6 +567,9 @@ package was itself wrong.
 
 ## 6. Known gaps and limits
 
+- **Open questions** for the comparison with legacy — other-screen nodes, ambiguous parents, values
+  that are both a party and an account in MIXED columns, `val_bank_account.code`, and the
+  deliberate differences from legacy — are in [14_open_questions.txt](14_open_questions.txt).
 - **CHECK constraints** on the columns that receive the `ANONYMIZED` marker are not validated in
   preflight. A violation fails the run loudly — never silently — but mid-run.
 - **BBANs and account numbers** (`compte_banque.code_bban`, `numero_compte` …) are out of scope, as
@@ -619,7 +621,7 @@ Details and how to run it: `tests/regression/README.md`.
 | S18 | account nodes classified other than `Compte`, or not at all (2.4) | bank-account identities: CB_, account parent, labels masked, nothing for review; PASS |
 | S19 | X_ parties in a dry run, a real run, and with X_ renaming off (2.5) | counts by reason and where found; reasons; in the dry run the fixes and five queries, each run and checked; X_ rows by table in the output, the step log and the report; no identifier in any output |
 
-Result on commit `20b687f`: 478 passed, 0 failed. With the follow-up (2.4, 2.5): **512 passed, 0 failed.**
+Result on commit `20b687f`: 478 passed, 0 failed. With the follow-up (2.4, 2.5): 512 passed, 0 failed. With the approval default (2.1): **513 passed, 0 failed.**
 
 Outside the suite:
 

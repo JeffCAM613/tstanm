@@ -17,12 +17,16 @@
 --   4  texts that are a party AND a bank account
 --   5  structure nodes by role, and other-screen nodes holding an identifier
 --   6  the parent contract: what a node's pere points at, by node role
+--   7  what the disputed columns hold: party codes, account codes, both, neither
+--   8  children whose parent text is a party node AND an account node, by the
+--      child's screen and classification
 -- ============================================================================
 
 SET PAGESIZE 200
 SET LINESIZE 200
 SET FEEDBACK OFF
 SET HEADING ON
+SET TAB OFF
 COLUMN check_name   FORMAT A46
 COLUMN detail       FORMAT A40
 COLUMN structure    FORMAT A20
@@ -162,5 +166,74 @@ SELECT child_role, parent_roles, COUNT(*) AS children
   FROM ch
  GROUP BY child_role, parent_roles
  ORDER BY 1, 3 DESC;
+
+PROMPT
+PROMPT ==== 7. What the disputed columns hold =======================================
+PROMPT Rows by what their value is: a party only (tiers code or w_tiers node), an
+PROMPT account only (compte_banque code or w_compte_banque node), BOTH, or neither.
+PROMPT The MIXED columns, and val_bank_account.code - legacy wrote party codes there,
+PROMPT v3 and v4 treat it as bank accounts. A column missing here is skipped.
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
+DECLARE
+   TYPE t_cols IS TABLE OF VARCHAR2(80);
+   v_cols t_cols := t_cols(
+      'ccp_breakdown.clearing_member', 'clearing_member_breakdown.clearing_member',
+      'histo_operation.clearing_member', 'import_operation.clearing_member',
+      'cm_deal_deal.clearing_member', 'ventiler_compte.valeur_1', 'ventiler_compte.valeur_2',
+      'ventiler_compte.valeur_3', 'ventiler_compte.valeur_4', 'param_cpta_reg_gen.compte_ana',
+      'val_bank_account.code');
+   v_tab VARCHAR2(40);
+   v_col VARCHAR2(40);
+   v_n   NUMBER;
+   v_p   NUMBER;
+   v_a   NUMBER;
+   v_b   NUMBER;
+   v_x   NUMBER;
+BEGIN
+   DBMS_OUTPUT.PUT_LINE(RPAD('column', 44) || LPAD('party only', 12) || LPAD('account only', 14)
+                        || LPAD('BOTH', 8) || LPAD('neither', 10));
+   FOR i IN 1 .. v_cols.COUNT LOOP
+      v_tab := SUBSTR(v_cols(i), 1, INSTR(v_cols(i), '.') - 1);
+      v_col := SUBSTR(v_cols(i), INSTR(v_cols(i), '.') + 1);
+      SELECT COUNT(*) INTO v_n
+        FROM all_tab_columns
+       WHERE owner = 'OP' AND table_name = UPPER(v_tab) AND column_name = UPPER(v_col);
+      IF v_n = 0 THEN
+         DBMS_OUTPUT.PUT_LINE(RPAD(v_cols(i), 44) || '  (not on this instance)');
+         CONTINUE;
+      END IF;
+      EXECUTE IMMEDIATE
+         'WITH p AS (SELECT code FROM op.tiers'
+      || '           UNION SELECT code FROM op.structure WHERE ecran = ''w_tiers''),'
+      || '     a AS (SELECT code FROM op.compte_banque'
+      || '           UNION SELECT code FROM op.structure WHERE ecran = ''w_compte_banque'')'
+      || ' SELECT COUNT(CASE WHEN ip = 1 AND ia = 0 THEN 1 END),'
+      || '        COUNT(CASE WHEN ip = 0 AND ia = 1 THEN 1 END),'
+      || '        COUNT(CASE WHEN ip = 1 AND ia = 1 THEN 1 END),'
+      || '        COUNT(CASE WHEN ip = 0 AND ia = 0 THEN 1 END)'
+      || '   FROM (SELECT NVL2(p.code, 1, 0) AS ip, NVL2(a.code, 1, 0) AS ia'
+      || '           FROM op.' || v_tab || ' x'
+      || '           LEFT JOIN p ON p.code = x.' || v_col
+      || '           LEFT JOIN a ON a.code = x.' || v_col
+      || '          WHERE x.' || v_col || ' IS NOT NULL)'
+         INTO v_p, v_a, v_b, v_x;
+      DBMS_OUTPUT.PUT_LINE(RPAD(v_cols(i), 44) || LPAD(v_p, 12) || LPAD(v_a, 14) || LPAD(v_b, 8)
+                           || LPAD(v_x, 10));
+   END LOOP;
+END;
+/
+
+PROMPT
+PROMPT ==== 8. Children whose parent text is a party node AND an account node =======
+PROMPT The parent cannot be told from the text. Legacy decided by the CHILD's
+PROMPT classification (Entite: the party's value, Compte: the account's); v4 leaves
+PROMPT them for review. By the child's screen and classification:
+SELECT NVL(c.ecran, '(null)') AS ecran, NVL(c.structure, '(null)') AS structure,
+       COUNT(*) AS children
+  FROM op.structure c
+ WHERE c.pere IN (SELECT code FROM op.structure WHERE ecran = 'w_tiers')
+   AND c.pere IN (SELECT code FROM op.structure WHERE ecran = 'w_compte_banque')
+ GROUP BY c.ecran, c.structure
+ ORDER BY 3 DESC;
 
 PROMPT

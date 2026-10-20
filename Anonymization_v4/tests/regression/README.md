@@ -36,7 +36,7 @@ The last line says `passed N, failed M`; the exit code is 0 only when nothing fa
 | S0 | Sections 7 and 7A of the fix instructions, SELECT only | 3 / 0 / 1 and 16 / 0 / 4 / 3 / 1 / 8 |
 | S1 | Core fixture: dry run, then every switch on | dry run changes and freezes nothing; PASS; `assert_core.sql` |
 | S2 | The same run again | no translation changes, no row rewritten, PASS |
-| S3 | Structure-only account nodes not approved | refused before any update, nothing persisted |
+| S3 | Structure-only account nodes refused (`APPROVE_STRUCTURE_ONLY_ACCOUNTS=n`) | refused before any update, nothing persisted; left unset, they are allowed (default `y`) |
 | S4 | Roles that cannot be established | left unchanged, REVIEW REQUIRED |
 | S5 | The eight switch combinations, all five categories at once | `assert_switches.sql`; INCOMPLETE unless all on |
 | S6 | New inputs on a mapped dataset | appended after the existing numbers, nothing renumbered |

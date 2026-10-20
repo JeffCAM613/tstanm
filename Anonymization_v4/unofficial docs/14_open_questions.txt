@@ -1,0 +1,281 @@
+OPEN QUESTIONS - Anonymization v4 (typed identity fix)
+======================================================
+2026-10-20
+
+For you, and for the AI that knows the legacy row-by-row package. "Legacy" is
+Anonymization_OP/sql/02pack_anonym_number.sql, run by start_anonymous.sql in
+the order Entite, Portefeuille, Tiers, Compte. Line numbers below refer to
+02pack_anonym_number.sql.
+
+
+IN SHORT
+--------
+Four decisions are open. My recommendation for each:
+
+  Q1  Nodes on other screens ................ leave them, stop flagging them
+                                              (same as legacy)
+  Q2  A parent that is a party node AND an
+      account node .......................... decide by the child's screen
+  Q3  A value that is a party AND an account,
+      in a MIXED column ..................... the party's value
+                                              (legacy's result, nearly)
+  Q4  val_bank_account.code ................. decide from the counts
+
+Part 2 lists where v4 deliberately differs from legacy. I recommend keeping
+all of them: in each one, legacy either leaves a client code in place or
+gives one party two different values.
+
+Before deciding, run tests/manual/typed_identity_diagnostics.sql on a raw
+import (read-only, counts only, safe to share). Its sections 5 to 8 say how
+often each case occurs. A case that never occurs needs no decision.
+
+To answer, write after "Your answer:". "ok" means my recommendation.
+
+
+PART 1 - DECISIONS
+==================
+
+Q1. NODES ON OTHER SCREENS
+--------------------------
+What: a structure node whose ecran is neither 'w_tiers' nor
+'w_compte_banque', and whose code is also a client code (a tiers code, a
+compte_banque code, or the code of a w_tiers or w_compte_banque node).
+Example: node ABC, structure Entite, ecran w_autre - and ABC is a tiers code.
+
+Legacy: never touches it. Every structure.code and structure.description
+update is limited to Entite/w_tiers, Compte/w_tiers or Compte/w_compte_banque
+(lines 104, 147, 764, 807, 1424, 1466, 2083, 2115). Nothing is reported.
+
+v4 today: never touches it either. But it FLAGS it: REVIEW in the run log,
+and the verification answers REVIEW REQUIRED (exit 3) instead of PASS,
+because the client code is still visible in that node.
+
+Options
+  A. Leave it and stop flagging it; show a count only.     <- recommended
+  B. Keep flagging it (today).
+
+Why A: the same result as legacy, and the screen is the application's own
+statement of what a node is. The risk: if such a node really is the same
+client, its code stays visible. The count keeps that in sight.
+
+Q1b. A parent text that is a w_tiers node AND a node on another screen
+(a child whose pere = ABC, where ABC is both). Today: left and flagged.
+Recommended with A: the party's value - a node on another screen is not
+considered as a parent.
+
+How often: diagnostics section 5, column OTHER_HOLDING_IDENTIFIER.
+
+Your answer:
+
+
+Q2. A PARENT THAT IS BOTH A PARTY NODE AND AN ACCOUNT NODE
+----------------------------------------------------------
+What: text SHRD is a w_tiers node (a party) AND a w_compte_banque node (a
+bank account). A child node has pere = SHRD. After the run the two SHRD
+nodes have different values (E_... and CB_...); the child can follow only
+one of them.
+
+Legacy: decided by the CHILD's own classification, on any screen:
+  line 155   Entite branch        pere = E_  for children classified Entite
+  line 815   Portefeuille branch  pere = P_  for children classified Entite
+  line 1474  Tiers branch         pere = T_  for children classified Compte
+  line 2205  Compte branch        pere = CB_ for children classified Compte
+So: a child classified Entite gets the party's value; a child classified
+Compte gets the account's CB_ (T_ if SHRD is also a counterparty node); any
+other child is left unchanged.
+
+v4 today: left unchanged and flagged REVIEW.
+
+Options
+  A. Like legacy: by the child's classification.
+  B. By the child's screen:                                <- recommended
+       child on w_tiers .......... the party's value
+       child on w_compte_banque .. the party's value, if diagnostics
+                                   section 6 shows that bank-account nodes
+                                   normally sit under party nodes;
+                                   otherwise flagged
+       child on another screen ... unchanged (see Q1)
+  C. Keep flagging (today).
+
+Why B: a node on w_tiers belongs to the party tree, so its parent is the
+party. Under A, a counterparty node (Compte on w_tiers) under the entity
+SHRD is pointed at the bank account SHRD instead - the specification calls
+that legacy filter "weaker" (its section 4). A and B agree for children
+classified Entite.
+
+How often: diagnostics section 8 (these children, by screen and
+classification); section 6 (where bank-account nodes normally sit).
+
+Your answer:
+
+
+Q3. A VALUE THAT IS BOTH A PARTY AND A BANK ACCOUNT, IN A MIXED COLUMN
+----------------------------------------------------------------------
+The MIXED columns - legacy wrote party AND account values into them:
+  ccp_breakdown.clearing_member .............. lines 158, 818, 1477, 2134
+  clearing_member_breakdown.clearing_member .. lines 161, 821, 1480, 2136
+  histo_operation.clearing_member ............ lines 381, 1041, 1703, 2146
+  import_operation.clearing_member ........... lines 483, 1143, 1813, 2177
+  ventiler_compte.valeur_1 to valeur_4 ....... lines 732-738, 1392-1398,
+                                               2051-2057, 2188-2194
+  param_cpta_reg_gen.compte_ana .............. line 2225 only (Compte
+                                               branch); it held party codes
+                                               on TANM7881
+  cm_deal_deal.clearing_member ............... not in legacy; same field
+
+What: histo_operation.clearing_member = SHRD, and SHRD is an entity AND a
+bank account.
+
+Legacy: each statement is "set C = new where C = code". The branches run E,
+P, T, C and each one renames every matching row, so the FIRST branch that
+processes the text wins:
+  an entity, portfolio or counterparty AND an account ..... the party's value
+  a party legacy cannot classify (X_ in v4) AND an account  the account's CB_
+
+v4 today: a value that is only a party gets the party's value, and one that
+is only an account gets the account's - the same as legacy. A value that is
+BOTH is left unchanged and flagged REVIEW.
+
+Options
+  A. The party's value, always.                            <- recommended
+  B. Exactly legacy: the party's value, except for an X_ party, which gets
+     the account's.
+  C. The account's value.
+  D. Per column: set the column to PARTY or BANK_ACCOUNT in
+     config/inventory_op_custom.csv (possible today).
+  E. Keep flagging (today).
+
+Why A: it is legacy's result whenever legacy knew the party, and it needs no
+guess per row. B differs only for X_ parties, where legacy chose the account
+because it did not know the party at all.
+
+How often: diagnostics section 7, column BOTH.
+
+Your answer:
+
+
+Q4. val_bank_account.code - PARTY OR BANK ACCOUNT?
+--------------------------------------------------
+Legacy updates it only in the three party branches (lines 666, 1326, 1985):
+it wrote party values there, never an account's. v3 restricted it to bank
+accounts, and v4 follows v3: an account code there gets its CB_, a party
+code is left - and verification FAILs the column ("original of the OTHER
+domain remains").
+
+Options
+  A. BANK_ACCOUNT (v3, v4 today).
+  B. PARTY (legacy).
+  C. MIXED - both, as in Q3.
+Recommendation: decide from diagnostics section 7, row
+val_bank_account.code. Mostly account codes: A. Mostly party codes: B.
+Both kinds: C.
+
+Your answer:
+
+
+PART 2 - WHERE v4 DELIBERATELY DIFFERS FROM LEGACY
+==================================================
+The specification decided these. A row-by-row comparison will show them.
+My recommendation for every one: keep. Answer "keep" or "follow legacy".
+
+D1. A Compte node on w_tiers whose party v4 does not call a counterparty
+    Legacy: T_ for every Compte node on w_tiers - its Tiers cursor (line 72)
+            needs no tiers row and reads no flag.
+    v4:     no tiers row: X_, reason missing master - the specification (2A)
+            says this "intentionally changes the old counterparty selector";
+            flag O: P_ (a portfolio); flag empty or other: X_, unknown flag.
+            Both replace the code; only the prefix differs.
+    Your answer:
+
+D2. A counterparty classified other than Compte (flag N, a w_tiers node
+    with a custom classification)
+    Legacy: never renamed - only Compte nodes are in the Tiers cursor. The
+            code stays.
+    v4:     T_.
+    Your answer:
+
+D3. A portfolio whose w_tiers node is not classified Entite (flag O)
+    Legacy: never renamed - the Portefeuille cursor (line 78) needs an
+            Entite node. The code stays.
+    v4:     P_ (specification 2A: any w_tiers node).
+    Your answer:
+
+D4. An entity that also has a Compte node on w_tiers
+    Legacy: split - E_ on the tiers row and the Entite node (Entite
+            branch), then T_ on the Compte node (Tiers branch, line 1466).
+    v4:     one E_ everywhere (specification 2A: "Do not reproduce that
+            split").
+    Your answer:
+
+D5. Every other party legacy does not process - neither an Entite node on
+    w_tiers with a tiers row flagged N or O, nor a Compte node on w_tiers.
+    For example a tiers row with no node, or an Entite node whose tiers row
+    is missing or has an empty flag.
+    Legacy: in no cursor - its codes stay everywhere.
+    v4:     X_ everywhere, with the reason recorded.
+    Your answer:
+
+D6. The parent of a child whose classification does not match its parent's
+    branch. Example: a bank-account node or a counterparty node (classified
+    Compte) under the entity ENTN.
+    Legacy: pere stays 'ENTN' - lines 155 and 815 touch only children
+            classified Entite. The entity code stays, and the link to the
+            renamed entity breaks.
+    v4:     pere gets ENTN's E_.
+    Your answer:
+
+D7. param_cpta_reg_gen.compte_ana holding party codes
+    Legacy: updated only in the Compte branch (line 2225) - party codes
+            stay.
+    v4:     party codes get the party's value (the column is MIXED).
+    Your answer:
+
+D8. Columns legacy never processed (141 party and 25 account columns of the
+    CTI and KTP tables, added in v4)
+    Legacy: unchanged.
+    v4:     replaced according to their type.
+    Your answer:
+
+D9. tiers_entite (one-character 'T' / 'E' discriminators)
+    Legacy: "set tiers_entite = new where tiers_entite = code" on
+            ventiler_corresp_bqe (lines 706, 1366, 2025) - harmless unless a
+            party code is 'T' or 'E'.
+    v4:     the three tiers_entite columns are left out of the inventory,
+            and so is tiers.flag_pp.
+    Your answer:
+
+D10. Attributes and addresses
+    Legacy: descriptions and addresses under the description switch; extra
+            attributes in five column slots per category (config.ini
+            Ent1-5, Fold1-5, Tier1-5, Cpte1-5); for parties it cannot
+            classify, none.
+    v4:     the same kinds of columns for every party, X_ included, under
+            the ATTRIBUTES switch; addresses under ATTRIBUTES too
+            (specification 5B). An empty field stays empty in both.
+    Your answer:
+
+Already settled, for reference - no answer needed:
+  - a node on w_compte_banque is a bank-account node whatever its
+    classification (your colleague). Legacy renamed only Compte ones.
+  - a w_compte_banque node with no compte_banque row is a bank account by
+    default (you). Legacy never renamed it.
+
+
+PART 3 - COMPARING WITH LEGACY ROW BY ROW
+=========================================
+- Compare WHETHER a value was replaced and WITH WHICH PREFIX (E_, P_, T_,
+  X_, CB_), not the number. Legacy appends a random number (dbms_random,
+  lines 94-95, not zero-padded); v4 appends a sequence (E_0000001).
+- Legacy's compensateur columns get a second random value (lines 97-98); v4
+  writes the party's own value. A different number, the same prefix.
+- Legacy left it, v4 replaced it: see D2, D3, D5, D6, D7, D8.
+- Different prefix: see D1 (T_ against X_) and D4 (T_ against E_).
+- Legacy replaced it, v4 left it: see Q2, Q3 (both flagged REVIEW today) and
+  Q4.
+- compte_banque.code_bban: unchanged in both. Legacy's update runs after the
+  code was renamed, so it matches nothing.
+- Free text: cleared in both.
+
+Other v4-only decisions (no legacy equivalent) are in
+13_typed_identity_fix.md, section 5. None of them changes what a row-by-row
+comparison shows.

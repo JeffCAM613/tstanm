@@ -17,8 +17,8 @@
 > - **No checkbox exceptions.** `MIN_CODE_LENGTH` and the one-character column rule are gone:
 >   every listed column is processed, a one-character identifier is anonymized like any other, and
 >   a column that must not be touched is left out of the inventory.
-> - **A new scope decision**, `APPROVE_STRUCTURE_ONLY_ACCOUNTS`, for account nodes that have no
->   `compte_banque` row.
+> - **Structure-only bank accounts.** A `w_compte_banque` node with no `compte_banque` row is
+>   anonymized as a bank account. Never asked; `APPROVE_STRUCTURE_ONLY_ACCOUNTS=n` refuses them.
 > - **Four verdicts**: PASS, FAIL, REVIEW REQUIRED, INCOMPLETE — exit codes 0, 2, 3, 4.
 
 Everything needed to understand, operate, maintain and extend the tool. For the shorter

@@ -96,7 +96,7 @@ CREATE OR REPLACE PACKAGE op.anon_engine AS
       p_bank_account_attr      IN VARCHAR2 DEFAULT 'Y',
       p_parallel_degree        IN VARCHAR2 DEFAULT '4',
       p_fail_on_missing        IN VARCHAR2 DEFAULT 'N',
-      p_approve_structure_only IN VARCHAR2 DEFAULT 'N');
+      p_approve_structure_only IN VARCHAR2 DEFAULT 'Y');
 
    PROCEDURE start_run;
    PROCEDURE finish_run(p_status IN VARCHAR2, p_error IN VARCHAR2 DEFAULT NULL);
@@ -140,7 +140,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
    g_dry_run                BOOLEAN      := TRUE;
    g_parallel_degree        PLS_INTEGER  := 4;
    g_fail_on_missing        BOOLEAN      := FALSE;
-   g_approve_structure_only BOOLEAN      := FALSE;
+   g_approve_structure_only BOOLEAN      := TRUE;
 
    -- The three switches of each category: 'Y' or 'N'.
    g_id   t_flags;
@@ -442,7 +442,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       p_bank_account_attr      IN VARCHAR2 DEFAULT 'Y',
       p_parallel_degree        IN VARCHAR2 DEFAULT '4',
       p_fail_on_missing        IN VARCHAR2 DEFAULT 'N',
-      p_approve_structure_only IN VARCHAR2 DEFAULT 'N')
+      p_approve_structure_only IN VARCHAR2 DEFAULT 'Y')
    IS
       -- A value that is neither yes nor no is an error, not a quiet "no". A
       -- typo in a masking switch must not turn the masking off.
@@ -495,8 +495,10 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       END;
 
       g_fail_on_missing        := flag(p_fail_on_missing, 'FAIL_ON_MISSING_OBJECT', 'N') = 'Y';
+      -- Allowed unless refused: a w_compte_banque node with no compte_banque
+      -- row is a bank account by default (decided 2026-10-20).
       g_approve_structure_only := flag(p_approve_structure_only,
-                                       'APPROVE_STRUCTURE_ONLY_ACCOUNTS', 'N') = 'Y';
+                                       'APPROVE_STRUCTURE_ONLY_ACCOUNTS', 'Y') = 'Y';
    END configure;
 
 
@@ -1157,8 +1159,9 @@ SELECT :run_id, domain, k,
             || 'code_map. Their provenance is lost.', v_n);
       END IF;
 
-      -- Account nodes with no account master: a deliberate extension of the
-      -- account population, which has to be approved for this client.
+      -- Account nodes with no account master: an extension of the account
+      -- population the legacy package never renamed. Allowed by default; a
+      -- client where they are not bank accounts sets the switch to n.
       SELECT COUNT(*) INTO v_n
         FROM anon_meta.identity_plan
        WHERE run_id = g_run_id
@@ -1167,9 +1170,10 @@ SELECT :run_id, domain, k,
          AND membership = 'STRUCTURE_ONLY';
       IF v_n > 0 AND NOT g_approve_structure_only THEN
          block('account scope',
-               v_n || ' w_compte_banque structure node(s) have no compte_banque row. Confirm '
-            || 'that these nodes are bank-account identities for this client, then set '
-            || 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=y. Scope review needed before any update.', v_n);
+               v_n || ' w_compte_banque structure node(s) have no compte_banque row, and '
+            || 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=n says they are not bank accounts here. Set '
+            || 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=y to anonymize them as bank accounts. Scope review '
+            || 'needed before any update.', v_n);
       END IF;
 
       -- Every replacement - kept or new - must be unique, and must not equal

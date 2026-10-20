@@ -207,21 +207,13 @@ call :flag_cols ANONYMIZE_BANK_ACCOUNT_ATTRIBUTES       SELF_CODE BANK_ACCOUNT  
 
 
 REM ===========================================================================
-REM  STEP 6 - scope decision for this client
+REM  STEP 6 - structure-only bank accounts
 REM ===========================================================================
-if "!INTERACTIVE!"=="1" (
-    echo --------------------------------------------------------------------
-    echo  Scope decision for this client
-    echo --------------------------------------------------------------------
-    echo  A bank account is found in compte_banque and as a structure node on
-    echo  the w_compte_banque screen. Nodes with no compte_banque row are anonymized
-    echo  as bank accounts only once you confirm that they ARE bank accounts for
-    echo  this client. If unsure answer n: a run that finds any stops before
-    echo  changing anything, and a dry run shows how many there are.
-    echo.
-)
-call :need_yn APPROVE_STRUCTURE_ONLY_ACCOUNTS "Structure-only account nodes are bank accounts here" n
-if "!INTERACTIVE!"=="1" echo.
+REM A w_compte_banque structure node with no compte_banque row is a bank
+REM account and is anonymized as one. Never asked: y, unless the configuration
+REM file says n for a client where such nodes are not bank accounts - a run
+REM that finds any then stops before changing anything.
+call :default_yn APPROVE_STRUCTURE_ONLY_ACCOUNTS y
 
 
 REM ===========================================================================
@@ -604,6 +596,15 @@ if /I "!_v!"=="n" set "%~1=n"
 if /I "!_v!"=="f" set "%~1=n"
 if /I "!_v!"=="0" set "%~1=n"
 exit /b 0
+
+
+REM --- Yes/no that is never asked: the configuration file's value, or the
+REM     default when it is missing. Normalised like :need_yn.
+REM     Usage: call :default_yn VARNAME DEFAULT
+:default_yn
+call :is_missing "%~1"
+if "!_missing!"=="1" set "%~1=%~2"
+goto :need_yn_done
 
 
 REM --- Ask a description/attributes switch, listing the columns it governs.
