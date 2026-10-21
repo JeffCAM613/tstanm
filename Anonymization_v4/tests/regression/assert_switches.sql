@@ -116,9 +116,12 @@ BEGIN
    identity('counterparty CPTN', 'PARTY', 'CPTN', 'tiers',
             'SELECT compensateur FROM op.histo_operation WHERE id = 2',
             'Counterparty N', 'adresse1', '2 Cpty Street', 'adresse2');
-   identity('unclassified NSTN', 'PARTY', 'NSTN', 'tiers',
+   identity('archived counterparty NSTN', 'PARTY', 'NSTN', 'tiers',
             'SELECT entite FROM op.histo_operation WHERE id = 4',
             'Orphan party N', 'nom_pp', 'Durand', 'fax');
+   identity('unclassified NFLG', 'PARTY', 'NFLG', 'tiers',
+            'SELECT entite FROM op.compte_regle WHERE id = 3',
+            'Null flag party', 'telephone', '0303', 'fax');
    identity('bank account SHRD', 'ACCOUNT', 'SHRD', 'compte_banque',
             'SELECT compte_tiers FROM op.histo_operation WHERE id = 3',
             'Shared account', 'groupe_1', 'ACC-GRP', 'groupe_2');

@@ -2,6 +2,23 @@ OPEN QUESTIONS - Anonymization v4 (typed identity fix)
 ======================================================
 2026-10-20
 
+UPDATE 2026-10-22 - fixes+needed_in_v4-part2.txt settled most of Part 1:
+  Q1   settled: A. Nodes on other screens are left as they are and no longer
+       flagged (part 2, item 5A). Folder rows (no screen) of the trees
+       Entite, Compte, Tiers, Compta and Compta_Ato are renamed when their
+       code is a client identifier (item 5B/5C).
+  Q1b  settled by item 4: a pere follows the parent node of its own tree.
+  Q2   settled by item 4, neither A nor B: the parent node in the child's own
+       structure tree decides - (structure, code) is unique, and on EPFPG785
+       every pere has its parent in its own tree.
+  Q3   settled for ventiler_compte.valeur_1..4 (item 6): the breakdown group
+       (ventiler_compte.code) decides. The other MIXED columns still leave a
+       party-and-account value for review; run 1 found none there.
+  Q4   still open - run 1 did not flag val_bank_account.code.
+  Part 2 (D1-D10) is unchanged, except D5 in part: a tiers row flagged N
+  with no structure node at all is now an archived counterparty, T_ (item 7,
+  agreed with a colleague) - no longer X_. See 16_part2_fixes.md.
+
 For you, and for the AI that knows the legacy row-by-row package. "Legacy" is
 Anonymization_OP/sql/02pack_anonym_number.sql, run by start_anonymous.sql in
 the order Entite, Portefeuille, Tiers, Compte. Line numbers below refer to

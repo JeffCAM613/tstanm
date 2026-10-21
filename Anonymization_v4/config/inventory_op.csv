@@ -30,11 +30,21 @@
 # Every original identifier belongs to one DOMAIN and is classified once, from
 # the data, into one category:
 #
-#   PARTY    tiers.code, the w_tiers structure nodes, confirmed references
+#   PARTY    tiers.code, the w_tiers structure nodes, confirmed references,
+#            and codes found only in CODE,PARTY columns
 #              ENTITY E_ . PORTFOLIO P_ . COUNTERPARTY T_ .
 #              UNCLASSIFIED_PARTY X_ (the data cannot say which; reason kept)
-#   ACCOUNT  compte_banque.code, the structure nodes on the w_compte_banque screen
+#   ACCOUNT  compte_banque.code, the structure nodes on the w_compte_banque
+#            screen, and codes found only in CODE,BANK_ACCOUNT columns
 #              BANK_ACCOUNT CB_
+#
+# A code found only in references - a value of a CODE,PARTY or
+# CODE,BANK_ACCOUNT column that is no identity of that domain - is the code of
+# a master row deleted in the past. It is captured like any other identity: a
+# party as X_ (reason missing master), an account as CB_. So a CODE,PARTY or
+# CODE,BANK_ACCOUNT column must hold only such codes; one that holds other
+# codes too is marked [no-harvest] (below). The dry run lists, by column, how
+# many it found.
 #
 # The same text can be a party AND an account. They are different objects:
 # each keeps its own replacement, and a column only ever receives the
@@ -45,11 +55,14 @@
 #   BANK_ACCOUNT  bank-account identifiers only. Never a party's replacement.
 #   MIXED         reviewed columns that hold either. A value known in one
 #                 domain takes that translation; a value that is a party AND
-#                 an account is left unchanged and reported for review.
+#                 an account is left unchanged and reported for review -
+#                 unless the column's [group: ...] settles it.
 #   NODE_ROLE     structure.code and structure.pere only. Each node takes the
 #                 translation of its own role (account node / party node);
-#                 pere takes its parent's. Other screens are left unchanged
-#                 and reported for review.
+#                 a folder row named after a client takes its client's (see
+#                 [folders: ...]); any other node keeps its code - not
+#                 reported, a screen that is not a party or an account says
+#                 so. pere takes what its parent node in the SAME tree became.
 #
 # CATEGORY on a DESCRIPTION or SELF_CODE row - who owns the row:
 #   PARTY / BANK_ACCOUNT / NODE_ROLE (structure), or one party category
@@ -57,6 +70,32 @@
 #   to the owners of that category.
 #
 # NONE            NULL_OUT only. Free text is never category-dependent.
+#
+# ----------------------------------------------------------------------------
+# COLUMN OPTIONS - [bracketed] words at the start of the notes field
+# ----------------------------------------------------------------------------
+#   [no-harvest]   CODE,PARTY or CODE,BANK_ACCOUNT. The column holds other
+#                  codes too (a BBAN, an IBAN, a condition code): a value that
+#                  is no identity stays as it is, and is not captured as the
+#                  code of a deleted master.
+#   [only-where: <col> in <table>.<col> where <col> = <value>]
+#                  CODE. Only the rows whose <col> names a <table> row with
+#                  that value hold identifiers. The other rows are not renamed,
+#                  not read for codes, not checked.
+#   [group: <col>] CODE,MIXED. Rows with the same <col> hold one kind of code:
+#                  a value that is a party AND an account takes the kind of its
+#                  group's other values. A group of both kinds, or of none, is
+#                  left for review.
+#   [folders: <tree> <tree> ...]
+#                  structure.code. The structure trees whose folder rows - rows
+#                  with no screen - are named after clients: a folder row whose
+#                  code is a party or account identifier is renamed with it
+#                  (the party's translation first), and its label with it. The
+#                  text of every OTHER folder row, in any tree, is free text and
+#                  emptied. Trees not listed keep their folder codes.
+# A misspelt option, or one on the wrong kind of column, stops the run before
+# anything changes. A site changes a column's options by repeating its line in
+# inventory_op_custom.csv.
 #
 # ANY is no longer accepted: it meant "whichever category's mapping matches the
 # text", which is how a party received a bank account's replacement.
@@ -75,12 +114,13 @@
 # The switches do NOT filter this file by table. They act per identity, by its
 # category:
 #
-#   CODE         459 rows   ANONYMIZE_<CATEGORY> - an identity whose renaming
+#   CODE         457 rows   ANONYMIZE_<CATEGORY> - an identity whose renaming
 #                           is off keeps its original code in every column.
 #   DESCRIPTION    3 rows   ANONYMIZE_<CATEGORY>_DESCRIPTION
 #   SELF_CODE      5 rows   ANONYMIZE_<CATEGORY>_ATTRIBUTES
-#   NULL_OUT      92 rows   Never optional. Free text is the highest-risk
-#                           category and the least useful to preserve.
+#   NULL_OUT      95 rows   Never optional. Free text is the highest-risk
+#                           category and the least useful to preserve. A NOT
+#                           NULL column gets the marker ANONYMIZED instead.
 #
 # The three switches of a category are independent: labels and attributes can
 # be masked while the identifier itself is kept.
@@ -112,12 +152,14 @@ table_name,column_name,rule,category,source,notes
 #
 # structure holds BOTH kinds of node - a party node on the w_tiers screen, an
 # account node on the w_compte_banque screen - so neither of its code columns
-# can have one domain. NODE_ROLE types each row by its own role, and pere by
-# its parent's, decided before anything is renamed. A node on any other screen
-# is left unchanged and reported for review.
+# can have one domain. NODE_ROLE types each row by its own role, and a folder
+# row of the trees listed by [folders: ...] by the client it is named after.
+# pere takes exactly what the parent node of the SAME tree became - (structure,
+# code) is unique, and every pere has its parent in its own tree. A node on
+# any other screen keeps its code.
 # ============================================================================
-structure,code,CODE,NODE_ROLE,BASE,Each node takes its own role's translation
-structure,pere,CODE,NODE_ROLE,BASE,The parent's typed translation - never the child's
+structure,code,CODE,NODE_ROLE,BASE,[folders: Entite Compte Tiers Compta Compta_Ato] Each node takes its own role's translation
+structure,pere,CODE,NODE_ROLE,BASE,What the parent node of the same tree became
 tiers,code,CODE,PARTY,BASE,
 tiers,entite_pere,CODE,PARTY,BASE,
 tiers,entite_fifo,CODE,PARTY,BASE,
@@ -129,7 +171,7 @@ compte_banque,code,CODE,BANK_ACCOUNT,BASE,
 # KNOWN GAP, not covered by this row: a BBAN is an account NUMBER, never a
 # compte_banque.code, so this lookup cannot match and the column keeps real
 # account numbers. Needs a field-specific rule - see inventory_op_custom.csv.
-compte_banque,code_bban,CODE,BANK_ACCOUNT,BASE,Never matches - BBAN values need their own rule
+compte_banque,code_bban,CODE,BANK_ACCOUNT,BASE,[no-harvest] Never matches - BBAN values need their own rule
 compte_banque,agence,CODE,PARTY,BASE,
 compte_banque,banque,CODE,PARTY,BASE,
 compte_banque,entite,CODE,PARTY,BASE,
@@ -182,10 +224,10 @@ deposit_pere,portefeuille_depo,CODE,PARTY,BASE,
 echelle,entite_mere,CODE,PARTY,BASE,
 echelle,portefeuille_mere,CODE,PARTY,BASE,
 echelle,compte_reglement,CODE,BANK_ACCOUNT,BASE,
-echelle_condition,code,CODE,PARTY,BASE,
-echelle_cond_date,condition,CODE,PARTY,BASE,
+echelle_condition,code,CODE,PARTY,BASE,[no-harvest] Interest-scale condition codes - not parties
+echelle_cond_date,condition,CODE,PARTY,BASE,[no-harvest] Interest-scale condition codes - not parties
 echelle_compte,compte,CODE,BANK_ACCOUNT,BASE,
-echelle_marge,condition,CODE,PARTY,BASE,
+echelle_marge,condition,CODE,PARTY,BASE,[no-harvest] Interest-scale condition codes - not parties
 fifo_solde_depo,compensateur,CODE,PARTY,BASE,
 fifo_solde_depo,depositaire,CODE,PARTY,BASE,
 fifo_solde_depo,portefeuille,CODE,PARTY,BASE,
@@ -210,7 +252,7 @@ param_date,portefeuille,CODE,PARTY,BASE,
 param_date,contrepartie,CODE,PARTY,BASE,
 param_effet_paye,compte,CODE,BANK_ACCOUNT,BASE,
 param_effet_recu,compte,CODE,BANK_ACCOUNT,BASE,
-param_fiche_val_detail,code,CODE,BANK_ACCOUNT,BASE,Account branch only in the vendor package (was ANY)
+param_fiche_val_detail,code,CODE,BANK_ACCOUNT,BASE,[only-where: code_tableau in param_fiche_en_valeur.code where type = FicValComp] Only account reports list bank accounts - the others list cash-flow posts. Account branch only in the vendor package (was ANY)
 param_garanti_taux,assureur,CODE,PARTY,BASE,
 param_net_reg,compte_comp,CODE,BANK_ACCOUNT,BASE,
 param_net_reg,compte_pivot,CODE,BANK_ACCOUNT,BASE,
@@ -282,10 +324,10 @@ ventiler_reg_liv,contrepartie,CODE,PARTY,BASE,
 ventiler_reg_liv,portefeuille,CODE,PARTY,BASE,
 vue_affilie_tiers,code_ref,CODE,PARTY,BASE,
 vue_affilie_compte,code_ref,CODE,BANK_ACCOUNT,BASE,Account branch only in the vendor package (was ANY)
-ventiler_compte,valeur_1,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
-ventiler_compte,valeur_2,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
-ventiler_compte,valeur_3,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
-ventiler_compte,valeur_4,CODE,MIXED,BASE,MIXED - a breakdown value: the vendor package wrote every category here
+ventiler_compte,valeur_1,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
+ventiler_compte,valeur_2,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
+ventiler_compte,valeur_3,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
+ventiler_compte,valeur_4,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
 virement_compte,compte,CODE,BANK_ACCOUNT,BASE,
 
 # ============================================================================
@@ -353,13 +395,12 @@ histo_operation,corresp_receiver2,CODE,PARTY,BASE,
 histo_operation,corresp_sender1,CODE,PARTY,BASE,
 histo_operation,corresp_sender2,CODE,PARTY,BASE,
 histo_operation,portefeuille_deposit,CODE,PARTY,BASE,
-histo_operation,tiers_domicile,CODE,PARTY,BASE,
 histo_operation,compte_entite,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
 histo_operation,compte_tiers,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
 histo_operation,compte_filiale,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
 histo_operation,compte_tiers_2,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
 histo_operation,compte_entite_2,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,tiers_iban_compte,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_operation,tiers_iban_compte,CODE,BANK_ACCOUNT,BASE,[no-harvest] IBAN or account numbers - not compte_banque codes. Account branch only and restricted by v3 (was ANY)
 histo_parapheur,filiale,CODE,PARTY,BASE,
 histo_parapheur_det,filiale,CODE,PARTY,BASE,
 histo_position_tr,entite,CODE,PARTY,BASE,
@@ -412,7 +453,6 @@ import_operation,corresp_receiver2,CODE,PARTY,BASE,
 import_operation,corresp_sender1,CODE,PARTY,BASE,
 import_operation,corresp_sender2,CODE,PARTY,BASE,
 import_operation,portefeuille_deposit,CODE,PARTY,BASE,
-import_operation,tiers_domicile,CODE,PARTY,BASE,
 import_operation,compte_entite,CODE,BANK_ACCOUNT,BASE,
 import_operation,compte_tiers,CODE,BANK_ACCOUNT,BASE,
 import_operation,compte_filiale,CODE,BANK_ACCOUNT,BASE,
@@ -676,6 +716,17 @@ histo_pricing_groupe,description,NULL_OUT,NONE,BASE,
 # --- 8b. Operation labels: free-text copies of counterparty names.
 histo_operation,tiers_libelle,NULL_OUT,NONE,BASE,Counterparty name held as free text
 import_operation,tiers_libelle,NULL_OUT,NONE,BASE,Counterparty name held as free text
+# tiers_domicile is the beneficiary's bank and branch domiciliation - free text
+# beside tiers_libelle in a payment order. Was CODE,PARTY (as in the vendor
+# package): only the rows that happened to equal a party code were renamed, a
+# few that equalled a bank-account code were flagged, and most - names of banks
+# and branches - stayed in clear. Emptied, as tiers_libelle is (2026-10-22).
+histo_operation,tiers_domicile,NULL_OUT,NONE,BASE,Bank and branch domiciliation held as free text
+import_operation,tiers_domicile,NULL_OUT,NONE,BASE,Bank and branch domiciliation held as free text
+# The label of each line of a valuation report: on a report of bank accounts,
+# the account's name next to its code. Neither the vendor package nor v4 run 1
+# touched it (2026-10-22).
+param_fiche_val_detail,description,NULL_OUT,NONE,BASE,Report line label - a bank account's name on account reports
 import_operation,description,NULL_OUT,NONE,BASE,May contain real entity names
 utilisateur,description,NULL_OUT,NONE,BASE,OP application user description
 

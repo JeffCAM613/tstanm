@@ -323,6 +323,21 @@ BEGIN
    -- report add them up by table.
    add_column('anon_step_log', 'x_rows', 'NUMBER');
 
+   -- What the inventory's notes say about a column, in a form the engine and
+   -- the verifier read directly. Filled by 21_validate_inventory.sql from the
+   -- [bracketed] options in the notes field of the CSVs:
+   --   harvest       CODE PARTY / BANK_ACCOUNT: Y unless [no-harvest] - a value
+   --                 that is no identity is a code whose master was deleted
+   --   row_scope     [only-where: ...] as a condition on the row (alias t)
+   --   group_by      [group: col] on MIXED: a value that is a party AND an
+   --                 account takes the domain of its group
+   --   folder_trees  [folders: ...] on structure.code: the trees whose folder
+   --                 rows (no screen) are renamed when their code is an identity
+   add_column('anon_inventory', 'harvest',      'VARCHAR2(1)');
+   add_column('anon_inventory', 'row_scope',    'VARCHAR2(1000)');
+   add_column('anon_inventory', 'group_by',     'VARCHAR2(128)');
+   add_column('anon_inventory', 'folder_trees', 'VARCHAR2(1000)');
+
    -- code_map_any - REMOVED.
    --
    -- It held one "winning" replacement per original text, chosen by a fixed
@@ -385,9 +400,10 @@ BEGIN
 
    -- confirmed_identity - sensitive identities that exist only as references.
    --
-   -- A code that appears in reference columns but has no master row and no
-   -- structure node is not discovered automatically: not every unknown string
-   -- is client data. Insert one here, once reviewed, to bring it into scope:
+   -- A code found in a CODE,PARTY or CODE,BANK_ACCOUNT column with no master
+   -- row and no structure node is now picked up by itself (reference_harvest
+   -- below): its master was deleted. This table is for the rest - a code in a
+   -- column marked [no-harvest], or in a MIXED column - once reviewed:
    --
    --   INSERT INTO anon_meta.confirmed_identity (domain, old_code, note)
    --   VALUES ('PARTY', '<code>', 'reviewed <date>');
@@ -422,8 +438,8 @@ BEGIN
    --                    category only when master data changed since capture.
    --   map_status       EXISTING | NEW | NONE (no translation needed) |
    --                    CONFLICT | MISSING - the last two block the run
-   --   parent_role      what a structure.pere holding this text points at:
-   --                    PARTY | ACCOUNT | AMBIGUOUS | OTHER
+   --   parent_role      no longer used: a structure.pere follows the parent
+   --                    node of its own tree (node_lookup). Kept for older runs.
    --   seen_renamed     Y when a master or node row of this identity already
    --                    holds its replacement - renamed by an earlier run on
    --                    this same data
@@ -471,9 +487,12 @@ BEGIN
    --   MIXED        identities known in exactly ONE domain, for columns
    --                reviewed as holding both
    --   AMBIGUOUS    texts that are a party AND an account (new_code NULL) -
-   --                left alone in MIXED columns and reported for review
-   --   PERE         structure.pere values whose parent role is established
-   --   PERE_REVIEW  structure.pere values whose parent role is not
+   --                left alone in MIXED columns and reported for review,
+   --                unless the column's [group:] settles them
+   --   VALUE_P      every party original and party replacement of the plan
+   --   VALUE_A      every account original and account replacement - with
+   --                VALUE_P, how a MIXED group's other values are told apart
+   --                (new_code NULL; texts that are both are in neither)
    create_table('code_lookup', q'[
       CREATE TABLE anon_meta.code_lookup (
          domain    VARCHAR2(12) NOT NULL,
@@ -570,6 +589,51 @@ BEGIN
          list_sql    VARCHAR2(4000) NOT NULL,
          CONSTRAINT pk_unclassified_reason PRIMARY KEY (x_reason) USING INDEX TABLESPACE &tbs_index
       )]');
+
+   -- reference_harvest - codes found only in references, per run.
+   --
+   -- A value of a CODE,PARTY or CODE,BANK_ACCOUNT column that is no identity
+   -- of that domain is the code of a master row deleted in the past: it is
+   -- captured as an identity found only in references (REFERENCE_ONLY) - a
+   -- party as UNCLASSIFIED_PARTY, reason MISSING_MASTER, an account as
+   -- BANK_ACCOUNT - and gets its own replacement like any other. One row per
+   -- code and column where it was found, with the rows holding it, so a run
+   -- can say where they came from. Columns marked [no-harvest] are not read.
+   --
+   -- Holds original client identifiers. Same handling as code_map.
+   create_table('reference_harvest', q'[
+      CREATE TABLE anon_meta.reference_harvest (
+         run_id       NUMBER        NOT NULL,
+         domain       VARCHAR2(10)  NOT NULL,
+         old_code     VARCHAR2(80)  NOT NULL,
+         table_name   VARCHAR2(128) NOT NULL,
+         column_name  VARCHAR2(128) NOT NULL,
+         n_rows       NUMBER        NOT NULL,
+         CONSTRAINT pk_reference_harvest PRIMARY KEY (run_id, domain, old_code, table_name, column_name)
+            USING INDEX TABLESPACE &tbs_index
+      )]');
+
+   -- node_lookup - what each structure node becomes, tree by tree.
+   --
+   -- (tree, old_code) is a node of one structure tree by its ORIGINAL code;
+   -- new_code is the code it ends with: its role's translation (an account
+   -- node, a party node, or a folder row named after a client), or its own
+   -- code when it is not renamed. structure.code is renamed from it, and so
+   -- is structure.pere - a child takes exactly what its parent node in the
+   -- SAME tree became. Rebuilt every run from the plan; tree is NVL(structure,
+   -- CHR(1)) so that nodes with no tree are a tree of their own.
+   create_table('node_lookup', q'[
+      CREATE TABLE anon_meta.node_lookup (
+         tree      VARCHAR2(128) NOT NULL,
+         old_code  VARCHAR2(80)  NOT NULL,
+         new_code  VARCHAR2(80)  NOT NULL,
+         kind      VARCHAR2(10)  NOT NULL,
+         CONSTRAINT pk_node_lookup PRIMARY KEY (tree, old_code) USING INDEX TABLESPACE &tbs_index
+      )]');
+   -- A child already renamed by an earlier run points at what its parent
+   -- became: found by the new code.
+   create_index('ix_node_lookup_new',
+      'CREATE INDEX anon_meta.ix_node_lookup_new ON anon_meta.node_lookup(tree, new_code)');
 END;
 /
 
@@ -579,12 +643,18 @@ END;
 MERGE INTO anon_meta.unclassified_reason d
 USING (
    SELECT 'MISSING_MASTER' AS x_reason, 1 AS sort_order, 'missing master' AS label,
-          'The code is a party in the structure tree (a w_tiers node) or a confirmed '
-       || 'reference, but tiers has no row for it - so there is no flag_portefeuille to '
-       || 'tell a portfolio from an entity or a counterparty.' AS why,
-          'Add the missing tiers row with its flag_portefeuille, or correct the node''s code '
-       || 'if it is a typo. A node left over from a deleted party can stay X_.' AS fix,
-          q'{SELECT p.old_code AS code, p.membership, s.ecran, s.structure, s.pere
+          'The code is a party - a w_tiers node in the structure tree, a value in a party '
+       || 'column, or a confirmed reference - but tiers has no row for it, so there is no '
+       || 'flag_portefeuille to tell a portfolio from an entity or a counterparty. A code '
+       || 'found only in party columns is a party whose tiers row was deleted.' AS why,
+          'Add the missing tiers row with its flag_portefeuille, or correct the code if it is '
+       || 'a typo. A code left over from a deleted party can stay X_: it is renamed '
+       || 'wherever it appears.' AS fix,
+          q'{SELECT p.old_code AS code, p.membership, s.ecran, s.structure, s.pere,
+       (SELECT LISTAGG(LOWER(h.table_name || '.' || h.column_name) || ' (' || h.n_rows || ')', ', '
+                  ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY h.table_name, h.column_name)
+          FROM anon_meta.reference_harvest h
+         WHERE h.run_id = p.run_id AND h.domain = 'PARTY' AND h.old_code = p.old_code) AS found_in
   FROM anon_meta.identity_plan p
   LEFT JOIN op.structure s
          ON s.code = p.old_code AND NVL(s.ecran, '~') <> 'w_compte_banque'
@@ -594,10 +664,12 @@ USING (
      FROM dual
    UNION ALL
    SELECT 'NO_STRUCTURE', 2, 'no structure',
-          'The tiers row has no node in the structure tree. A party''s kind comes from its '
-       || 'w_tiers node (Entite, or another classification), so with none it cannot be told '
-       || 'apart. A w_compte_banque node with the same text is a bank account, not this party.',
-          'Add its w_tiers node in the structure tree if it is a live party; otherwise leave it X_.',
+          'The tiers row has no node in the structure tree, and its flag_portefeuille is not N. '
+       || 'Flagged N it would be an archived party, a counterparty (T_); but a portfolio (flag O) '
+       || 'is told by its w_tiers node, and an empty or unknown flag says nothing. A '
+       || 'w_compte_banque node with the same text is a bank account, not this party.',
+          'Add its w_tiers node if it is a live portfolio, or set flag_portefeuille to N if it is '
+       || 'an archived counterparty; otherwise leave it X_.',
           q'{SELECT t.*
   FROM op.tiers t
  WHERE t.code IN (SELECT p.old_code FROM anon_meta.identity_plan p
@@ -608,9 +680,8 @@ USING (
    UNION ALL
    SELECT 'NO_PARTY_SCREEN', 3, 'no party screen',
           'The tiers row has structure nodes, but none on the w_tiers screen. A node on '
-       || 'another screen does not classify a party, and is itself left for review.',
-          'Add a w_tiers node if it belongs in the party tree; otherwise leave it X_ and decide '
-       || 'what its nodes on the other screens are.',
+       || 'another screen, or a folder row with no screen, does not classify a party.',
+          'Add a w_tiers node if it belongs in the party tree; otherwise leave it X_.',
           q'{SELECT s.code, s.ecran, s.structure, s.pere, t.flag_portefeuille
   FROM op.structure s
   JOIN op.tiers t ON t.code = s.code
@@ -787,6 +858,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.field_baseline     TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.anon_step_log      TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.verify_result      TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.verify_key         TO op;
+GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.reference_harvest  TO op;
+GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.node_lookup        TO op;
 GRANT SELECT                          ON anon_meta.unclassified_reason TO op;
 GRANT SELECT                          ON anon_meta.seq_anon_run      TO op;
 GRANT SELECT                          ON atrace.ref_tables_modif     TO op;

@@ -19,7 +19,9 @@
 --            Classified once into exactly one category:
 --              PORTFOLIO          P_  flag_portefeuille 'O' + a w_tiers node
 --              ENTITY             E_  flag 'N' + an Entite w_tiers node
---              COUNTERPARTY       T_  flag 'N' + another w_tiers node, no Entite
+--              COUNTERPARTY       T_  flag 'N' + another w_tiers node, no Entite;
+--                                     or flag 'N' and no structure node at all
+--                                     (an archived party)
 --              UNCLASSIFIED_PARTY X_  anything else, with a recorded reason
 --   ACCOUNT  a compte_banque row or a structure node on the w_compte_banque
 --            screen - the screen alone decides; the node's own classification
@@ -28,6 +30,23 @@
 --
 -- The same text can be a party AND an account. They are different objects and
 -- each keeps its own replacement; the shared text proves nothing.
+--
+-- CODES FOUND ONLY IN REFERENCES. A value of a CODE,PARTY or CODE,BANK_ACCOUNT
+-- column that is no identity of that domain is the code of a master row
+-- deleted in the past. It is captured too, as found only in references
+-- (REFERENCE_ONLY): a party is UNCLASSIFIED_PARTY, reason MISSING_MASTER; an
+-- account is a BANK_ACCOUNT. A column whose notes say [no-harvest] holds other
+-- codes as well (a BBAN, a condition code) and is not read for them.
+--
+-- THE STRUCTURE TREE, tree by tree. A node is renamed by its screen - an
+-- account node, a party node - or, with no screen, when it is a folder row of
+-- a tree listed by [folders: ...] on structure.code and its code is a client
+-- identifier (the party's translation first, else the account's). Any other
+-- node keeps its code. A child's pere takes exactly what its parent node in
+-- the SAME tree became (anon_meta.node_lookup). A pere with no parent node in
+-- the child's tree - none in the data this was built on - takes the
+-- translation of the one domain its text belongs to, and is left for review
+-- when it is both.
 --
 -- v4 before this used one unrestricted lookup (code_map_any) for everything
 -- but bank-account columns. A party with no party mapping then picked up a
@@ -298,7 +317,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
                      ELSE ''
                   END
                || CASE WHEN p_x_rows > 0 THEN ', ' || TO_CHAR(p_x_rows, 'FM999,999,999') || ' to X_' END;
-      say('    ' || RPAD(SUBSTR(p_object, 1, 52), 54) || RPAD(p_status, 10) || v_detail);
+      say('    ' || RPAD(SUBSTR(p_object, 1, 60), 62) || RPAD(p_status, 10) || v_detail);
    END report;
 
 
@@ -366,6 +385,64 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
        WHERE owner = 'OP' AND table_name = UPPER(p_table) AND ROWNUM = 1;
       RETURN v_count > 0;
    END table_exists;
+
+
+   FUNCTION column_type(p_table IN VARCHAR2, p_column IN VARCHAR2) RETURN VARCHAR2 IS
+      v_type VARCHAR2(128);
+   BEGIN
+      SELECT MAX(data_type) INTO v_type
+        FROM all_tab_columns
+       WHERE owner = 'OP' AND table_name = UPPER(p_table) AND column_name = UPPER(p_column);
+      RETURN v_type;
+   END column_type;
+
+
+   -- The trees whose folder rows are named after clients, as ',Entite,Compte,'
+   -- - from [folders: ...] on structure.code. NULL when there are none.
+   FUNCTION folder_trees RETURN VARCHAR2 IS
+      v_trees VARCHAR2(1000);
+   BEGIN
+      SELECT MAX(folder_trees) INTO v_trees
+        FROM anon_meta.anon_inventory
+       WHERE table_name = 'STRUCTURE' AND column_name = 'CODE';
+      RETURN v_trees;
+   END folder_trees;
+
+
+   -- A structure row (alias t) is a folder row of a folder tree. The tree
+   -- names were limited to letters, digits, _ - and spaces when they were
+   -- read, so they can be written into a statement as they are.
+   FUNCTION folder_predicate RETURN VARCHAR2 IS
+      v_trees VARCHAR2(1000) := folder_trees;
+   BEGIN
+      IF v_trees IS NULL THEN
+         RETURN '1 = 0';
+      END IF;
+      RETURN 't.ecran IS NULL AND INSTR(''' || v_trees || ''', '','' || t.structure || '','') > 0';
+   END folder_predicate;
+
+
+   -- The rows of a column that hold identifiers - [only-where: ...] - as a
+   -- condition on alias t. NULL: every row.
+   FUNCTION row_scope_of(p_table IN VARCHAR2, p_column IN VARCHAR2) RETURN VARCHAR2 IS
+      v_scope VARCHAR2(1000);
+   BEGIN
+      SELECT MAX(row_scope) INTO v_scope
+        FROM anon_meta.anon_inventory
+       WHERE table_name = UPPER(p_table) AND column_name = UPPER(p_column);
+      RETURN v_scope;
+   END row_scope_of;
+
+
+   -- The column a MIXED column's groups are read from - [group: ...].
+   FUNCTION group_of(p_table IN VARCHAR2, p_column IN VARCHAR2) RETURN VARCHAR2 IS
+      v_group VARCHAR2(128);
+   BEGIN
+      SELECT MAX(group_by) INTO v_group
+        FROM anon_meta.anon_inventory
+       WHERE table_name = UPPER(p_table) AND column_name = UPPER(p_column);
+      RETURN v_group;
+   END group_of;
 
 
    -- PARALLEL hint, but only where it pays. Missing statistics are treated as
@@ -624,6 +701,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       v_wrong_type     PLS_INTEGER := 0;
       v_unmaskable     PLS_INTEGER := 0;
       v_masked         PLS_INTEGER := 0;
+      v_bad_scope      PLS_INTEGER := 0;
       v_ok             PLS_INTEGER := 0;
       v_width          PLS_INTEGER;
       v_type           VARCHAR2(30);
@@ -695,9 +773,11 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
 
          ELSE
             -- NULL_OUT. A nullable column is emptied. A NOT NULL character
-            -- column is overwritten with the marker, cut to its width. A NOT
-            -- NULL column of any other type has no valid masking value: it is
-            -- not skipped and it is not reported clean - the run does not start.
+            -- column is overwritten with the marker, cut to its width - which
+            -- removes the content as surely as emptying it, so it is said
+            -- nowhere but in the log. A NOT NULL column of any other type has
+            -- no valid masking value: it is not skipped and it is not reported
+            -- clean - the run does not start.
             IF v_nullable = 'N' AND v_type NOT IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
                v_unmaskable := v_unmaskable + 1;
                log_step('PREFLIGHT', v_object, r.rule, 'ERROR', NULL, NULL,
@@ -714,6 +794,23 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
                v_ok := v_ok + 1;
             END IF;
          END IF;
+
+         -- [only-where: ...] names a table and columns of its own. Tried here,
+         -- once, so that a name that does not exist on this instance stops the
+         -- run before anything changes rather than partway through.
+         IF r.rule = 'CODE' AND row_scope_of(r.table_name, r.column_name) IS NOT NULL THEN
+            BEGIN
+               EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM op.' || r.table_name || ' t WHERE '
+                              || row_scope_of(r.table_name, r.column_name) || ' AND ROWNUM = 1'
+                  INTO v_needed;
+            EXCEPTION
+               WHEN OTHERS THEN
+                  v_bad_scope := v_bad_scope + 1;
+                  log_step('PREFLIGHT', v_object, r.rule, 'ERROR', NULL, NULL,
+                           'its [only-where: ...] cannot be applied here: ' || SQLERRM);
+                  say('    NO SCOPE    ' || v_object || '  (' || SQLERRM || ')');
+            END;
+         END IF;
       END LOOP;
 
       say('    resolved .......... ' || v_ok);
@@ -722,12 +819,12 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       say('    too narrow ........ ' || v_too_narrow);
       say('    wrong type ........ ' || v_wrong_type);
       say('    cannot be masked .. ' || v_unmaskable);
-      IF v_masked > 0 THEN
-         say('    NOT NULL free text  ' || v_masked || '   (overwritten with a marker instead of emptied)');
+      IF v_bad_scope > 0 THEN
+         say('    scope invalid ..... ' || v_bad_scope || '   ([only-where: ...] cannot be applied)');
       END IF;
       say('');
 
-      g_blocking := g_blocking + v_too_narrow + v_wrong_type + v_unmaskable;
+      g_blocking := g_blocking + v_too_narrow + v_wrong_type + v_unmaskable + v_bad_scope;
       p_missing  := v_missing_table + v_missing_column;
    END check_inventory;
 
@@ -735,6 +832,82 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
    -- =========================================================================
    -- Preflight, part 2 - the identity plan
    -- =========================================================================
+
+   -- Codes found only in references: the values of a CODE,PARTY or
+   -- CODE,BANK_ACCOUNT column that are no identity of the column's domain -
+   -- the codes of master rows deleted in the past (a deal still names a bank
+   -- account closed and removed years ago). Recorded per column with the rows
+   -- that hold them; capture_identities then captures them like any other
+   -- identity, found only in references.
+   --
+   -- Not read for them:
+   --   a column whose notes say [no-harvest] - it holds other codes as well
+   --   the rows outside the column's [only-where: ...]
+   --   a blank value, or one longer than the master's own code column: no
+   --     deleted master can have had it
+   --   a replacement already in code_map - an earlier run's work
+   --   a CHAR column: its blank padding would make 'ABC  ' a code of its own
+   PROCEDURE harvest_references IS
+      v_domain VARCHAR2(10);
+      v_width  PLS_INTEGER;
+      v_known  VARCHAR2(1000);
+      v_type   VARCHAR2(128);
+      v_col    VARCHAR2(140);
+   BEGIN
+      DELETE FROM anon_meta.reference_harvest
+       WHERE run_id = g_run_id
+          OR run_id <> NVL((SELECT MAX(run_id) FROM anon_meta.anon_run
+                             WHERE run_mode = 'EXECUTE' AND status = 'COMPLETED'), -1);
+
+      FOR r IN (SELECT table_name, column_name, category, row_scope
+                  FROM anon_meta.anon_inventory
+                 WHERE rule = 'CODE' AND category IN ('PARTY', 'BANK_ACCOUNT') AND harvest = 'Y'
+                 ORDER BY seq) LOOP
+         CONTINUE WHEN NOT column_exists(r.table_name, r.column_name);
+
+         v_type := column_type(r.table_name, r.column_name);
+         IF v_type NOT IN ('VARCHAR2', 'NVARCHAR2') THEN
+            log_step('PREFLIGHT', 'references: ' || LOWER(r.table_name || '.' || r.column_name), 'CODE',
+                     'SKIPPED', NULL, NULL, v_type || ' column - not read for codes found only in references');
+            CONTINUE;
+         END IF;
+
+         v_col := 't.' || r.column_name;
+         IF r.category = 'PARTY' THEN
+            v_domain := 'PARTY';
+            SELECT MAX(char_length) INTO v_width
+              FROM all_tab_columns WHERE owner = 'OP' AND table_name = 'TIERS' AND column_name = 'CODE';
+            v_known := ' AND NOT EXISTS (SELECT 1 FROM op.tiers m WHERE m.code = ' || v_col || ')'
+                    || ' AND NOT EXISTS (SELECT 1 FROM op.structure s WHERE s.code = ' || v_col
+                    || '                    AND s.ecran = ''w_tiers'')';
+         ELSE
+            v_domain := 'ACCOUNT';
+            SELECT MAX(char_length) INTO v_width
+              FROM all_tab_columns WHERE owner = 'OP' AND table_name = 'COMPTE_BANQUE' AND column_name = 'CODE';
+            v_known := ' AND NOT EXISTS (SELECT 1 FROM op.compte_banque m WHERE m.code = ' || v_col || ')'
+                    || ' AND NOT EXISTS (SELECT 1 FROM op.structure s WHERE s.code = ' || v_col
+                    || '                    AND s.ecran = ''w_compte_banque'')';
+         END IF;
+
+         EXECUTE IMMEDIATE
+            'INSERT INTO anon_meta.reference_harvest (run_id, domain, old_code, table_name, column_name, n_rows)'
+         || ' SELECT :run_id, :domain, ' || v_col || ', :tab, :col, COUNT(*)'
+         || '   FROM op.' || r.table_name || ' t'
+         || '  WHERE TRIM(' || v_col || ') IS NOT NULL'
+         || '    AND LENGTH(' || v_col || ') <= :width'
+         || CASE WHEN r.row_scope IS NOT NULL THEN ' AND ' || r.row_scope END
+         || v_known
+         || '    AND NOT EXISTS (SELECT 1 FROM anon_meta.identity_inventory i'
+         || '                     WHERE i.domain = :domain2 AND i.old_code = ' || v_col || ')'
+         || '    AND NOT EXISTS (SELECT 1 FROM anon_meta.confirmed_identity c'
+         || '                     WHERE c.domain = :domain3 AND c.old_code = ' || v_col || ')'
+         || '    AND NOT EXISTS (SELECT 1 FROM anon_meta.code_map c WHERE c.new_code = ' || v_col || ')'
+         || '  GROUP BY ' || v_col
+            USING g_run_id, v_domain, r.table_name, r.column_name, v_width, v_domain, v_domain;
+      END LOOP;
+      COMMIT;
+   END harvest_references;
+
 
    -- Capture every identity, classify it, and decide its single translation.
    --
@@ -777,13 +950,15 @@ WITH pmap AS (
     GROUP BY NVL(m.old_code, x.code)
 ), nd AS (
    -- A node's role is its screen: w_compte_banque an account, w_tiers a
-   -- party, any other screen neither.
+   -- party, any other screen - or none - neither. A folder row an earlier
+   -- run renamed is read back as its original, party first.
    SELECT CASE WHEN x.ecran = 'w_compte_banque' THEN 'A'
                WHEN x.ecran = 'w_tiers' THEN 'P'
                ELSE 'O' END AS role,
           x.structure AS cls,
           CASE WHEN x.ecran = 'w_compte_banque' THEN NVL(am.old_code, x.code)
                WHEN x.ecran = 'w_tiers' THEN NVL(pm.old_code, x.code)
+               WHEN x.ecran IS NULL THEN COALESCE(pm.old_code, am.old_code, x.code)
                ELSE x.code END AS k,
           CASE WHEN x.ecran = 'w_compte_banque' THEN NVL2(am.old_code, 1, 0)
                WHEN x.ecran = 'w_tiers' THEN NVL2(pm.old_code, 1, 0)
@@ -823,6 +998,8 @@ WITH pmap AS (
    UNION SELECT 'ACCOUNT', k FROM nd WHERE role = 'A'
    UNION SELECT 'ACCOUNT', old_code FROM anon_meta.confirmed_identity WHERE domain = 'ACCOUNT'
    UNION SELECT 'ACCOUNT', old_code FROM anon_meta.identity_inventory WHERE domain = 'ACCOUNT'
+   -- codes found only in references (harvest_references)
+   UNION SELECT domain, old_code FROM anon_meta.reference_harvest WHERE run_id = :run_id
 ), f AS (
    SELECT ky.domain, ky.k,
           NVL(tf.n_master, 0)                     AS n_master,
@@ -852,12 +1029,17 @@ WITH pmap AS (
           -- Section 2A, in its exclusive order. A missing master is X_ even for
           -- a Compte/w_tiers node; an O flag needs a w_tiers node of any
           -- classification; ENTITY wins over another classification on the
-          -- same party; a NULL classification is not a counterparty.
+          -- same party; a NULL classification is not a counterparty. A flag N
+          -- tiers row with no structure node at all - an archived party,
+          -- removed from the tree - is a counterparty (part 2, item 7, agreed
+          -- 2026-10-22); one whose only nodes are on other screens is not.
           CASE WHEN domain = 'ACCOUNT'                                 THEN 'BANK_ACCOUNT'
                WHEN n_master = 0                                       THEN 'UNCLASSIFIED_PARTY'
                WHEN flag_state = 'O' AND party_node = 1                THEN 'PORTFOLIO'
                WHEN flag_state = 'N' AND entity_node = 1               THEN 'ENTITY'
-               WHEN flag_state = 'N' AND other_class_node = 1          THEN 'COUNTERPARTY'
+               WHEN flag_state = 'N' AND (other_class_node = 1
+                                          OR (party_node = 0 AND other_screen_node = 0))
+                                                                       THEN 'COUNTERPARTY'
                ELSE 'UNCLASSIFIED_PARTY' END AS cls_category,
           CASE WHEN domain = 'ACCOUNT'                                 THEN NULL
                WHEN n_master = 0                                       THEN 'MISSING_MASTER'
@@ -904,7 +1086,9 @@ SELECT :run_id, domain, k,
             ELSE 'EXISTING' END
   FROM c]';
 
-      EXECUTE IMMEDIATE v_sql USING g_run_id;
+      -- Two placeholders, in the order they appear: the harvest's run, then
+      -- the run the plan rows are written for.
+      EXECUTE IMMEDIATE v_sql USING g_run_id, g_run_id;
    EXCEPTION
       WHEN OTHERS THEN
          IF SQLCODE = -12899 THEN
@@ -963,41 +1147,6 @@ SELECT :run_id, domain, k,
                     AND (p.map_category IS NULL OR c.category <> p.map_category))
        WHERE p.run_id = g_run_id;
    END adopt_existing_maps;
-
-
-   -- What does a structure.pere holding this text point at?
-   --
-   -- Decided from the nodes that existed before anything was renamed, never
-   -- from the child row: an account node's parent is often a party node.
-   --
-   --   exactly one kind of node carries the text   -> that kind
-   --   no node carries it                          -> the one domain it is an
-   --                                                  identity of, if only one
-   --   party AND account nodes (or another screen) -> AMBIGUOUS: left alone and
-   --                                                  reported for review
-   PROCEDURE resolve_parent_roles IS
-   BEGIN
-      MERGE INTO anon_meta.identity_plan p
-      USING (SELECT old_code,
-                    CASE WHEN pn + an + onn = 1 THEN
-                              CASE WHEN pn = 1 THEN 'PARTY' WHEN an = 1 THEN 'ACCOUNT' ELSE 'OTHER' END
-                         WHEN pn + an + onn = 0 THEN
-                              CASE WHEN pi = 1 AND ai = 1 THEN 'AMBIGUOUS'
-                                   WHEN pi = 1 THEN 'PARTY'
-                                   ELSE 'ACCOUNT' END
-                         ELSE 'AMBIGUOUS' END AS parent_role
-               FROM (SELECT old_code,
-                            MAX(CASE WHEN domain = 'PARTY'   AND has_party_node   = 'Y' THEN 1 ELSE 0 END) AS pn,
-                            MAX(CASE WHEN domain = 'ACCOUNT' AND has_account_node = 'Y' THEN 1 ELSE 0 END) AS an,
-                            MAX(CASE WHEN has_other_screen_node = 'Y'                   THEN 1 ELSE 0 END) AS onn,
-                            MAX(CASE WHEN domain = 'PARTY'   THEN 1 ELSE 0 END)                            AS pi,
-                            MAX(CASE WHEN domain = 'ACCOUNT' THEN 1 ELSE 0 END)                            AS ai
-                       FROM anon_meta.identity_plan
-                      WHERE run_id = g_run_id
-                      GROUP BY old_code)) s
-         ON (p.run_id = g_run_id AND p.old_code = s.old_code)
-       WHEN MATCHED THEN UPDATE SET p.parent_role = s.parent_role;
-   END resolve_parent_roles;
 
 
    -- Each identity's three switches. Normally those of its category. When its
@@ -1118,9 +1267,9 @@ SELECT :run_id, domain, k,
          AND NOT EXISTS (SELECT 1 FROM anon_meta.code_map c WHERE c.new_code = p.old_code);
       IF v_n > 0 THEN
          block('identity inventory',
-               v_n || ' identifier(s) in tiers, compte_banque or structure look like generated '
-            || 'replacements but no mapping owns them. This copy looks already anonymized without '
-            || 'trustworthy provenance - reimport the raw data.', v_n);
+               v_n || ' identifier(s) in tiers, compte_banque, structure or a reference column look '
+            || 'like generated replacements but no mapping owns them. This copy looks already '
+            || 'anonymized without trustworthy provenance - reimport the raw data.', v_n);
       END IF;
 
       -- A replacement from code_map found where an original should be, and not
@@ -1251,12 +1400,14 @@ SELECT :run_id, domain, k,
       say('      The data does not say which kind of party these are. By reason, and by');
       say('      where each party was found (parties, not rows):');
       say('');
-      say('      reason                     parties      tiers   w_tiers node   other screen');
+      say('      reason                     parties      tiers   w_tiers node   other screen'
+          || '   only in references');
       FOR r IN (SELECT p.x_reason, NVL(MAX(d.label), LOWER(p.x_reason)) AS label,
                        COUNT(*)                                                   AS parties,
                        COUNT(CASE WHEN p.has_master = 'Y' THEN 1 END)            AS in_tiers,
                        COUNT(CASE WHEN p.has_party_node = 'Y' THEN 1 END)        AS party_node,
-                       COUNT(CASE WHEN p.has_other_screen_node = 'Y' THEN 1 END) AS other_screen
+                       COUNT(CASE WHEN p.has_other_screen_node = 'Y' THEN 1 END) AS other_screen,
+                       COUNT(CASE WHEN p.membership = 'REFERENCE_ONLY' THEN 1 END) AS refs_only
                   FROM anon_meta.identity_plan p
                   LEFT JOIN anon_meta.unclassified_reason d ON d.x_reason = p.x_reason
                  WHERE p.run_id = g_run_id AND p.domain = 'PARTY'
@@ -1264,10 +1415,10 @@ SELECT :run_id, domain, k,
                  GROUP BY p.x_reason
                  ORDER BY MAX(d.sort_order), p.x_reason) LOOP
          say('      ' || RPAD(r.label, 25) || LPAD(n(r.parties), 9) || LPAD(n(r.in_tiers), 11)
-             || LPAD(n(r.party_node), 15) || LPAD(n(r.other_screen), 15));
+             || LPAD(n(r.party_node), 15) || LPAD(n(r.other_screen), 15) || LPAD(n(r.refs_only), 21));
          log_step('PREFLIGHT', 'unclassified: ' || r.label, NULL, 'OK', r.parties, NULL,
                   'parties found in tiers ' || r.in_tiers || ', on a w_tiers node ' || r.party_node
-               || ', on another screen ' || r.other_screen);
+               || ', on another screen ' || r.other_screen || ', only in references ' || r.refs_only);
       END LOOP;
 
       IF g_id('UNCLASSIFIED_PARTY') = 'N' THEN
@@ -1315,6 +1466,67 @@ SELECT :run_id, domain, k,
       END IF;
       say('');
    END report_unclassified;
+
+
+   -- Codes found only in references, by column, and the structure nodes that
+   -- hold a client code but are left as they are by design. Counts only.
+   PROCEDURE report_references IS
+      v_other  NUMBER;
+      v_folder NUMBER;
+      v_any    BOOLEAN := FALSE;
+   BEGIN
+      -- The row totals are NOT aliased n_rows: an alias with the column's name
+      -- shadows it in ORDER BY and nests the SUM (ORA-00935).
+      FOR d IN (SELECT domain, COUNT(DISTINCT old_code) AS codes,
+                       COUNT(DISTINCT table_name || '.' || column_name) AS cols, SUM(n_rows) AS rows_held
+                  FROM anon_meta.reference_harvest
+                 WHERE run_id = g_run_id
+                 GROUP BY domain
+                 ORDER BY DECODE(domain, 'PARTY', 1, 2)) LOOP
+         IF NOT v_any THEN
+            say('    Codes found only in references - their master row was deleted');
+            v_any := TRUE;
+         END IF;
+         say('      ' || RPAD(CASE d.domain WHEN 'PARTY' THEN 'parties (X_, missing master) '
+                                            ELSE 'bank accounts (CB_) ' END, 34, '.')
+             || ' ' || RPAD(n(d.codes), 8) || 'in ' || d.cols || ' column' || CASE WHEN d.cols <> 1 THEN 's' END
+             || ', ' || n(d.rows_held) || ' row' || CASE WHEN d.rows_held <> 1 THEN 's' END);
+      END LOOP;
+      IF v_any THEN
+         FOR c IN (SELECT LOWER(table_name || '.' || column_name) AS obj, domain,
+                          COUNT(*) AS codes, SUM(n_rows) AS rows_held
+                     FROM anon_meta.reference_harvest
+                    WHERE run_id = g_run_id
+                    GROUP BY table_name, column_name, domain
+                    ORDER BY SUM(n_rows) DESC, 1) LOOP
+            say('        ' || RPAD(c.obj || ' ', 44, '.') || ' ' || RPAD(LOWER(c.domain), 9)
+                || LPAD(n(c.codes), 7) || ' code' || CASE WHEN c.codes <> 1 THEN 's' ELSE ' ' END
+                || LPAD(n(c.rows_held), 10) || ' row' || CASE WHEN c.rows_held <> 1 THEN 's' END);
+            log_step('PREFLIGHT', 'references: ' || c.obj, 'CODE', 'OK', c.rows_held, NULL,
+                     c.codes || ' ' || LOWER(c.domain) || ' code(s) found only in references');
+         END LOOP;
+         say('');
+      END IF;
+
+      -- Nodes on other screens, and folder rows of trees not in [folders: ...],
+      -- keep their code even when it is also a client identifier: a screen
+      -- other than w_tiers and w_compte_banque is not a party or an account.
+      EXECUTE IMMEDIATE
+         'SELECT COUNT(CASE WHEN t.ecran IS NOT NULL THEN 1 END), COUNT(CASE WHEN t.ecran IS NULL THEN 1 END)'
+      || '  FROM op.structure t'
+      || ' WHERE NVL(t.ecran, ''~'') NOT IN (''w_tiers'', ''w_compte_banque'')'
+      || '   AND NOT (' || folder_predicate || ')'
+      || '   AND t.code IN (SELECT p.old_code FROM anon_meta.identity_plan p WHERE p.run_id = :run_id)'
+         INTO v_other, v_folder USING g_run_id;
+      IF v_other + v_folder > 0 THEN
+         say('    Structure nodes that keep a code that is also a client identifier (by design)');
+         say('      on another screen ......................... ' || n(v_other));
+         say('      folder rows of a tree not in [folders: ...] ' || n(v_folder));
+         say('');
+         log_step('PREFLIGHT', 'structure: nodes kept', NULL, 'OK', v_other + v_folder, NULL,
+                  v_other || ' on other screens, ' || v_folder || ' folder rows outside the folder trees');
+      END IF;
+   END report_references;
 
 
    -- Counts only: never an identifier.
@@ -1430,6 +1642,7 @@ SELECT :run_id, domain, k,
       END IF;
       say('');
 
+      report_references;
       report_unclassified;
 
       -- The dataset, as counts, so the run record says what it ran against.
@@ -1480,9 +1693,9 @@ SELECT :run_id, domain, k,
                              WHERE run_mode = 'EXECUTE' AND status = 'COMPLETED'), -1);
       COMMIT;
 
+      harvest_references;
       capture_identities;
       adopt_existing_maps;
-      resolve_parent_roles;
       apply_switches;
       allocate_maps;
       COMMIT;
@@ -1552,17 +1765,71 @@ SELECT :run_id, domain, k,
        GROUP BY old_code
       HAVING COUNT(DISTINCT domain) = 2;
 
-      -- structure.pere: the translation of the domain its parent role names.
+      -- Every value that says which domain it belongs to - an original or a
+      -- replacement - for MIXED groups ([group: ...]): a group's other values
+      -- decide what a value that is both is in that group. A text that is a
+      -- party AND an account says nothing, so it is in neither list.
       INSERT INTO anon_meta.code_lookup (domain, old_code, new_code)
-      SELECT 'PERE', old_code, new_code
-        FROM anon_meta.identity_plan
-       WHERE run_id = g_run_id AND parent_role = domain
-         AND id_on = 'Y' AND new_code IS NOT NULL;
+      SELECT 'VALUE_P', v, NULL
+        FROM (SELECT old_code AS v FROM anon_meta.identity_plan WHERE run_id = g_run_id AND domain = 'PARTY'
+              UNION
+              SELECT new_code FROM anon_meta.identity_plan
+               WHERE run_id = g_run_id AND domain = 'PARTY' AND new_code IS NOT NULL)
+       WHERE v NOT IN (SELECT old_code FROM anon_meta.identity_plan WHERE run_id = g_run_id AND domain = 'ACCOUNT');
 
       INSERT INTO anon_meta.code_lookup (domain, old_code, new_code)
-      SELECT DISTINCT 'PERE_REVIEW', old_code, NULL
-        FROM anon_meta.identity_plan
-       WHERE run_id = g_run_id AND parent_role IN ('AMBIGUOUS', 'OTHER');
+      SELECT 'VALUE_A', v, NULL
+        FROM (SELECT old_code AS v FROM anon_meta.identity_plan WHERE run_id = g_run_id AND domain = 'ACCOUNT'
+              UNION
+              SELECT new_code FROM anon_meta.identity_plan
+               WHERE run_id = g_run_id AND domain = 'ACCOUNT' AND new_code IS NOT NULL)
+       WHERE v NOT IN (SELECT old_code FROM anon_meta.identity_plan WHERE run_id = g_run_id AND domain = 'PARTY');
+
+      -- The structure tree, node by node: what each node of each tree becomes.
+      --   w_compte_banque  the account's translation
+      --   w_tiers          the party's translation
+      --   no screen, in a folder tree, its code an identifier
+      --                    the party's translation, else the account's
+      --   anything else    its own code
+      -- A node an earlier run already renamed is keyed by its original, so a
+      -- resumed run still finds it - and its children still find it as their
+      -- parent. An identity whose renaming is off keeps its code.
+      DELETE FROM anon_meta.node_lookup;
+      EXECUTE IMMEDIATE q'[
+INSERT INTO anon_meta.node_lookup (tree, old_code, new_code, kind)
+WITH s AS (
+   SELECT DISTINCT NVL(x.structure, CHR(1)) AS tree, x.code,
+          CASE WHEN x.ecran = 'w_compte_banque' THEN 'ACCOUNT'
+               WHEN x.ecran = 'w_tiers' THEN 'PARTY'
+               WHEN x.ecran IS NULL AND INSTR(:trees, ',' || x.structure || ',') > 0 THEN 'FOLDER'
+               ELSE 'OTHER' END AS kind
+     FROM op.structure x
+    WHERE x.code IS NOT NULL
+), d AS (
+   SELECT s.tree, s.code, s.kind,
+          pa.old_code AS pa_old, pa.new_code AS pa_new, pa.id_on AS pa_on, pb.old_code AS pb_old,
+          aa.old_code AS aa_old, aa.new_code AS aa_new, aa.id_on AS aa_on, ab.old_code AS ab_old,
+          CASE WHEN pa.old_code IS NOT NULL OR pb.old_code IS NOT NULL THEN 'P'
+               WHEN aa.old_code IS NOT NULL OR ab.old_code IS NOT NULL THEN 'A' END AS dom
+     FROM s
+     LEFT JOIN anon_meta.identity_plan pa
+            ON pa.run_id = :r1 AND pa.domain = 'PARTY' AND pa.old_code = s.code AND s.kind IN ('PARTY', 'FOLDER')
+     LEFT JOIN anon_meta.identity_plan pb
+            ON pb.run_id = :r2 AND pb.domain = 'PARTY' AND pb.new_code = s.code AND s.kind IN ('PARTY', 'FOLDER')
+     LEFT JOIN anon_meta.identity_plan aa
+            ON aa.run_id = :r3 AND aa.domain = 'ACCOUNT' AND aa.old_code = s.code AND s.kind IN ('ACCOUNT', 'FOLDER')
+     LEFT JOIN anon_meta.identity_plan ab
+            ON ab.run_id = :r4 AND ab.domain = 'ACCOUNT' AND ab.new_code = s.code AND s.kind IN ('ACCOUNT', 'FOLDER')
+)
+SELECT tree, old_code, MAX(new_code), MAX(kind)
+  FROM (SELECT tree, kind,
+               CASE dom WHEN 'P' THEN NVL(pa_old, pb_old) WHEN 'A' THEN NVL(aa_old, ab_old) ELSE code END AS old_code,
+               CASE WHEN dom = 'P' AND pa_old IS NOT NULL AND pa_on = 'Y' AND pa_new IS NOT NULL THEN pa_new
+                    WHEN dom = 'A' AND aa_old IS NOT NULL AND aa_on = 'Y' AND aa_new IS NOT NULL THEN aa_new
+                    ELSE code END AS new_code
+          FROM d)
+ GROUP BY tree, old_code]'
+         USING folder_trees, g_run_id, g_run_id, g_run_id, g_run_id;
 
       -- Owner keys for DESCRIPTION and SELF_CODE: the original and the
       -- replacement both lead to the same identity and its one safe value.
@@ -1748,13 +2015,15 @@ SELECT :run_id, domain, k,
    -- established. Counted in both modes and logged REVIEW: they are client
    -- values still in place, and the verifier will not report a PASS while
    -- they remain.
+   -- p_less: rows of the set a dry run has counted as settled elsewhere.
    PROCEDURE count_review(
       p_table   IN VARCHAR2,
       p_column  IN VARCHAR2,
       p_set     IN VARCHAR2,
       p_filter  IN VARCHAR2,
       p_object  IN VARCHAR2,
-      p_message IN VARCHAR2)
+      p_message IN VARCHAR2,
+      p_less    IN NUMBER DEFAULT 0)
    IS
       v_rows NUMBER;
    BEGIN
@@ -1762,6 +2031,7 @@ SELECT :run_id, domain, k,
                      || ' IN (' || p_set || ')'
                      || CASE WHEN p_filter IS NOT NULL THEN ' AND ' || p_filter END
          INTO v_rows;
+      v_rows := v_rows - NVL(p_less, 0);
 
       IF v_rows > 0 THEN
          log_step('CODE', p_object, 'CODE', 'REVIEW', v_rows, NULL, p_message);
@@ -1770,12 +2040,161 @@ SELECT :run_id, domain, k,
    END count_review;
 
 
+   -- structure.code or structure.pere, from node_lookup. A node takes what its
+   -- own row of its tree became; a child's pere takes what its parent node in
+   -- the SAME tree became - so a parent and its children cannot disagree, and
+   -- a text that is a party node in one tree and an account node in another
+   -- is never a question. p_kind limits a structure.code pass to one kind of
+   -- node, so that each is counted on its own line.
+   PROCEDURE apply_node_set(p_column IN VARCHAR2, p_kind IN VARCHAR2, p_object IN VARCHAR2,
+                            p_enabled IN BOOLEAN) IS
+      v_start  NUMBER := DBMS_UTILITY.GET_TIME;
+      v_col    VARCHAR2(40) := 't.' || p_column;
+      v_match  VARCHAR2(1000);
+      v_rows   NUMBER;
+      v_x      NUMBER;
+      v_x_like VARCHAR2(20) := REPLACE(c_prefix_unclassified, '_', '\_') || '%';
+   BEGIN
+      IF NOT p_enabled THEN
+         log_step('CODE', p_object, 'CODE', 'DISABLED', NULL, NULL,
+                  'identifier renaming is off for every category these nodes can hold');
+         report(p_object, 'DISABLED');
+         RETURN;
+      END IF;
+
+      v_match := ' FROM anon_meta.node_lookup n WHERE n.tree = NVL(t.structure, CHR(1))'
+              || ' AND n.old_code = ' || v_col || ' AND n.new_code <> n.old_code'
+              || CASE WHEN p_kind IS NOT NULL THEN ' AND n.kind = ''' || p_kind || '''' END;
+
+      IF g_dry_run THEN
+         EXECUTE IMMEDIATE
+            'SELECT COUNT(*), COUNT(CASE WHEN n.new_code LIKE ''' || v_x_like || ''' ESCAPE ''\'' THEN 1 END)'
+         || '  FROM op.structure t JOIN anon_meta.node_lookup n ON n.tree = NVL(t.structure, CHR(1))'
+         || '   AND n.old_code = ' || v_col || ' AND n.new_code <> n.old_code'
+         || CASE WHEN p_kind IS NOT NULL THEN ' AND n.kind = ''' || p_kind || '''' END
+            INTO v_rows, v_x;
+         log_step('CODE', p_object, 'CODE', 'DRYRUN', v_rows, elapsed_ms(v_start), NULL, v_x);
+         report(p_object, 'DRYRUN', v_rows, v_x);
+         RETURN;
+      END IF;
+
+      EXECUTE IMMEDIATE
+         'UPDATE op.structure t SET ' || v_col || ' = (SELECT n.new_code' || v_match || ')'
+      || ' WHERE EXISTS (SELECT 1' || v_match || ')'
+      || ' RETURNING COUNT(CASE WHEN ' || v_col || ' LIKE ''' || v_x_like || ''' ESCAPE ''\'' THEN 1 END)'
+      || ' INTO :x'
+         RETURNING INTO v_x;
+      v_rows := SQL%ROWCOUNT;
+      COMMIT;
+
+      log_step('CODE', p_object, 'CODE',
+               CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows, elapsed_ms(v_start), NULL, v_x);
+      report(p_object, CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows, v_x);
+
+   EXCEPTION
+      WHEN OTHERS THEN
+         log_step('CODE', p_object, 'CODE', 'ERROR', NULL, elapsed_ms(v_start), SQLERRM);
+         say('    ERROR on ' || p_object || ': ' || SQLERRM);
+         RAISE;
+   END apply_node_set;
+
+
+   -- A MIXED value that is a party AND an account, in a column whose rows
+   -- form groups of one kind ([group: col] - a breakdown code, say): it takes
+   -- the kind of its group's other values, an original or a replacement. A
+   -- group whose other values are of both kinds, or of none, cannot say: those
+   -- rows are left for review. Only a table: a view has no ROWID to merge on.
+   PROCEDURE resolve_mixed_groups(p_table IN VARCHAR2, p_column IN VARCHAR2, p_group IN VARCHAR2,
+                                  p_scope IN VARCHAR2, p_object IN VARCHAR2) IS
+      v_start  NUMBER := DBMS_UTILITY.GET_TIME;
+      v_pick   VARCHAR2(4000);
+      v_rows   NUMBER;
+      v_x      NUMBER;
+      v_n      NUMBER;
+      v_x_like VARCHAR2(20) := REPLACE(c_prefix_unclassified, '_', '\_') || '%';
+      c_set    CONSTANT VARCHAR2(200) :=
+         'SELECT l.old_code FROM anon_meta.code_lookup l WHERE l.domain = ''AMBIGUOUS''';
+      c_why    CONSTANT VARCHAR2(400) :=
+         'values that are both a party and a bank-account identifier, in a group whose other values '
+      || 'are of both kinds or of none - left unchanged; a reviewed decision is needed';
+   BEGIN
+      SELECT COUNT(*) INTO v_n FROM all_tables WHERE owner = 'OP' AND table_name = UPPER(p_table);
+      IF v_n = 0 OR NOT column_exists(p_table, p_group) OR NOT any_on(g_id, categories) THEN
+         count_review(p_table, p_column, c_set, p_scope, p_object || ' [party AND account]',
+                      c_why || CASE WHEN v_n > 0 AND NOT column_exists(p_table, p_group)
+                                    THEN ' ([group: ' || LOWER(p_group) || '] names no column here)' END);
+         RETURN;
+      END IF;
+
+      -- The rows to settle, each with the replacement it takes.
+      v_pick :=
+         'SELECT t.ROWID AS rid, l.new_code'
+      || '  FROM op.' || p_table || ' t'
+      || '  JOIN (SELECT h.' || p_group || ' AS grp,'
+      || '               CASE WHEN COUNT(CASE WHEN d.domain = ''VALUE_P'' THEN 1 END) > 0'
+      || '                     AND COUNT(CASE WHEN d.domain = ''VALUE_A'' THEN 1 END) = 0 THEN ''PARTY'''
+      || '                    WHEN COUNT(CASE WHEN d.domain = ''VALUE_A'' THEN 1 END) > 0'
+      || '                     AND COUNT(CASE WHEN d.domain = ''VALUE_P'' THEN 1 END) = 0 THEN ''ACCOUNT'''
+      || '               END AS dom'
+      || '          FROM op.' || p_table || ' h'
+      || '          JOIN anon_meta.code_lookup d'
+      || '            ON d.domain IN (''VALUE_P'', ''VALUE_A'') AND d.old_code = h.' || p_column
+      || '         GROUP BY h.' || p_group || ') g ON g.grp = t.' || p_group
+      || '  JOIN anon_meta.code_lookup l ON l.domain = g.dom AND l.old_code = t.' || p_column
+      || ' WHERE t.' || p_column || ' IN (' || c_set || ')'
+      || CASE WHEN p_scope IS NOT NULL THEN ' AND ' || p_scope END;
+
+      EXECUTE IMMEDIATE
+         'SELECT COUNT(*), COUNT(CASE WHEN s.new_code LIKE ''' || v_x_like || ''' ESCAPE ''\'' THEN 1 END)'
+      || '  FROM (' || v_pick || ') s'
+         INTO v_rows, v_x;
+
+      IF g_dry_run THEN
+         IF v_rows > 0 THEN
+            log_step('CODE', p_object || ' [party AND account, by group]', 'CODE', 'DRYRUN', v_rows,
+                     elapsed_ms(v_start), NULL, v_x);
+            report(p_object || ' [party AND account, by group]', 'DRYRUN', v_rows, v_x);
+         END IF;
+         count_review(p_table, p_column, c_set, p_scope, p_object || ' [party AND account]', c_why, v_rows);
+         RETURN;
+      END IF;
+
+      IF v_rows > 0 THEN
+         EXECUTE IMMEDIATE
+            'MERGE INTO op.' || p_table || ' t USING (' || v_pick || ') s ON (t.ROWID = s.rid)'
+         || ' WHEN MATCHED THEN UPDATE SET t.' || p_column || ' = s.new_code';
+         v_rows := SQL%ROWCOUNT;
+         COMMIT;
+         log_step('CODE', p_object || ' [party AND account, by group]', 'CODE', 'OK', v_rows,
+                  elapsed_ms(v_start), NULL, v_x);
+         report(p_object || ' [party AND account, by group]', 'OK', v_rows, v_x);
+      END IF;
+      count_review(p_table, p_column, c_set, p_scope, p_object || ' [party AND account]', c_why);
+
+   EXCEPTION
+      WHEN OTHERS THEN
+         log_step('CODE', p_object || ' [party AND account, by group]', 'CODE', 'ERROR', NULL,
+                  elapsed_ms(v_start), SQLERRM);
+         say('    ERROR on ' || p_object || ': ' || SQLERRM);
+         RAISE;
+   END resolve_mixed_groups;
+
+
    -- One CODE column, by its domain.
    PROCEDURE apply_code(p_table IN VARCHAR2, p_column IN VARCHAR2, p_category IN VARCHAR2) IS
-      v_object   VARCHAR2(300) := LOWER(p_table) || '.' || LOWER(p_column);
-      c_account  CONSTANT VARCHAR2(100) := 't.ecran = ''w_compte_banque''';
-      c_party    CONSTANT VARCHAR2(100) := 't.ecran = ''w_tiers''';
-      c_other    CONSTANT VARCHAR2(200) := 'NVL(t.ecran, ''~'') NOT IN (''w_compte_banque'', ''w_tiers'')';
+      v_object VARCHAR2(300)  := LOWER(p_table) || '.' || LOWER(p_column);
+      v_scope  VARCHAR2(1000) := row_scope_of(p_table, p_column);
+      v_group  VARCHAR2(128)  := group_of(p_table, p_column);
+      v_n      NUMBER;
+      c_set    CONSTANT VARCHAR2(200) :=
+         'SELECT l.old_code FROM anon_meta.code_lookup l WHERE l.domain = ''AMBIGUOUS''';
+      -- A child whose parent has no node in the child's own tree - by its
+      -- original code, or by what it became.
+      c_no_parent CONSTANT VARCHAR2(400) :=
+         'NOT EXISTS (SELECT 1 FROM anon_meta.node_lookup n WHERE n.tree = NVL(t.structure, CHR(1))'
+      || ' AND n.old_code = t.pere)'
+      || ' AND NOT EXISTS (SELECT 1 FROM anon_meta.node_lookup n WHERE n.tree = NVL(t.structure, CHR(1))'
+      || ' AND n.new_code = t.pere)';
    BEGIN
       IF NOT column_exists(p_table, p_column) THEN
          log_step('CODE', v_object, 'CODE', 'SKIPPED', NULL, NULL, 'object not found');
@@ -1784,41 +2203,49 @@ SELECT :run_id, domain, k,
       END IF;
 
       IF p_category = 'PARTY' THEN
-         apply_lookup(p_table, p_column, 'PARTY', NULL, v_object, any_on(g_id, party_categories));
+         apply_lookup(p_table, p_column, 'PARTY', v_scope, v_object, any_on(g_id, party_categories));
 
       ELSIF p_category = 'BANK_ACCOUNT' THEN
-         apply_lookup(p_table, p_column, 'ACCOUNT', NULL, v_object, g_id('BANK_ACCOUNT') = 'Y');
+         apply_lookup(p_table, p_column, 'ACCOUNT', v_scope, v_object, g_id('BANK_ACCOUNT') = 'Y');
 
       ELSIF p_category = 'MIXED' THEN
-         apply_lookup(p_table, p_column, 'MIXED', NULL, v_object, any_on(g_id, categories));
-         count_review(p_table, p_column,
-                      'SELECT l.old_code FROM anon_meta.code_lookup l WHERE l.domain = ''AMBIGUOUS''',
-                      NULL, v_object || ' [party AND account]',
-                      'values that are both a party and a bank-account identifier - left unchanged; '
-                   || 'a reviewed decision on what this column holds is needed');
+         apply_lookup(p_table, p_column, 'MIXED', v_scope, v_object, any_on(g_id, categories));
+         IF v_group IS NOT NULL THEN
+            resolve_mixed_groups(p_table, p_column, v_group, v_scope, v_object);
+         ELSE
+            count_review(p_table, p_column, c_set, v_scope, v_object || ' [party AND account]',
+                         'values that are both a party and a bank-account identifier - left unchanged; '
+                      || 'a reviewed decision on what this column holds is needed');
+         END IF;
 
       ELSIF p_category = 'NODE_ROLE' AND UPPER(p_table) = 'STRUCTURE' AND UPPER(p_column) = 'CODE' THEN
-         -- A structure node is a party node or an account node by its screen,
-         -- never by its text. The two predicates are disjoint, so no row can be
-         -- rewritten by both - processing order is not what keeps them apart.
-         apply_lookup(p_table, p_column, 'ACCOUNT', c_account, v_object || ' [account nodes]',
-                      g_id('BANK_ACCOUNT') = 'Y');
-         apply_lookup(p_table, p_column, 'PARTY', c_party, v_object || ' [party nodes]',
-                      any_on(g_id, party_categories));
-         count_review(p_table, p_column,
-                      'SELECT p.old_code FROM anon_meta.identity_plan p WHERE p.run_id = '
-                   || g_run_id, c_other, v_object || ' [other screens]',
-                      'nodes on other screens whose code is a client identifier - left unchanged; '
-                   || 'their role needs a reviewed decision');
+         -- A node is renamed by its screen, or as a folder row of a folder
+         -- tree - never by its text alone. A node on any other screen keeps its
+         -- code: such a screen is not a party or an account.
+         apply_node_set('CODE', 'ACCOUNT', v_object || ' [account nodes]', g_id('BANK_ACCOUNT') = 'Y');
+         apply_node_set('CODE', 'PARTY',   v_object || ' [party nodes]',   any_on(g_id, party_categories));
+         IF folder_trees IS NOT NULL THEN
+            apply_node_set('CODE', 'FOLDER', v_object || ' [folders]', any_on(g_id, categories));
+         END IF;
 
       ELSIF p_category = 'NODE_ROLE' AND UPPER(p_table) = 'STRUCTURE' AND UPPER(p_column) = 'PERE' THEN
-         -- The parent's own typed translation - never the child's domain.
-         apply_lookup(p_table, p_column, 'PERE', NULL, v_object, any_on(g_id, categories));
-         count_review(p_table, p_column,
-                      'SELECT l.old_code FROM anon_meta.code_lookup l WHERE l.domain = ''PERE_REVIEW''',
-                      NULL, v_object || ' [parent role unresolved]',
-                      'parents whose text is a party and an account node, or a node on another '
-                   || 'screen - left unchanged; the intended parent needs review');
+         -- What the parent node of the same tree became.
+         apply_node_set('PERE', NULL, v_object || ' [parent in its tree]', any_on(g_id, categories));
+
+         -- A parent with no node in the child's tree. None in the data the rule
+         -- was built on; should there be one, it takes the translation of the
+         -- one domain its text belongs to, and is left for review when it is
+         -- both.
+         EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM op.structure t WHERE t.pere IS NOT NULL AND ' || c_no_parent
+            INTO v_n;
+         IF v_n > 0 THEN
+            apply_lookup(p_table, p_column, 'MIXED', c_no_parent, v_object || ' [parent not in its tree]',
+                         any_on(g_id, categories));
+            count_review(p_table, p_column, c_set, c_no_parent,
+                         v_object || ' [parent not in its tree, party AND account]',
+                         'parents with no node in the child''s tree whose text is both a party and a '
+                      || 'bank account - left unchanged; the intended parent needs review');
+         END IF;
 
       ELSE
          RAISE_APPLICATION_ERROR(-20015,
@@ -1826,6 +2253,51 @@ SELECT :run_id, domain, k,
          || '21_validate_inventory.sql should have stopped this.');
       END IF;
    END apply_code;
+
+
+   -- Empties one free-text column on the rows p_filter selects (alias t): NULL
+   -- where the column takes it; the marker, cut to the column's width, where it
+   -- does not - a NOT NULL column, or one whose NULL Oracle refuses at run time
+   -- (ORA-01407: a NOT NULL constraint that is not validated, so the
+   -- dictionary calls the column nullable). Both remove the content, and
+   -- neither is reported as anything but done. Returns the rows changed.
+   FUNCTION empty_text(p_table IN VARCHAR2, p_column IN VARCHAR2, p_filter IN VARCHAR2) RETURN NUMBER IS
+      v_nullable VARCHAR2(1);
+      v_type     VARCHAR2(128);
+      v_width    PLS_INTEGER;
+      v_mask     VARCHAR2(30);
+      v_where    VARCHAR2(4000) := CASE WHEN p_filter IS NOT NULL THEN ' AND (' || p_filter || ')' END;
+      e_null_refused EXCEPTION;
+      PRAGMA EXCEPTION_INIT(e_null_refused, -1407);
+   BEGIN
+      SELECT MAX(nullable), MAX(data_type), MAX(char_length)
+        INTO v_nullable, v_type, v_width
+        FROM all_tab_columns
+       WHERE owner = 'OP' AND table_name = UPPER(p_table) AND column_name = UPPER(p_column);
+
+      IF v_nullable = 'Y' THEN
+         BEGIN
+            EXECUTE IMMEDIATE 'UPDATE op.' || p_table || ' t SET t.' || p_column || ' = NULL'
+                           || ' WHERE t.' || p_column || ' IS NOT NULL' || v_where;
+            RETURN SQL%ROWCOUNT;
+         EXCEPTION
+            WHEN e_null_refused THEN
+               NULL;   -- the failed statement changed nothing: the marker below
+         END;
+      END IF;
+
+      IF v_type NOT IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
+         RAISE_APPLICATION_ERROR(-20017,
+            LOWER(p_table) || '.' || LOWER(p_column) || ' refuses NULL and is ' || v_type
+         || ': it can be neither emptied nor masked.');
+      END IF;
+
+      v_mask := SUBSTR(c_mask_text, 1, v_width);
+      EXECUTE IMMEDIATE 'UPDATE op.' || p_table || ' t SET t.' || p_column || ' = :m'
+                     || ' WHERE t.' || p_column || ' <> :m2' || v_where
+         USING v_mask, v_mask;
+      RETURN SQL%ROWCOUNT;
+   END empty_text;
 
 
    -- All NULL_OUT columns of one table, in a single statement.
@@ -1846,6 +2318,8 @@ SELECT :run_id, domain, k,
       v_type     VARCHAR2(30);
       v_width    PLS_INTEGER;
       v_mask     VARCHAR2(30);
+      e_null_refused EXCEPTION;
+      PRAGMA EXCEPTION_INIT(e_null_refused, -1407);
    BEGIN
       IF NOT table_exists(p_table) THEN
          FOR r IN (SELECT column_name FROM anon_meta.anon_inventory
@@ -1925,8 +2399,22 @@ SELECT :run_id, domain, k,
       v_sql := 'UPDATE ' || parallel_hint(p_table) || 'op.' || p_table
             || ' SET ' || v_set || ' WHERE ' || v_where;
 
-      EXECUTE IMMEDIATE v_sql;
-      v_rows := SQL%ROWCOUNT;
+      BEGIN
+         EXECUTE IMMEDIATE v_sql;
+         v_rows := SQL%ROWCOUNT;
+      EXCEPTION
+         WHEN e_null_refused THEN
+            -- A column the dictionary calls nullable refused NULL. Column by
+            -- column, then: each emptied where it can be, the marker where it
+            -- cannot (empty_text). The failed statement changed nothing.
+            v_rows := 0;
+            FOR r IN (SELECT column_name FROM anon_meta.anon_inventory
+                       WHERE table_name = p_table AND rule = 'NULL_OUT'
+                       ORDER BY seq) LOOP
+               CONTINUE WHEN NOT column_exists(p_table, r.column_name);
+               v_rows := v_rows + empty_text(p_table, r.column_name, NULL);
+            END LOOP;
+      END;
       COMMIT;
 
       log_step('NULL_OUT', v_object, 'NULL_OUT',
@@ -2089,6 +2577,22 @@ SELECT :run_id, domain, k,
             merge_owned(p_table, p_rule, v_columns, 'PARTY', NULL, c_party,
                         v_object || ' [party nodes]');
          END IF;
+         -- A folder row named after a client: the identity its code is - the
+         -- party first, as for its code. Every other folder row's text is
+         -- free text, emptied whatever the switches (apply_folder_text).
+         IF folder_trees IS NOT NULL THEN
+            IF any_on(v_switches, party_categories) THEN
+               merge_owned(p_table, p_rule, v_columns, 'PARTY', NULL, folder_predicate,
+                           v_object || ' [party folders]');
+            END IF;
+            IF v_switches('BANK_ACCOUNT') = 'Y' THEN
+               merge_owned(p_table, p_rule, v_columns, 'ACCOUNT', NULL,
+                           folder_predicate || ' AND NOT EXISTS (SELECT 1 FROM anon_meta.identity_plan pp'
+                        || ' WHERE pp.run_id = ' || g_run_id || ' AND pp.domain = ''PARTY'''
+                        || ' AND (pp.old_code = t.code OR pp.new_code = t.code))',
+                           v_object || ' [account folders]');
+            END IF;
+         END IF;
       ELSIF p_category = 'BANK_ACCOUNT' THEN
          merge_owned(p_table, p_rule, v_columns, 'ACCOUNT', NULL, NULL, v_object);
       ELSIF p_category = 'PARTY' THEN
@@ -2101,6 +2605,51 @@ SELECT :run_id, domain, k,
          || '21_validate_inventory.sql should have stopped this.');
       END IF;
    END apply_self_code;
+
+
+   -- The text of structure's folder rows - rows with no screen. A folder row
+   -- named after a client (in a folder tree, its code an identifier) carries
+   -- that identity's replacement as its label, under the label switches
+   -- (apply_self_code). Every other folder row's text - 'Fournisseurs <client>
+   -- rejets' - is free text: emptied in every tree, whatever the switches, as
+   -- a NULL_OUT column is. structure.description is NOT NULL in the
+   -- application, so it gets the marker.
+   PROCEDURE apply_folder_text IS
+      v_start  NUMBER := DBMS_UTILITY.GET_TIME;
+      v_object CONSTANT VARCHAR2(100) := 'structure.description [folder rows]';
+      v_filter VARCHAR2(2000);
+      v_rows   NUMBER;
+   BEGIN
+      IF NOT column_exists('STRUCTURE', 'DESCRIPTION') OR NOT column_exists('STRUCTURE', 'ECRAN') THEN
+         RETURN;
+      END IF;
+
+      v_filter := 't.ecran IS NULL AND NOT (' || folder_predicate
+               || ' AND EXISTS (SELECT 1 FROM anon_meta.identity_plan pp WHERE pp.run_id = ' || g_run_id
+               || ' AND (pp.old_code = t.code OR pp.new_code = t.code)))';
+
+      IF g_dry_run THEN
+         EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM op.structure t WHERE t.description IS NOT NULL'
+                        || ' AND t.description <> SUBSTR(''' || c_mask_text || ''', 1, LENGTH(t.description))'
+                        || ' AND ' || v_filter
+            INTO v_rows;
+         log_step('NULL_OUT', v_object, 'NULL_OUT', 'DRYRUN', v_rows, elapsed_ms(v_start));
+         report(v_object, 'DRYRUN', v_rows);
+         RETURN;
+      END IF;
+
+      v_rows := empty_text('STRUCTURE', 'DESCRIPTION', v_filter);
+      COMMIT;
+      log_step('NULL_OUT', v_object, 'NULL_OUT',
+               CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows, elapsed_ms(v_start));
+      report(v_object, CASE WHEN v_rows > 0 THEN 'OK' ELSE 'NOOP' END, v_rows);
+
+   EXCEPTION
+      WHEN OTHERS THEN
+         log_step('NULL_OUT', v_object, 'NULL_OUT', 'ERROR', NULL, elapsed_ms(v_start), SQLERRM);
+         say('    ERROR on ' || v_object || ': ' || SQLERRM);
+         RAISE;
+   END apply_folder_text;
 
 
    -- NULL counts of every SELF_CODE column before masking, so the verifier can
@@ -2151,6 +2700,13 @@ SELECT :run_id, domain, k,
                  ORDER BY MIN(seq)) LOOP
          apply_null_out(t.table_name);
       END LOOP;
+
+      -- The folder rows' text, when the inventory covers structure.description.
+      SELECT COUNT(*) INTO v_rows
+        FROM anon_meta.anon_inventory WHERE table_name = 'STRUCTURE' AND column_name = 'DESCRIPTION';
+      IF v_rows > 0 THEN
+         apply_folder_text;
+      END IF;
       say('');
 
       say('  --- Identifiers -----------------------------------------------');

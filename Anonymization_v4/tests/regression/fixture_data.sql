@@ -5,7 +5,9 @@
 --
 -- Each identity is named after the case it exercises. The expected category,
 -- reason and outcome of every one is asserted in assert_core.sql; the cases
--- come from section 7, 7A and 6 of "fixes+needed_in_v4.txt".
+-- come from section 7, 7A and 6 of "fixes+needed_in_v4.txt", and items 1, 2B,
+-- 3 and 5C of "fixes+needed_in_v4-part2.txt". fixture_part2.sql adds the
+-- cases of the other part-2 items, scenario by scenario.
 --
 -- This is the CORE fixture: with every switch on and structure-only accounts
 -- approved, a run on it must verify PASS. fixture_review.sql adds the cases
@@ -24,9 +26,12 @@ WHENEVER SQLERROR EXIT FAILURE
 --   CPTC  flag N + Compte node on w_tiers         -> COUNTERPARTY
 --   EOVL  flag N + Entite AND custom nodes        -> ENTITY (precedence, logged)
 --   POVL  flag O + Entite AND custom nodes        -> PORTFOLIO
---   NFLG  flag NULL + Entite node                 -> X_  UNKNOWN_FLAG
+--   NFLG  flag NULL + Entite node                 -> X_  UNKNOWN_FLAG (has a
+--                                                      phone - masked like any party's)
 --   IFLG  flag '?' + Entite node                  -> X_  UNKNOWN_FLAG
---   NSTN  flag N, no structure node at all        -> X_  NO_STRUCTURE (has
+--   NSTN  flag N, no structure node at all        -> COUNTERPARTY: an archived
+--                                                      party (part 2, item 7) - was
+--                                                      X_ NO_STRUCTURE (has
 --                                                      description, address,
 --                                                      phone - all must be masked)
 --   NSTO  flag O, no structure node               -> X_  NO_STRUCTURE
@@ -45,7 +50,7 @@ SELECT 'CPTN', 'N', 'Counterparty N',   '2 Cpty Street', NULL, '0202', '0203', N
 SELECT 'CPTC', 'N', 'Counterparty C',   NULL, NULL, NULL, NULL, NULL, 'Martin', NULL, NULL, 'O', NULL FROM dual UNION ALL
 SELECT 'EOVL', 'N', 'Overlap entity',   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'N', NULL FROM dual UNION ALL
 SELECT 'POVL', 'O', 'Overlap portfolio',NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'N', NULL FROM dual UNION ALL
-SELECT 'NFLG', NULL,'Null flag party',  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM dual UNION ALL
+SELECT 'NFLG', NULL,'Null flag party',  NULL, NULL, '0303', NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM dual UNION ALL
 SELECT 'IFLG', '?', 'Invalid flag',     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'N', NULL FROM dual UNION ALL
 SELECT 'NSTN', 'N', 'Orphan party N',   '9 Orphan Lane', 'Floor 2', '0909', NULL, 'o@orphan.test', 'Durand', '13', NULL, 'O', NULL FROM dual UNION ALL
 SELECT 'NSTO', 'O', 'Orphan portfolio', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'N', NULL FROM dual UNION ALL
@@ -116,16 +121,40 @@ SELECT 'CHLD',   'O', NULL,              NULL,   NULL,   NULL,      NULL FROM du
 -- histo_operation: PARTY columns, BANK_ACCOUNT columns, a MIXED column and
 -- free text. Row 3 is THE regression: the same text SHRD in a party column and
 -- in an account column must get two different replacements.
+--   X              in a party column, no tiers row, no node: a party whose tiers
+--                  row was deleted - X_, found only in references
+--   tiers_domicile a bank's name, a party code, an account code: all free text
+--   tiers_iban_compte  an account NUMBER: [no-harvest], never captured
 INSERT INTO op.histo_operation (id, entite, contrepartie, compensateur, clearing_member,
-                                compte_tiers, compte_entite, tiers_libelle, description, groupe_1)
-SELECT 1, 'ENTN', 'CPTC', 'ENTN', 'ENTN',   'BKONLY', 'BKNULL', 'Cpty C free text', 'free', 'g' FROM dual UNION ALL
-SELECT 2, 'Z',    'NMCP', 'CPTN', 'BKONLY', 'Q',      NULL,     NULL,               NULL,   NULL FROM dual UNION ALL
-SELECT 3, 'SHRD', 'SHRD', NULL,   NULL,     'SHRD',   'SHRD',   'Shared',           'x',    NULL FROM dual UNION ALL
-SELECT 4, 'NSTN', 'X',    NULL,   'CPTN',   'NODEONLY', NULL,   NULL,               NULL,   NULL FROM dual;
+                                compte_tiers, compte_entite, tiers_libelle, tiers_domicile,
+                                tiers_iban_compte, description, groupe_1)
+SELECT 1, 'ENTN', 'CPTC', 'ENTN', 'ENTN',   'BKONLY', 'BKNULL', 'Cpty C free text', 'Bank Branch Centre',
+       'XX00TESTIBAN0000000001', 'free', 'g' FROM dual UNION ALL
+SELECT 2, 'Z',    'NMCP', 'CPTN', 'BKONLY', 'Q',      NULL,     NULL,               'ENTN',
+       NULL, NULL,   NULL FROM dual UNION ALL
+SELECT 3, 'SHRD', 'SHRD', NULL,   NULL,     'SHRD',   'SHRD',   'Shared',           'BKONLY',
+       NULL, 'x',    NULL FROM dual UNION ALL
+SELECT 4, 'NSTN', 'X',    NULL,   'CPTN',   'NODEONLY', NULL,   NULL,               NULL,
+       NULL, NULL,   NULL FROM dual;
 
-INSERT INTO op.ventiler_compte (id, valeur_1, valeur_2)
-SELECT 1, 'CPTC', 'BKNULL' FROM dual UNION ALL
-SELECT 2, 'EUR',  NULL     FROM dual;
+-- Breakdowns G1 and G2: no value of them is both a party and an account.
+INSERT INTO op.ventiler_compte (id, code, valeur_1, valeur_2)
+SELECT 1, 'G1', 'CPTC', 'BKNULL' FROM dual UNION ALL
+SELECT 2, 'G2', 'EUR',  NULL     FROM dual;
+
+-- A report of bank accounts and a report of cash-flow posts. On the second,
+-- ENTN is a post's code that happens to equal a party's: it is not touched.
+-- The lines' labels are free text.
+INSERT INTO op.param_fiche_en_valeur (code, type)
+SELECT 'ACCOUNTS', 'FicValComp' FROM dual UNION ALL
+SELECT 'FLOWS',    'FicValFlu'  FROM dual;
+INSERT INTO op.param_fiche_val_detail (id, code_tableau, code, description)
+SELECT 1, 'ACCOUNTS', 'BKONLY', 'Main account at a real bank' FROM dual UNION ALL
+SELECT 2, 'FLOWS',    'ENTN',   'Commissions'                 FROM dual UNION ALL
+SELECT 3, 'FLOWS',    'FLX01',  'Customer flows'              FROM dual;
+
+-- A condition code, in a CODE,PARTY column marked [no-harvest].
+INSERT INTO op.echelle_condition (code, libelle) VALUES ('CND01', 'Overdraft rate');
 
 INSERT INTO op.param_cpta_reg_gen (id, portefeuille, compte_ana)
 SELECT 1, 'PCUS', 'ENTN'   FROM dual UNION ALL

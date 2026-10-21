@@ -36,6 +36,32 @@
 --   tiers.code is PARTY, compte_banque.code is BANK_ACCOUNT, structure.code
 --   and structure.pere are NODE_ROLE; tiers labels and attributes belong to
 --   parties and compte_banque ones to accounts.
+--
+-- ----------------------------------------------------------------------------
+-- COLUMN OPTIONS - the [bracketed] words of the notes field
+--
+--   [no-harvest]     CODE,PARTY or CODE,BANK_ACCOUNT. Without it, a value of
+--                    the column that is no identity of its domain is the code
+--                    of a master row deleted in the past, and is captured as
+--                    one (a party X_ MISSING_MASTER, an account CB_). With it,
+--                    such a value is something else - a BBAN, an IBAN, a
+--                    condition code - and stays as it is.
+--   [only-where: <col> in <table>.<col> where <col> = <value>]
+--                    CODE. The column holds identifiers only on the rows whose
+--                    <col> names a <table> row with that value; the other rows
+--                    are left out of the renaming, the harvest and the checks.
+--   [group: <col>]   CODE,MIXED. Rows with the same <col> hold one kind of
+--                    code: a value that is a party AND an account takes the
+--                    kind of the group's other values. Without one, or when
+--                    the group holds both kinds, it is left for review.
+--   [folders: <tree> <tree> ...]
+--                    structure.code. The structure trees whose folder rows -
+--                    rows with no screen - are named after clients: such a row
+--                    whose code is a party or account identifier is renamed.
+--
+-- They are parsed here into anon_inventory (harvest, row_scope, group_by,
+-- folder_trees), where the engine and the verifier read them. An option that
+-- is misspelt or on the wrong kind of column stops the run here.
 -- ============================================================================
 
 SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
@@ -141,9 +167,104 @@ BEGIN
       END IF;
    END LOOP;
 
+   -- The column options. Every CODE,PARTY and CODE,BANK_ACCOUNT column is
+   -- harvested unless its notes say [no-harvest].
+   UPDATE anon_meta.anon_inventory
+      SET harvest      = CASE WHEN rule = 'CODE' AND category IN ('PARTY', 'BANK_ACCOUNT') THEN 'Y' END,
+          row_scope    = NULL,
+          group_by     = NULL,
+          folder_trees = NULL;
+
+   FOR r IN (SELECT ROWID AS rid, table_name, column_name, rule, category, source, notes
+               FROM anon_meta.anon_inventory
+              WHERE INSTR(notes, '[') > 0
+              ORDER BY seq) LOOP
+      DECLARE
+         c_scope CONSTANT VARCHAR2(300) :=
+            '^\[only-where:\s*([a-z][a-z0-9_$#]*)\s+in\s+([a-z][a-z0-9_$#]*)\.([a-z][a-z0-9_$#]*)'
+         || '\s+where\s+([a-z][a-z0-9_$#]*)\s*=\s*([a-z0-9_-]+)\s*\]$';
+         c_group CONSTANT VARCHAR2(100) := '^\[group:\s*([a-z][a-z0-9_$#]*)\s*\]$';
+         c_trees CONSTANT VARCHAR2(100) := '^\[folders:\s*([a-z0-9_ -]*[a-z0-9_-])\s*\]$';
+         v_opt   VARCHAR2(500);
+         v_n     PLS_INTEGER := 1;
+      BEGIN
+         LOOP
+            v_opt := REGEXP_SUBSTR(r.notes, '\[[^]]*\]', 1, v_n);
+            EXIT WHEN v_opt IS NULL;
+            v_n := v_n + 1;
+
+            IF REGEXP_LIKE(v_opt, '^\[no-harvest\]$', 'i') THEN
+               IF r.rule = 'CODE' AND r.category IN ('PARTY', 'BANK_ACCOUNT') THEN
+                  UPDATE anon_meta.anon_inventory SET harvest = 'N' WHERE ROWID = r.rid;
+               ELSE
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      '[no-harvest] is for CODE,PARTY and CODE,BANK_ACCOUNT columns.');
+               END IF;
+
+            ELSIF REGEXP_LIKE(v_opt, '^\[only-where:', 'i') THEN
+               IF NOT REGEXP_LIKE(v_opt, c_scope, 'i') THEN
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      v_opt || ' - write it [only-where: <col> in <table>.<col> where <col> = <value>].');
+               ELSIF r.rule <> 'CODE' OR r.category = 'NODE_ROLE' THEN
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      '[only-where: ...] is for CODE columns other than structure.');
+               ELSE
+                  -- Built from names and a value the pattern has already
+                  -- limited to letters, digits and _ $ # -: nothing else can
+                  -- reach the statement.
+                  UPDATE anon_meta.anon_inventory
+                     SET row_scope = 'EXISTS (SELECT 1 FROM op.'
+                                  || LOWER(REGEXP_SUBSTR(v_opt, c_scope, 1, 1, 'i', 2)) || ' scope_row'
+                                  || ' WHERE scope_row.' || LOWER(REGEXP_SUBSTR(v_opt, c_scope, 1, 1, 'i', 3))
+                                  || ' = t.' || LOWER(REGEXP_SUBSTR(v_opt, c_scope, 1, 1, 'i', 1))
+                                  || ' AND scope_row.' || LOWER(REGEXP_SUBSTR(v_opt, c_scope, 1, 1, 'i', 4))
+                                  || ' = ''' || REGEXP_SUBSTR(v_opt, c_scope, 1, 1, 'i', 5) || ''')'
+                   WHERE ROWID = r.rid;
+               END IF;
+
+            ELSIF REGEXP_LIKE(v_opt, '^\[group:', 'i') THEN
+               IF NOT REGEXP_LIKE(v_opt, c_group, 'i') THEN
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      v_opt || ' - write it [group: <col>].');
+               ELSIF NOT (r.rule = 'CODE' AND r.category = 'MIXED') THEN
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      '[group: ...] is for CODE,MIXED columns.');
+               ELSE
+                  UPDATE anon_meta.anon_inventory
+                     SET group_by = UPPER(REGEXP_SUBSTR(v_opt, c_group, 1, 1, 'i', 1))
+                   WHERE ROWID = r.rid;
+               END IF;
+
+            ELSIF REGEXP_LIKE(v_opt, '^\[folders:', 'i') THEN
+               IF NOT REGEXP_LIKE(v_opt, c_trees, 'i') THEN
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      v_opt || ' - write it [folders: <tree> <tree> ...], the trees separated by spaces.');
+               ELSIF NOT (r.table_name = 'STRUCTURE' AND r.column_name = 'CODE') THEN
+                  bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                      '[folders: ...] is for structure.code.');
+               ELSE
+                  -- ',Entite,Compte,' - a tree is in the list when
+                  -- INSTR(folder_trees, ',' || structure || ',') > 0.
+                  UPDATE anon_meta.anon_inventory
+                     SET folder_trees = ',' || REGEXP_REPLACE(REGEXP_SUBSTR(v_opt, c_trees, 1, 1, 'i', 1),
+                                                              ' +', ',') || ','
+                   WHERE ROWID = r.rid;
+               END IF;
+
+            ELSE
+               bad(r.table_name, r.column_name, r.rule, r.category, r.source,
+                   'unknown option ' || v_opt || '. The options are [no-harvest], [only-where: ...], '
+                || '[group: ...] and [folders: ...]; a note must not use [ ] otherwise.');
+            END IF;
+         END LOOP;
+      END;
+   END LOOP;
+   COMMIT;
+
    IF v_bad > 0 THEN
       RAISE_APPLICATION_ERROR(-20021,
-         v_bad || ' inventory row(s) pair a rule with a category that cannot apply - listed above. '
+         v_bad || ' inventory row(s) cannot be applied as written - a rule with a category that '
+      || 'cannot apply, or a column option that is misspelt or misplaced - listed above. '
       || 'Nothing has been changed. Correct them in config/inventory_op_custom.csv.');
    END IF;
 END;

@@ -19,6 +19,16 @@
 >   a column that must not be touched is left out of the inventory.
 > - **Structure-only bank accounts.** A `w_compte_banque` node with no `compte_banque` row is
 >   anonymized as a bank account. Never asked; `APPROVE_STRUCTURE_ONLY_ACCOUNTS=n` refuses them.
+> - **Codes of deleted masters** (2026-10-22). A value of a party or bank-account column that is no
+>   identity is the code of a master row deleted in the past: it is renamed too - a party as `X_`,
+>   an account as `CB_`. The dry run counts them by column. A column marked `[no-harvest]` in the
+>   inventory holds other codes too and is not read for them.
+> - **The structure tree, tree by tree** (2026-10-22). A child's `pere` takes what its parent node
+>   in the same tree became. Nodes on other screens keep their code and are not reported; folder
+>   rows of the client trees are renamed after their client; other folder texts are emptied.
+> - **Free text that refuses NULL** gets the marker `ANONYMIZED`, with no warning.
+> - **Archived parties** (2026-10-22). A `tiers` row flagged N with no structure node at all is a
+>   counterparty (`T_`), not an unclassified party.
 > - **Four verdicts**: PASS, FAIL, REVIEW REQUIRED, INCOMPLETE — exit codes 0, 2, 3, 4.
 
 Everything needed to understand, operate, maintain and extend the tool. For the shorter

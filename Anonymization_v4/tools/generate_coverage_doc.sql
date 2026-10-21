@@ -132,10 +132,14 @@ BEGIN
               GROUP BY category ORDER BY category) LOOP
       w('| `' || r.category || '` | ' || r.n || ' | ' ||
         CASE r.category
-           WHEN 'PARTY'        THEN 'Party identifiers only (E_, P_, T_, X_); never a bank account''s'
-           WHEN 'BANK_ACCOUNT' THEN 'Bank-account identifiers only (CB_); never a party''s'
-           WHEN 'MIXED'        THEN 'Reviewed: holds both; a value that is both is left for review'
-           WHEN 'NODE_ROLE'    THEN 'Structure tree: each node by its role, pere by its parent''s'
+           WHEN 'PARTY'        THEN 'Party identifiers only (E_, P_, T_, X_); never a bank account''s. '
+                                 || 'A code with no master is a deleted party: X_, unless [no-harvest]'
+           WHEN 'BANK_ACCOUNT' THEN 'Bank-account identifiers only (CB_); never a party''s. '
+                                 || 'A code with no master is a deleted account: CB_, unless [no-harvest]'
+           WHEN 'MIXED'        THEN 'Reviewed: holds both; a value that is both is left for review, '
+                                 || 'unless its [group: ...] settles it'
+           WHEN 'NODE_ROLE'    THEN 'Structure tree: each node by its role (folders of the [folders: ...] '
+                                 || 'trees by their client), pere by its parent in the same tree'
            WHEN 'ENTITY'       THEN 'Owned by an entity'
            WHEN 'PORTFOLIO'    THEN 'Owned by a portfolio'
            WHEN 'COUNTERPARTY' THEN 'Owned by a counterparty'
@@ -149,15 +153,17 @@ BEGIN
    w('## Generated identifiers');
    w;
    w('Every original identifier is classified once, from the data, into one category. A party');
-   w('is a `tiers` row, a `structure` node on the `w_tiers` screen, or a confirmed reference;');
-   w('a bank account is a `compte_banque` row or a `structure` node on the `w_compte_banque` screen.');
+   w('is a `tiers` row, a `structure` node on the `w_tiers` screen, a confirmed reference, or a');
+   w('code found only in a CODE,PARTY column; a bank account is a `compte_banque` row, a');
+   w('`structure` node on the `w_compte_banque` screen, or a code found only in a CODE,BANK_ACCOUNT');
+   w('column. A code found only in references is one whose master row was deleted.');
    w;
    w('| Category | Prefix | Example | Rule, in this order |');
    w('|---|---|---|---|');
    w('| Portfolio | `P_` | `P_0000001` | `tiers.flag_portefeuille=''O''` and a `w_tiers` node of any classification |');
    w('| Entity | `E_` | `E_0000001` | flag `N` and an `Entite` node on `w_tiers` - wins over another classification |');
-   w('| Counterparty | `T_` | `T_0000001` | flag `N` and another (non-NULL) classification on `w_tiers`, no `Entite` |');
-   w('| Unclassified party | `X_` | `X_0000001` | any other party: no `tiers` row, no node, no `w_tiers` node, unknown flag or classification - the reason is recorded |');
+   w('| Counterparty | `T_` | `T_0000001` | flag `N` and another (non-NULL) classification on `w_tiers`, no `Entite`; or flag `N` and no `structure` node at all (an archived party) |');
+   w('| Unclassified party | `X_` | `X_0000001` | any other party: no `tiers` row, no node with a flag other than `N`, no `w_tiers` node, unknown flag or classification - the reason is recorded |');
    w('| Bank account | `CB_` | `CB_0000001` | `compte_banque`, and `structure` nodes on `w_compte_banque` |');
    w;
    w('The same text can be a party and a bank account: each keeps its own replacement. New');

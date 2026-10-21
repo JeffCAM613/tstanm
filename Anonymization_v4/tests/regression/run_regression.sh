@@ -97,7 +97,7 @@ section "setup"
 docker exec "$CT" true 2>/dev/null || { say "container $CT is not running - see README.md"; exit 1; }
 powershell.exe -NoProfile -Command "& '$(cygpath -w "$V4/op/run_op_anonymization.bat")' /inventory '$(cygpath -w "$INV")'" >/dev/null \
   || { say "could not build the inventory with run_op_anonymization.bat /inventory"; exit 1; }
-check "the batch file builds the inventory from the shipped CSVs" "$(grep -c '^INSERT INTO anon_meta.anon_inventory' "$INV")" "575"
+check "the batch file builds the inventory from the shipped CSVs" "$(grep -c '^INSERT INTO anon_meta.anon_inventory' "$INV")" "576"
 sync_tree
 put_inventory "$INV"
 
@@ -134,7 +134,7 @@ if wanted S2; then
   check "no data row rewritten" \
         "$(val "SELECT NVL(SUM(rows_affected), 0) FROM anon_meta.anon_step_log WHERE run_id = (SELECT MAX(run_id)
                 FROM anon_meta.anon_run) AND phase IN ('CODE', 'NULL_OUT', 'DESCRIPTION', 'SELF_CODE')")" "0"
-  check "every identity found already recorded" "$(grep -c 'found this run [.]* 0[[:space:]]*already recorded 24' "$WORK/last.log")" "1"
+  check "every identity found already recorded" "$(grep -c 'found this run [.]* 0[[:space:]]*already recorded 25' "$WORK/last.log")" "1"
   verify; check "verification: PASS" "$RC" "0"
   sysrun "DROP TABLE anon_meta.s2_before PURGE;"
 fi
@@ -159,16 +159,23 @@ fi
 
 # --- S4 ---------------------------------------------------------------------------
 if wanted S4; then
-  section "S4 roles that cannot be established are left for review"
+  section "S4 values whose domain cannot be established are left for review"
   fresh; sysfile @tests/regression/fixture_review.sql >/dev/null
   run_all_on; check "EXECUTE completes" "$RC" "0"
-  check "four review items logged" "$(val "SELECT COUNT(*) FROM anon_meta.anon_step_log WHERE status = 'REVIEW'
-        AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "4"
+  check "two review items logged: the two MIXED columns" \
+        "$(val "SELECT LISTAGG(object_name, ',') WITHIN GROUP (ORDER BY object_name) FROM anon_meta.anon_step_log
+                WHERE status = 'REVIEW' AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" \
+        "histo_operation.clearing_member[partyANDaccount],ventiler_compte.valeur_1[partyANDaccount]"
   verify; check "verification: REVIEW REQUIRED" "$RC" "3"
-  check "other-screen nodes unchanged" "$(val "SELECT COUNT(*) FROM op.structure WHERE ecran = 'w_autre' AND code IN ('OSCN', 'EOSC')")" "2"
-  check "ambiguous parent unchanged" "$(val "SELECT COUNT(*) FROM op.structure WHERE pere = 'SHRD'")" "1"
   check "party-and-account text unchanged in MIXED columns" \
         "$(val "SELECT (SELECT COUNT(*) FROM op.ventiler_compte WHERE valeur_1 = 'SHRD') + (SELECT COUNT(*) FROM op.histo_operation WHERE clearing_member = 'SHRD') FROM dual")" "2"
+  # Part 2, items 4 and 5: no longer for review.
+  check "nodes on another screen keep their code, and are not left for review" \
+        "$(val "SELECT COUNT(*) FROM op.structure WHERE ecran = 'w_autre' AND code IN ('OSCN', 'EOSC')")" "2"
+  check "a parent that is a party node AND an account node: the one in the child's own tree" \
+        "$(val "SELECT COUNT(*) FROM op.structure s JOIN anon_meta.code_map c ON c.new_code = s.pere
+                WHERE s.structure = 'Compte' AND c.category = 'BANK_ACCOUNT' AND c.old_code = 'SHRD'
+                AND s.code = (SELECT new_code FROM anon_meta.code_map WHERE old_code = 'AMBC')")" "1"
   check "a party seen only on another screen is X_ NO_PARTY_SCREEN" \
         "$(val "SELECT category || '/' || x_reason FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'OSCN'")" \
         "UNCLASSIFIED_PARTY/NO_PARTY_SCREEN"
@@ -203,9 +210,10 @@ if wanted S6; then
                 WHERE c.category = b.category AND c.old_code = b.old_code AND c.new_code = b.new_code)")" "0"
   check "new account appended after the existing ones" \
         "$(val "SELECT new_code FROM anon_meta.code_map WHERE category = 'BANK_ACCOUNT' AND old_code = 'NEWACC'")" "CB_0000008"
+  # The counterparties already mapped: CPTC, CPTN and NSTN (archived, item 7).
   check "new party classified and appended" \
-        "$(val "SELECT new_code FROM anon_meta.code_map WHERE old_code = 'NEWPTY'")" "T_0000003"
-  check "its reference renamed" "$(val "SELECT entite || '/' || compte FROM op.compte_regle WHERE id = 9")" "T_0000003/CB_0000008"
+        "$(val "SELECT new_code FROM anon_meta.code_map WHERE old_code = 'NEWPTY'")" "T_0000004"
+  check "its reference renamed" "$(val "SELECT entite || '/' || compte FROM op.compte_regle WHERE id = 9")" "T_0000004/CB_0000008"
   verify; check "verification: PASS" "$RC" "0"
   sysrun "DROP TABLE anon_meta.s6_before PURGE;"
 fi
@@ -231,16 +239,18 @@ fi
 # --- S8 ---------------------------------------------------------------------------
 if wanted S8; then
   section "S8 X_ party whose master data is repaired later keeps its X_"
+  # NSTO: flag O and no structure node - X_ (a portfolio needs its w_tiers
+  # node). Its node is added later: today it would be a portfolio.
   fresh; run_all_on
-  x_before="$(val "SELECT new_code FROM anon_meta.code_map WHERE category = 'UNCLASSIFIED_PARTY' AND old_code = 'NSTN'")"
+  x_before="$(val "SELECT new_code FROM anon_meta.code_map WHERE category = 'UNCLASSIFIED_PARTY' AND old_code = 'NSTO'")"
   reload_raw
-  sysrun "INSERT INTO op.structure (code, structure, ecran) VALUES ('NSTN', 'Entite', 'w_tiers');
+  sysrun "INSERT INTO op.structure (code, structure, ecran) VALUES ('NSTO', 'Entite', 'w_tiers');
           COMMIT;"
   run_all_on; check "EXECUTE completes" "$RC" "0"
-  check "recorded category kept" "$(val "SELECT category FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'NSTN'")" "UNCLASSIFIED_PARTY"
+  check "recorded category kept" "$(val "SELECT category FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'NSTO'")" "UNCLASSIFIED_PARTY"
   check "master and new node carry the same X_" \
         "$(val "SELECT (SELECT COUNT(*) FROM op.tiers WHERE code = '$x_before') + (SELECT COUNT(*) FROM op.structure WHERE code = '$x_before') FROM dual")" "2"
-  check "no second translation for it" "$(val "SELECT COUNT(*) FROM anon_meta.code_map WHERE old_code = 'NSTN'")" "1"
+  check "no second translation for it" "$(val "SELECT COUNT(*) FROM anon_meta.code_map WHERE old_code = 'NSTO'")" "1"
   check "the drift is reported" "$(grep -c 'would be classified differently today' "$WORK/last.log")" "1"
   verify; check "verification: REVIEW REQUIRED (drift)" "$RC" "3"
 fi
@@ -312,7 +322,10 @@ if wanted S13; then
   check "anon_step_log gained x_rows" \
         "$(val "SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META' AND table_name = 'ANON_STEP_LOG' AND column_name = 'X_ROWS'")" "1"
   check "the inventory accepts the new categories" \
-        "$(val "SELECT COUNT(*) FROM anon_meta.anon_inventory WHERE category IN ('PARTY', 'MIXED', 'NODE_ROLE')")" "396"
+        "$(val "SELECT COUNT(*) FROM anon_meta.anon_inventory WHERE category IN ('PARTY', 'MIXED', 'NODE_ROLE')")" "394"
+  check "anon_inventory gained the column options" \
+        "$(val "SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META' AND table_name = 'ANON_INVENTORY'
+                AND column_name IN ('HARVEST', 'ROW_SCOPE', 'GROUP_BY', 'FOLDER_TREES')")" "4"
   check "the earlier run record is kept" "$(val "SELECT COUNT(*) FROM anon_meta.anon_run WHERE config_json LIKE '%min_code_length%'")" "1"
   verify; check "verification: PASS" "$RC" "0"
 fi
@@ -331,8 +344,12 @@ if wanted S14; then
   fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE ENTITY 9001)"
   run_all_on; check "a single party category on CODE is refused" "$RC" "1"
 
-  fresh; inv_with "DELETE FROM anon_meta.anon_inventory WHERE table_name = 'TIERS' AND column_name = 'CODE'; $(row TIERS CODE CODE BANK_ACCOUNT 9001)"
+  # One statement per line: SQL*Plus ends a statement only at a ';' that ends
+  # a line - two on one line fail to load, which would look like a refusal.
+  fresh; inv_with "DELETE FROM anon_meta.anon_inventory WHERE table_name = 'TIERS' AND column_name = 'CODE';
+$(row TIERS CODE CODE BANK_ACCOUNT 9001)"
   run_all_on; check "tiers.code as BANK_ACCOUNT is refused" "$RC" "1"
+  check "  ... with the reason" "$(grep -c 'tiers.code is the party master' "$WORK/last.log")" "1"
 
   fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE PARTY 9001)"
   run_all_on; check "a replacement that cannot fit stops preflight" "$RC" "1"
@@ -345,6 +362,23 @@ if wanted S14; then
   run_all_on; check "a one-character free-text column is processed" "$RC" "0"
   check "  ... and emptied, not skipped as a checkbox" "$(val "SELECT NVL(one_char, '<empty>') FROM op.anon_fixture_extra")" "<empty>"
   verify; check "  ... and verified" "$RC" "0"
+
+  # Column options in the notes ([no-harvest], [only-where], [group], [folders]).
+  rown() { printf "INSERT INTO anon_meta.anon_inventory (table_name,column_name,rule,category,source,notes,seq) VALUES ('%s','%s','%s','%s','CUSTOM','%s',%s);" "$@"; }
+  replace() { printf "DELETE FROM anon_meta.anon_inventory WHERE table_name = '%s' AND column_name = '%s';\n" "$1" "$2"; rown "$@"; }
+
+  fresh; inv_with "$(replace COMPTE_REGLE ENTITE CODE PARTY '[no-harvst] a typo' 9001)"
+  run_all_on; check "a misspelt column option is refused" "$RC" "1"
+  check "  ... and named" "$(grep -c 'unknown option \[no-harvst\]' "$WORK/last.log")" "1"
+
+  fresh; inv_with "$(replace COMPTE_REGLE ENTITE CODE PARTY '[group: id]' 9001)"
+  run_all_on; check "[group: ...] on a column that is not MIXED is refused" "$RC" "1"
+  check "  ... with the reason" "$(grep -c '\[group: ...\] is for CODE,MIXED columns' "$WORK/last.log")" "1"
+
+  fresh; inv_with "$(replace COMPTE_REGLE COMPTE CODE BANK_ACCOUNT '[only-where: id in no_such_table.code where type = X]' 9001)"
+  run_all_on; check "an [only-where: ...] that cannot be applied stops preflight" "$RC" "1"
+  check "  ... reported, nothing changed" \
+        "$(grep -c 'NO SCOPE    compte_regle.compte' "$WORK/last.log")/$(val "SELECT COUNT(*) FROM op.tiers WHERE code = 'ENTN'")" "1/1"
 
   put_inventory "$INV"
 fi
@@ -360,22 +394,29 @@ fi
 
 # --- S16 --------------------------------------------------------------------------
 if wanted S16; then
-  section "S16 a confirmed reference-only party"
+  section "S16 a dangling reference: captured by itself in a party column, confirmed in a MIXED one"
   fresh
-  sysrun "INSERT INTO op.histo_operation (id, entite, contrepartie) VALUES (16, 'ENTN', 'GONE');
-          COMMIT;"
-  run_all_on; verify
-  check "unconfirmed: the dangling reference is only a warning" \
-        "$(val "SELECT COUNT(*) FROM anon_meta.verify_result WHERE status = 'WARN' AND check_name LIKE 'values that are no%'")" "1"
-  check "  ... and stays as it is" "$(val "SELECT contrepartie FROM op.histo_operation WHERE id = 16")" "GONE"
-  sysrun "INSERT INTO anon_meta.confirmed_identity (domain, old_code, note) VALUES ('PARTY', 'GONE', 'regression');
+  sysrun "INSERT INTO op.histo_operation (id, entite, contrepartie, clearing_member) VALUES (16, 'ENTN', 'GONE', 'GONEM');
           COMMIT;"
   run_all_on; check "EXECUTE completes" "$RC" "0"
-  check "confirmed: classified X_ with no master, found only as a reference" \
+  check "a party column's code with no master is captured: X_, missing master, reference only" \
         "$(val "SELECT category || '/' || x_reason || '/' || membership FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'GONE'")" \
         "UNCLASSIFIED_PARTY/MISSING_MASTER/REFERENCE_ONLY"
   check "  ... and its reference renamed" \
         "$(val "SELECT COUNT(*) FROM op.histo_operation h JOIN anon_meta.code_map c ON c.new_code = h.contrepartie AND c.old_code = 'GONE' WHERE h.id = 16")" "1"
+  # A MIXED column says nothing of an unknown value's kind: not captured.
+  check "in a MIXED column it stays as it is" "$(val "SELECT clearing_member FROM op.histo_operation WHERE id = 16")" "GONEM"
+  verify; check "verification: PASS" "$RC" "0"
+  check "  ... with a warning: the MIXED value, and the core fixture's EUR" \
+        "$(val "SELECT bad_rows FROM anon_meta.verify_result WHERE status = 'WARN' AND check_name LIKE 'values that are no%'")" "2"
+  sysrun "INSERT INTO anon_meta.confirmed_identity (domain, old_code, note) VALUES ('PARTY', 'GONEM', 'regression');
+          COMMIT;"
+  run_all_on; check "confirmed: EXECUTE completes" "$RC" "0"
+  check "confirmed: X_, missing master, reference only" \
+        "$(val "SELECT category || '/' || x_reason || '/' || membership FROM anon_meta.identity_inventory WHERE domain = 'PARTY' AND old_code = 'GONEM'")" \
+        "UNCLASSIFIED_PARTY/MISSING_MASTER/REFERENCE_ONLY"
+  check "  ... and renamed in the MIXED column" \
+        "$(val "SELECT COUNT(*) FROM op.histo_operation h JOIN anon_meta.code_map c ON c.new_code = h.clearing_member AND c.old_code = 'GONEM' WHERE h.id = 16")" "1"
   verify; check "verification: PASS" "$RC" "0"
 fi
 
@@ -437,7 +478,9 @@ if wanted S19; then
   section "S19 unclassified parties are reported by reason and by table"
   fresh; sysfile @tests/regression/fixture_review.sql >/dev/null     # adds a NO_PARTY_SCREEN party
   x_codes='NMEN|NMCP|NSTN|NSTO|NFLG|IFLG|NCLN|OSCN'
-  by_reason() { grep -cE '^ +(missing master +2 +0 +2 +0|no structure +2 +2 +0 +0|no party screen +1 +1 +0 +1|unknown flag +2 +2 +2 +0|unknown classification +1 +1 +1 +0) *$' "$WORK/last.log"; }
+  # Missing master: NMEN and NMCP (w_tiers nodes), and X (only in a party column).
+  # No structure: NSTO only - NSTN, flag N, is an archived counterparty (item 7).
+  by_reason() { grep -cE '^ +(missing master +3 +0 +2 +0 +1|no structure +1 +1 +0 +0 +0|no party screen +1 +1 +0 +1 +0|unknown flag +2 +2 +2 +0 +0|unknown classification +1 +1 +1 +0 +0) *$' "$WORK/last.log"; }
   # The SQL the dry run printed under "-- <reason>", up to its ';'.
   printed_query() { awk -v lbl="$1" '$0 ~ "^ +-- " lbl " *$" {on = 1; next} on {print; if ($0 ~ /; *$/) exit}' "$WORK/last.log" | sed 's/; *$//'; }
 
@@ -446,12 +489,12 @@ if wanted S19; then
   check "  ... each reason in words" "$(grep -c 'Why they are X_:' "$WORK/last.log")" "1"
   check "  ... what would classify them" "$(grep -c 'Before the real run, fix the data or leave them X_:' "$WORK/last.log")" "1"
   check "  ... and one query per reason" "$(grep -c "p.x_reason = '" "$WORK/last.log")" "5"
-  for pair in "missing master:2" "no structure:2" "no party screen:1" "unknown flag:2" "unknown classification:1"; do
+  for pair in "missing master:3" "no structure:1" "no party screen:1" "unknown flag:2" "unknown classification:1"; do
     check "  ... the printed '${pair%%:*}' query runs and lists them" \
           "$(val "SELECT COUNT(*) FROM ($(printed_query "${pair%%:*}"))")" "${pair##*:}"
   done
   check "  ... X_ identifiers that would be renamed, by table" \
-        "$(grep -cE 'tiers [.]+ 6 rows|structure [.]+ 5 rows|histo_operation [.]+ 2 rows|compte_regle [.]+ 1 row |total [.]+ 14 rows in 4 tables' "$WORK/last.log")" "5"
+        "$(grep -cE 'tiers [.]+ 5 rows|structure [.]+ 5 rows|histo_operation [.]+ 2 rows|compte_regle [.]+ 1 row |total [.]+ 13 rows in 4 tables' "$WORK/last.log")" "5"
   check "  ... and no identifier in the run output" "$(grep -cwE "$x_codes" "$WORK/last.log")" "0"
 
   run_all_on; check "EXECUTE completes" "$RC" "0"
@@ -460,10 +503,10 @@ if wanted S19; then
   check "  ... no fixes and no queries" \
         "$(( $(grep -c 'Before the real run' "$WORK/last.log") + $(grep -c "p.x_reason = '" "$WORK/last.log") ))" "0"
   check "  ... X_ identifiers renamed by this run, by table" \
-        "$(grep -cE 'renamed to X_ by this run, by table|total [.]+ 14 rows in 4 tables' "$WORK/last.log")" "2"
+        "$(grep -cE 'renamed to X_ by this run, by table|total [.]+ 13 rows in 4 tables' "$WORK/last.log")" "2"
   check "  ... the same counts in the step log" \
         "$(val "SELECT SUM(x_rows) FROM anon_meta.anon_step_log WHERE phase = 'CODE'
-                AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "14"
+                AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "13"
   check "  ... and no identifier in the run output" "$(grep -cwE "$x_codes" "$WORK/last.log")" "0"
   verify; check "verification: REVIEW REQUIRED (the review fixture)" "$RC" "3"
   docker exec -w /tmp/v4/op "$CT" sqlplus -L -S "op/op@$SVC" @verify/generate_report.sql > "$WORK/report.log" 2>&1
@@ -472,13 +515,83 @@ if wanted S19; then
   check "report: an Unclassified parties section" "$(rgrep 'Unclassified parties (X_)</h2>')" "1"
   check "  ... the reasons in words" "$(rgrep -e 'tell a portfolio from an entity' -e 'not known whether the party is a portfolio')" "2"
   check "  ... the rows renamed, by table" \
-        "$(rgrep -e '14 identifier rows renamed to X_' -e '<td class="tbl-name">tiers</td><td class="num">1</td><td class="num">6</td>')" "2"
+        "$(rgrep -e '13 identifier rows renamed to X_' -e '<td class="tbl-name">tiers</td><td class="num">1</td><td class="num">5</td>')" "2"
   check "  ... and no identifier" "$(docker exec -w /tmp/v4/op "$CT" grep -cwE "$x_codes" "$report")" "0"
 
   fresh
   run EXECUTE "y y y n y" "y y y y y" "y y y y y" y; check "renaming of X_ off: EXECUTE completes" "$RC" "0"
   check "  ... the output says their codes are kept" \
         "$(grep -cE 'ANONYMIZE_UNCLASSIFIED_PARTY=n: their codes are kept|none - ANONYMIZE_UNCLASSIFIED_PARTY=n keeps their codes' "$WORK/last.log")" "2"
+fi
+
+# --- S20 --------------------------------------------------------------------------
+if wanted S20; then
+  section "S20 part 2: codes found only in references, the structure tree by tree, MIXED breakdowns"
+  fresh; sysfile @tests/regression/fixture_part2.sql >/dev/null
+  laststep() { val "SELECT LISTAGG(status || ':' || rows_affected, ',') WITHIN GROUP (ORDER BY status)
+                    FROM anon_meta.anon_step_log WHERE object_name = '$1'
+                     AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)"; }
+
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y; check "dry run completes" "$RC" "0"
+  check "dry run: codes found only in references, by domain" \
+        "$(grep -cE 'parties \(X_, missing master\) [.]+ 3 +in 2 columns, 3 rows|bank accounts \(CB_\) [.]+ 2 +in 1 column, 2 rows' "$WORK/last.log")" "2"
+  check "  ... and by column" \
+        "$(grep -cE 'compte_regle.entite [.]+ party +2 codes +2 rows|compte_regle.compte [.]+ account +2 codes +2 rows|histo_operation.contrepartie [.]+ party +1 code +1 row' "$WORK/last.log")" "3"
+  check "dry run: the nodes that keep a client's code by design, counted" \
+        "$(grep -cE 'on another screen [.]+ 1$|folder rows of a tree not in \[folders: [.]{3}\] 1$' "$WORK/last.log")" "2"
+  # Folders: SHRD and BKONLY in Compta. Children: the BKONLY and ACTIF folders
+  # under SHRD in Compta, KIDP under SHRD in Entite, KIDA under SHRD in Compte.
+  check "dry run: the folders renamed, and the children that follow their parent" \
+        "$(laststep 'structure.code [folders]'),$(laststep 'structure.pere [parent in its tree]')" "DRYRUN:2,DRYRUN:4"
+  check "dry run: the values of a MIXED breakdown settled by their group" \
+        "$(laststep 'ventiler_compte.valeur_1 [party AND account, by group]')" "DRYRUN:2"
+  check "  ... and nothing left for review" \
+        "$(val "SELECT COUNT(*) FROM anon_meta.anon_step_log WHERE status = 'REVIEW' AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "0"
+  check "  ... and no identifier in the run output" "$(grep -cwE 'GONEP|GONEA|KIDP|KIDA' "$WORK/last.log")" "0"
+
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  verify; check "verification: PASS" "$RC" "0"
+  asserts @tests/regression/assert_part2.sql
+
+  run_all_on; check "a second run completes" "$RC" "0"
+  check "  ... and rewrites nothing" \
+        "$(val "SELECT NVL(SUM(rows_affected), 0) FROM anon_meta.anon_step_log WHERE run_id = (SELECT MAX(run_id)
+                FROM anon_meta.anon_run) AND phase IN ('CODE', 'NULL_OUT', 'DESCRIPTION', 'SELF_CODE')")" "0"
+  check "  ... and finds no new identity" "$(grep -c 'found this run [.]* 0[[:space:]]' "$WORK/last.log")" "1"
+  verify; check "verification: PASS" "$RC" "0"
+fi
+
+# --- S21 --------------------------------------------------------------------------
+if wanted S21; then
+  section "S21 part 2: what is still left for review"
+  fresh; sysfile @tests/regression/fixture_part2.sql >/dev/null
+  # A breakdown of both kinds, a breakdown of nothing else, and a parent that
+  # has no node in its child's tree and is a party AND an account.
+  sysrun "INSERT INTO op.ventiler_compte (id, code, valeur_1) VALUES (14, 'CONV_MX', 'CPTC');
+          INSERT INTO op.ventiler_compte (id, code, valeur_1) VALUES (15, 'CONV_MX', 'BKONLY');
+          INSERT INTO op.ventiler_compte (id, code, valeur_1) VALUES (16, 'CONV_MX', 'SHRD');
+          INSERT INTO op.ventiler_compte (id, code, valeur_1) VALUES (17, 'CONV_SH', 'SHRD');
+          INSERT INTO op.structure (code, structure, ecran, pere) VALUES ('ORPH', 'Divers', 'w_autre', 'SHRD');
+          COMMIT;"
+  reviewed() { val "SELECT LISTAGG(object_name || ':' || rows_affected, ',') WITHIN GROUP (ORDER BY object_name)
+                    FROM anon_meta.anon_step_log WHERE status = 'REVIEW'
+                     AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)"; }
+  expected_review='structure.pere[parentnotinitstree,partyANDaccount]:1,ventiler_compte.valeur_1[partyANDaccount]:2'
+
+  run DRYRUN "y y y y y" "y y y y y" "y y y y y" y; check "dry run completes" "$RC" "0"
+  check "dry run: two settled by their breakdown, the rest for review" \
+        "$(val "SELECT rows_affected FROM anon_meta.anon_step_log WHERE object_name = 'ventiler_compte.valeur_1 [party AND account, by group]'
+                AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")/$(reviewed)" "2/$expected_review"
+  run_all_on; check "EXECUTE completes" "$RC" "0"
+  check "  ... the same items left for review" "$(reviewed)" "$expected_review"
+  check "a breakdown of both kinds, and one of nothing else: left as they are" \
+        "$(val "SELECT LISTAGG(id || '=' || valeur_1, ',') WITHIN GROUP (ORDER BY id) FROM op.ventiler_compte WHERE id IN (16, 17)")" \
+        "16=SHRD,17=SHRD"
+  check "a parent with no node in its child's tree, a party AND an account: left as it is" \
+        "$(val "SELECT pere FROM op.structure WHERE code = 'ORPH'")" "SHRD"
+  check "the breakdowns of one kind are still settled" \
+        "$(val "SELECT COUNT(*) FROM op.ventiler_compte WHERE id IN (11, 13) AND valeur_1 <> 'SHRD'")" "2"
+  verify; check "verification: REVIEW REQUIRED" "$RC" "3"
 fi
 
 # --- Result ---------------------------------------------------------------------

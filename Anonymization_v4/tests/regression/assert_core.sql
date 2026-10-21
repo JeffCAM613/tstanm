@@ -63,7 +63,14 @@ BEGIN
    category_is('PARTY', 'IFLG', 'UNCLASSIFIED_PARTY', 'UNKNOWN_FLAG');
    category_is('PARTY', 'NMEN', 'UNCLASSIFIED_PARTY', 'MISSING_MASTER');
    category_is('PARTY', 'NMCP', 'UNCLASSIFIED_PARTY', 'MISSING_MASTER');
-   category_is('PARTY', 'NSTN', 'UNCLASSIFIED_PARTY', 'NO_STRUCTURE');
+   -- Part 2, item 7: flag N and no structure node at all is an archived
+   -- party, a counterparty; flag O and no node is still X_.
+   category_is('PARTY', 'NSTN', 'COUNTERPARTY');
+   check_eq('  ... a T_ value, its master and its references alike',
+      'SELECT CASE WHEN ' || tr('PARTY', 'NSTN') || ' LIKE ''T\_%'' ESCAPE ''\'' THEN ''T_'' END'
+   || ' || ''/'' || (SELECT COUNT(*) FROM op.tiers WHERE code = ' || tr('PARTY', 'NSTN') || ')'
+   || ' || ''/'' || (SELECT COUNT(*) FROM op.histo_operation WHERE id = 4 AND entite = ' || tr('PARTY', 'NSTN') || ')'
+   || ' FROM dual', 'T_/1/1');
    category_is('PARTY', 'NSTO', 'UNCLASSIFIED_PARTY', 'NO_STRUCTURE');
    category_is('PARTY', 'NCLN', 'UNCLASSIFIED_PARTY', 'UNKNOWN_CLASSIFICATION');
    category_is('PARTY', 'NCLO', 'PORTFOLIO');
@@ -73,11 +80,29 @@ BEGIN
    check_eq('entity precedence logged for EOVL only',
       'SELECT LISTAGG(old_code, '','') WITHIN GROUP (ORDER BY old_code) FROM anon_meta.identity_plan'
    || ' WHERE run_id = ' || v_run || ' AND entity_overlap = ''Y''', 'EOVL');
-   check_eq('17 parties, each with exactly one translation',
+   -- 17 from tiers and structure, and X: found only in a party column.
+   check_eq('18 parties, each with exactly one translation',
       'SELECT COUNT(*) FROM anon_meta.identity_inventory i WHERE domain = ''PARTY'''
    || ' AND (SELECT COUNT(*) FROM anon_meta.code_map c WHERE c.old_code = i.old_code'
    || '      AND c.category IN (''ENTITY'',''PORTFOLIO'',''COUNTERPARTY'',''UNCLASSIFIED_PARTY'')) = 1',
-      '17');
+      '18');
+
+   -- --- Part 2, item 3: a code found only in a party column ----------------
+   check_eq('found only in references: X is X_, missing master, reference only',
+      'SELECT category || ''/'' || x_reason || ''/'' || membership FROM anon_meta.identity_inventory'
+   || ' WHERE domain = ''PARTY'' AND old_code = ''X''',
+      'UNCLASSIFIED_PARTY/MISSING_MASTER/REFERENCE_ONLY');
+   check_eq('  ... and its reference renamed',
+      'SELECT COUNT(*) FROM op.histo_operation WHERE id = 4 AND contrepartie = ' || tr('PARTY', 'X'), '1');
+   check_eq('  ... where it was found is recorded, by column',
+      'SELECT LOWER(table_name || ''.'' || column_name) || '' '' || n_rows FROM anon_meta.reference_harvest'
+   || ' WHERE run_id = ' || v_run || ' AND old_code = ''X''', 'histo_operation.contrepartie 1');
+   check_eq('[no-harvest] columns are not read: no IBAN, no condition code captured',
+      'SELECT COUNT(*) FROM anon_meta.identity_inventory WHERE old_code IN (''XX00TESTIBAN0000000001'', ''CND01'')',
+      '0');
+   check_eq('  ... and both stay as they are',
+      'SELECT (SELECT tiers_iban_compte FROM op.histo_operation WHERE id = 1) || ''/'''
+   || ' || (SELECT code FROM op.echelle_condition) FROM dual', 'XX00TESTIBAN0000000001/CND01');
 
    -- --- Section 2: the account union ------------------------------------------
    category_is('ACCOUNT', 'SHRD', 'BANK_ACCOUNT');
@@ -162,7 +187,10 @@ BEGIN
       'SELECT COUNT(*) FROM op.tiers WHERE code = ' || tr('PARTY', 'ENTN')
    || ' AND adresse1 = code AND adresse2 IS NULL AND telephone = code AND fax IS NULL AND nom_pp IS NULL',
       '1');
-   check_eq('X_ owner (no structure): description, address, phone, name masked',
+   check_eq('X_ owner: description and phone masked, an empty field kept',
+      'SELECT COUNT(*) FROM op.tiers WHERE code = ' || tr('PARTY', 'NFLG')
+   || ' AND description = code AND telephone = code AND fax IS NULL', '1');
+   check_eq('archived counterparty (no structure node): description, address, phone, name masked',
       'SELECT COUNT(*) FROM op.tiers WHERE code = ' || tr('PARTY', 'NSTN')
    || ' AND description = code AND adresse1 = code AND adresse2 = code AND telephone = code'
    || ' AND email_adress = code AND nom_pp = code AND dpt_naissance = code AND fax IS NULL', '1');
@@ -189,10 +217,29 @@ BEGIN
    check_eq('free text emptied',
       'SELECT COUNT(*) FROM op.histo_operation WHERE description IS NOT NULL OR tiers_libelle IS NOT NULL'
    || ' OR groupe_1 IS NOT NULL', '0');
+   -- Part 2, item 1: a bank's name, a party code and an account code alike.
+   check_eq('tiers_domicile emptied - free text, whatever it holds',
+      'SELECT COUNT(*) FROM op.histo_operation WHERE tiers_domicile IS NOT NULL', '0');
+   -- Part 2, item 5C: NULL refused at run time (a NOT NULL constraint that is
+   -- not validated): the marker, and no warning.
+   check_eq('free text that refuses NULL gets the marker',
+      'SELECT description FROM op.utilisateur WHERE code = ''U1''', 'ANONYMIZED');
+   check_eq('  ... with nothing to report',
+      'SELECT COUNT(*) FROM anon_meta.anon_step_log WHERE run_id = ' || v_run
+   || ' AND status IN (''ERROR'', ''REVIEW'') ', '0');
+
+   -- --- Part 2, item 2B: a report's lines, by the kind of report -------------
+   check_eq('account report: the line''s code is the account''s translation',
+      'SELECT COUNT(*) FROM op.param_fiche_val_detail WHERE id = 1 AND code = ' || tr('ACCOUNT', 'BKONLY'), '1');
+   check_eq('cash-flow report: codes untouched, even one equal to a party''s',
+      'SELECT LISTAGG(code, '','') WITHIN GROUP (ORDER BY id) FROM op.param_fiche_val_detail'
+   || ' WHERE code_tableau = ''FLOWS''', 'ENTN,FLX01');
+   check_eq('every line''s label emptied',
+      'SELECT COUNT(*) FROM op.param_fiche_val_detail WHERE description IS NOT NULL', '0');
 
    -- --- EPF view: one applied translation per identity -----------------------
    check_eq('EPF view: one row per identity',
-      'SELECT COUNT(*) FROM atrace.ref_tables_modif', '24');
+      'SELECT COUNT(*) FROM atrace.ref_tables_modif', '25');
    check_eq('EPF view: SHRD once as tiers, once as compte_banque, different values',
       'SELECT COUNT(DISTINCT new_value) FROM atrace.ref_tables_modif WHERE old_value = ''SHRD''', '2');
 

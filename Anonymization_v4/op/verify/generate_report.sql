@@ -515,16 +515,18 @@ BEGIN
            || ' identifier rows renamed to X_ by this run</span></div>');
          w('<div class="note">Parties whose kind &mdash; entity, portfolio or counterparty &mdash; the '
            || 'data does not establish. They are anonymized like every other party, with an X_ value; '
-           || 'the reason says what the data was missing. <b>Tiers</b>, <b>w_tiers node</b> and '
-           || '<b>Other screen</b> count the parties found there, not rows.</div>');
+           || 'the reason says what the data was missing. <b>Tiers</b>, <b>w_tiers node</b>, '
+           || '<b>Other screen</b> and <b>Only in references</b> count the parties found there, not '
+           || 'rows; one found only in references is a party whose tiers row was deleted.</div>');
          w('<div class="scroll"><table><thead><tr><th>Reason</th><th class="num">Parties</th>'
            || '<th class="num">Tiers</th><th class="num">w_tiers node</th><th class="num">Other screen</th>'
-           || '<th>Why they are X_</th></tr></thead><tbody>');
+           || '<th class="num">Only in references</th><th>Why they are X_</th></tr></thead><tbody>');
          FOR r IN (SELECT p.x_reason, NVL(MAX(d.label), LOWER(p.x_reason)) AS label, MAX(d.why) AS why,
-                          COUNT(*)                                                   AS parties,
-                          COUNT(CASE WHEN p.has_master = 'Y' THEN 1 END)            AS in_tiers,
-                          COUNT(CASE WHEN p.has_party_node = 'Y' THEN 1 END)        AS party_node,
-                          COUNT(CASE WHEN p.has_other_screen_node = 'Y' THEN 1 END) AS other_screen
+                          COUNT(*)                                                     AS parties,
+                          COUNT(CASE WHEN p.has_master = 'Y' THEN 1 END)              AS in_tiers,
+                          COUNT(CASE WHEN p.has_party_node = 'Y' THEN 1 END)          AS party_node,
+                          COUNT(CASE WHEN p.has_other_screen_node = 'Y' THEN 1 END)   AS other_screen,
+                          COUNT(CASE WHEN p.membership = 'REFERENCE_ONLY' THEN 1 END) AS refs_only
                      FROM anon_meta.identity_plan p
                      LEFT JOIN anon_meta.unclassified_reason d ON d.x_reason = p.x_reason
                     WHERE p.run_id = v_run_id AND p.domain = 'PARTY'
@@ -534,7 +536,7 @@ BEGIN
             w('<tr><td class="col-name">' || esc(INITCAP(SUBSTR(r.label, 1, 1)) || SUBSTR(r.label, 2))
               || '</td><td class="num">' || n(r.parties) || '</td><td class="num">' || n(r.in_tiers)
               || '</td><td class="num">' || n(r.party_node) || '</td><td class="num">' || n(r.other_screen)
-              || '</td><td>' || esc(r.why) || '</td></tr>');
+              || '</td><td class="num">' || n(r.refs_only) || '</td><td>' || esc(r.why) || '</td></tr>');
          END LOOP;
          w('</tbody></table></div>');
 

@@ -5,13 +5,15 @@
 -- union with typed lookup, and the party classification order) - not the
 -- engine, which assert_core.sql checks on real tables. Runs on any database.
 --
--- One change from the specification: an account node is any node on the
+-- Two changes from the specification: an account node is any node on the
 -- w_compte_banque screen. The specification also required structure =
 -- 'Compte'; the business confirmed (2026-10-20) that the screen alone decides.
+-- And a flag N party with no structure node at all - an archived party - is a
+-- counterparty, not X_ (part 2 of the fix instructions, item 7, 2026-10-22).
 --
 -- Expected:
 --   TYPED_ACCOUNT_DESIGN_CHECK          3 candidates, 0 inconsistent, 1 party node
---   PARTY_CLASSIFICATION_DESIGN_CHECK   16 cases, 0 mismatches, 4 E, 3 P, 1 T, 8 X
+--   PARTY_CLASSIFICATION_DESIGN_CHECK   16 cases, 0 mismatches, 4 E, 3 P, 2 T, 7 X
 -- ============================================================================
 
 SET HEADING OFF
@@ -89,7 +91,7 @@ WITH sample_party AS (
  UNION ALL SELECT 'INVALID_FLAG',1,'?','UNCLASSIFIED_PARTY' FROM dual
  UNION ALL SELECT 'NO_MASTER_ENTITE',0,NULL,'UNCLASSIFIED_PARTY' FROM dual
  UNION ALL SELECT 'NO_MASTER_COMPTE',0,NULL,'UNCLASSIFIED_PARTY' FROM dual
- UNION ALL SELECT 'NO_STRUCTURE_N',1,'N','UNCLASSIFIED_PARTY' FROM dual
+ UNION ALL SELECT 'NO_STRUCTURE_N',1,'N','COUNTERPARTY' FROM dual
  UNION ALL SELECT 'NO_STRUCTURE_O',1,'O','UNCLASSIFIED_PARTY' FROM dual
  UNION ALL SELECT 'NULL_CLASS_N',1,'N','UNCLASSIFIED_PARTY' FROM dual
  UNION ALL SELECT 'NULL_CLASS_O',1,'O','PORTFOLIO' FROM dual
@@ -127,7 +129,11 @@ WITH sample_party AS (
  SELECT 1 FROM sample_node node
  WHERE node.case_id=party.case_id AND node.ecran='w_tiers'
  AND node.structure<>'Entite'
- ) THEN 1 ELSE 0 END AS has_non_entity_node
+ ) THEN 1 ELSE 0 END AS has_non_entity_node,
+ CASE WHEN EXISTS (
+ SELECT 1 FROM sample_node node
+ WHERE node.case_id=party.case_id
+ ) THEN 1 ELSE 0 END AS has_any_node
  FROM sample_party party
 ), classified AS (
  SELECT facts.*,
@@ -136,11 +142,12 @@ WITH sample_party AS (
  WHEN portfolio_flag='N' AND has_entity_node=1 THEN 'ENTITY'
  WHEN portfolio_flag='N' AND has_non_entity_node=1
  AND has_entity_node=0 THEN 'COUNTERPARTY'
+ WHEN portfolio_flag='N' AND has_any_node=0 THEN 'COUNTERPARTY'
  ELSE 'UNCLASSIFIED_PARTY' END AS assigned_category
  FROM party_facts facts
 )
 SELECT CASE WHEN tested_cases = 16 AND mismatches = 0 AND entity_cases = 4 AND portfolio_cases = 3
-                 AND counterparty_cases = 1 AND x_cases = 8 THEN 'PASS' ELSE 'FAIL' END
+                 AND counterparty_cases = 2 AND x_cases = 7 THEN 'PASS' ELSE 'FAIL' END
     || '  PARTY_CLASSIFICATION_DESIGN_CHECK  cases=' || tested_cases || ' mismatches=' || mismatches
     || ' E=' || entity_cases || ' P=' || portfolio_cases || ' T=' || counterparty_cases
     || ' X=' || x_cases

@@ -100,24 +100,51 @@ CREATE TABLE op.compte_banque (
 -- References of every column domain
 -- ----------------------------------------------------------------------------
 -- PARTY, BANK_ACCOUNT, MIXED and free text on one history table.
+-- tiers_domicile: a bank's or branch's name - free text. tiers_iban_compte: an
+-- account NUMBER, marked [no-harvest] - never captured as an account code.
 CREATE TABLE op.histo_operation (
-   id               NUMBER,
-   entite           VARCHAR2(20),
-   contrepartie     VARCHAR2(20),
-   compensateur     VARCHAR2(20),
-   clearing_member  VARCHAR2(20),
-   compte_tiers     VARCHAR2(20),
-   compte_entite    VARCHAR2(20),
-   tiers_libelle    VARCHAR2(60),
-   description      VARCHAR2(60),
-   groupe_1         VARCHAR2(30)
+   id                NUMBER,
+   entite            VARCHAR2(20),
+   contrepartie      VARCHAR2(20),
+   compensateur      VARCHAR2(20),
+   clearing_member   VARCHAR2(20),
+   compte_tiers      VARCHAR2(20),
+   compte_entite     VARCHAR2(20),
+   tiers_libelle     VARCHAR2(60),
+   tiers_domicile    VARCHAR2(50),
+   tiers_iban_compte VARCHAR2(34),
+   description       VARCHAR2(60),
+   groupe_1          VARCHAR2(30)
 );
 
--- MIXED: a breakdown value that may be any kind of code.
+-- MIXED: a breakdown value that may be any kind of code. code is the
+-- breakdown ([group: code]): each holds one kind of code.
 CREATE TABLE op.ventiler_compte (
    id       NUMBER,
+   code     VARCHAR2(20),
    valeur_1 VARCHAR2(20),
    valeur_2 VARCHAR2(20)
+);
+
+-- A valuation report and its lines: only a report of type FicValComp lists
+-- bank accounts ([only-where: ...]); another lists cash-flow posts, whose
+-- codes may equal a party's.
+CREATE TABLE op.param_fiche_en_valeur (
+   code VARCHAR2(20),
+   type VARCHAR2(20)
+);
+CREATE TABLE op.param_fiche_val_detail (
+   id           NUMBER,
+   code_tableau VARCHAR2(20),
+   code         VARCHAR2(20),
+   description  VARCHAR2(60)
+);
+
+-- Interest-scale conditions: a CODE,PARTY column marked [no-harvest] - its
+-- codes are conditions, not deleted parties.
+CREATE TABLE op.echelle_condition (
+   code    VARCHAR2(20),
+   libelle VARCHAR2(40)
 );
 
 -- The analytical-account exception: MIXED by a site override.
@@ -147,10 +174,14 @@ CREATE TABLE op.histo_pricing_groupe (
    description VARCHAR2(40) NOT NULL
 );
 
+-- A NOT NULL constraint that is not validated: the dictionary calls the
+-- column nullable, and setting it to NULL fails with ORA-01407. Free text that
+-- refuses NULL gets the marker instead.
 CREATE TABLE op.utilisateur (
    code        VARCHAR2(20),
    description VARCHAR2(60)
 );
+ALTER TABLE op.utilisateur MODIFY (description NOT NULL ENABLE NOVALIDATE);
 
 -- Only used by the cases that add their own inventory rows: a one-character
 -- free-text column (must be processed, not skipped as a "checkbox") and a NOT

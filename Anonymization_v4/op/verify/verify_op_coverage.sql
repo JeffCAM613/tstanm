@@ -87,6 +87,8 @@ DECLARE
    v_n_check  NUMBER;
    v_n_fail   NUMBER;
    v_verdict  VARCHAR2(12);
+   v_trees    VARCHAR2(1000);
+   v_folders  VARCHAR2(1000);
 
    -- -------------------------------------------------------------------------
    PROCEDURE say(p_text IN VARCHAR2 DEFAULT '') IS
@@ -246,39 +248,42 @@ BEGIN
    END IF;
 
    -- One row per original and per replacement, saying what it is. Every column
-   -- check below is a single join against this.
+   -- check below is a single join against this. (Its pere_ columns are no
+   -- longer used: a structure.pere is checked against its own tree.)
    DELETE FROM anon_meta.verify_key;
    INSERT INTO anon_meta.verify_key
-          (key_code, p_old, p_old_on, a_old, a_old_on, p_new, a_new, stray_new,
-           pere_role, pere_on, pere_bad)
+          (key_code, p_old, p_old_on, a_old, a_old_on, p_new, a_new, stray_new)
    SELECT key_code, MAX(p_old), MAX(p_old_on), MAX(a_old), MAX(a_old_on), MAX(p_new), MAX(a_new),
-          MAX(stray_new), MAX(pere_role), MAX(pere_on), MAX(pere_bad)
+          MAX(stray_new)
      FROM (SELECT p.old_code AS key_code,
                   CASE WHEN p.domain = 'PARTY'   THEN 'Y' END AS p_old,
                   CASE WHEN p.domain = 'PARTY'   THEN p.id_on END AS p_old_on,
                   CASE WHEN p.domain = 'ACCOUNT' THEN 'Y' END AS a_old,
                   CASE WHEN p.domain = 'ACCOUNT' THEN p.id_on END AS a_old_on,
-                  NULL AS p_new, NULL AS a_new, NULL AS stray_new,
-                  p.parent_role AS pere_role,
-                  CASE WHEN p.parent_role = p.domain THEN p.id_on END AS pere_on,
-                  NULL AS pere_bad
+                  NULL AS p_new, NULL AS a_new, NULL AS stray_new
              FROM anon_meta.identity_plan p
             WHERE p.run_id = v_run
            UNION ALL
            SELECT p.new_code, NULL, NULL, NULL, NULL,
                   CASE WHEN p.domain = 'PARTY'   THEN 'Y' END,
                   CASE WHEN p.domain = 'ACCOUNT' THEN 'Y' END,
-                  NULL, NULL, NULL,
-                  CASE WHEN NVL(p.parent_role, p.domain) <> p.domain THEN 'Y' END
+                  NULL
              FROM anon_meta.identity_plan p
             WHERE p.run_id = v_run AND p.new_code IS NOT NULL
            UNION ALL
-           SELECT c.new_code, NULL, NULL, NULL, NULL, NULL, NULL, 'Y', NULL, NULL, NULL
+           SELECT c.new_code, NULL, NULL, NULL, NULL, NULL, NULL, 'Y'
              FROM anon_meta.code_map c
             WHERE NOT EXISTS (SELECT 1 FROM anon_meta.identity_plan p
                                WHERE p.run_id = v_run AND p.new_code = c.new_code))
     GROUP BY key_code;
    COMMIT;
+
+   -- The trees whose folder rows are named after clients ([folders: ...] on
+   -- structure.code), and the condition that picks those rows (alias t).
+   SELECT MAX(folder_trees) INTO v_trees
+     FROM anon_meta.anon_inventory WHERE table_name = 'STRUCTURE' AND column_name = 'CODE';
+   v_folders := CASE WHEN v_trees IS NULL THEN '1 = 0'
+                     ELSE 't.ecran IS NULL AND INSTR(''' || v_trees || ''', '','' || t.structure || '','') > 0' END;
 
 
    -- =========================================================================
@@ -458,23 +463,17 @@ BEGIN
             v_oth     := '1 = 0';
             v_wr      := '1 = 0';
             v_amb     := 'k.p_old = ''Y'' AND k.a_old = ''Y''';
-         ELSIF p_domain = 'OTHER_NODE' THEN
-            -- A node on another screen is never renamed: an identifier there is
-            -- left for review. A replacement there is not this run's doing.
-            v_own_on  := '1 = 0';
-            v_own_off := '1 = 0';
+         ELSIF p_domain = 'FOLDER' THEN
+            -- A folder row named after a client takes the party's translation
+            -- first, else the account's: either replacement is right here.
+            v_own_on  := '(k.p_old_on = ''Y'') OR (k.p_old IS NULL AND k.a_old_on = ''Y'')';
+            v_own_off := '(k.p_old_on = ''N'') OR (k.p_old IS NULL AND k.a_old_on = ''N'')';
             v_oth     := '1 = 0';
-            v_wr      := 'k.p_new = ''Y'' OR k.a_new = ''Y''';
-            v_amb     := 'k.p_old = ''Y'' OR k.a_old = ''Y''';
-         ELSIF p_domain = 'PERE' THEN
-            -- The parent's typed translation, decided before the run.
-            v_own_on  := 'k.pere_role IN (''PARTY'', ''ACCOUNT'') AND k.pere_on = ''Y''';
-            v_own_off := 'k.pere_role IN (''PARTY'', ''ACCOUNT'') AND NVL(k.pere_on, ''N'') = ''N''';
-            v_oth     := '1 = 0';
-            v_wr      := 'k.pere_bad = ''Y''';
-            v_amb     := 'k.pere_role IN (''AMBIGUOUS'', ''OTHER'')';
+            v_wr      := '1 = 0';
+            v_amb     := '1 = 0';
          END IF;
 
+         -- A blank value is no code at all: not counted as an unknown one.
          EXECUTE IMMEDIATE
             'SELECT COUNT(*),'
          || ' COUNT(CASE WHEN ' || v_own_on  || ' THEN 1 END),'
@@ -483,7 +482,7 @@ BEGIN
          || ' COUNT(CASE WHEN ' || v_wr      || ' THEN 1 END),'
          || ' COUNT(CASE WHEN k.stray_new = ''Y'' THEN 1 END),'
          || ' COUNT(CASE WHEN ' || v_amb     || ' THEN 1 END),'
-         || ' COUNT(CASE WHEN t.' || p_column || ' IS NOT NULL AND k.key_code IS NULL THEN 1 END)'
+         || ' COUNT(CASE WHEN TRIM(t.' || p_column || ') IS NOT NULL AND k.key_code IS NULL THEN 1 END)'
          || '  FROM op.' || p_table || ' t'
          || '  LEFT JOIN anon_meta.verify_key k ON k.key_code = t.' || p_column
          || CASE WHEN p_filter IS NOT NULL THEN ' WHERE ' || p_filter END
@@ -509,7 +508,7 @@ BEGIN
          END IF;
       END judge;
    BEGIN
-      FOR r IN (SELECT table_name, column_name, category
+      FOR r IN (SELECT table_name, column_name, category, harvest, row_scope
                   FROM anon_meta.anon_inventory
                  WHERE rule = 'CODE'
                  ORDER BY seq) LOOP
@@ -524,29 +523,85 @@ BEGIN
          END IF;
 
          IF r.category = 'NODE_ROLE' AND r.column_name = 'CODE' THEN
-            -- A node's role is its screen alone.
+            -- A node's role is its screen; a folder row of a folder tree is
+            -- named after a client.
             scan(r.table_name, r.column_name, 'ACCOUNT', 't.ecran = ''w_compte_banque''');
             judge(v_obj || ' [account nodes]', 'ACCOUNT', FALSE);
             scan(r.table_name, r.column_name, 'PARTY', 't.ecran = ''w_tiers''');
             judge(v_obj || ' [party nodes]', 'PARTY', FALSE);
-            scan(r.table_name, r.column_name, 'OTHER_NODE',
-                 'NVL(t.ecran, ''~'') NOT IN (''w_compte_banque'', ''w_tiers'')');
-            judge(v_obj || ' [other screens]', 'OTHER_NODE', FALSE);
+            IF v_trees IS NOT NULL THEN
+               scan(r.table_name, r.column_name, 'FOLDER', v_folders);
+               judge(v_obj || ' [folders]', 'FOLDER', FALSE);
+            END IF;
+
+            -- Any other node keeps its code by design, even one that is also
+            -- a client identifier: a screen other than w_tiers and
+            -- w_compte_banque is not a party or an account. Counted, never
+            -- part of the verdict.
+            EXECUTE IMMEDIATE
+               'SELECT COUNT(*) FROM op.structure t JOIN anon_meta.verify_key k ON k.key_code = t.code'
+            || ' WHERE NVL(t.ecran, ''~'') NOT IN (''w_tiers'', ''w_compte_banque'')'
+            || '   AND NOT (' || v_folders || ')'
+            || '   AND (k.p_old = ''Y'' OR k.a_old = ''Y'')'
+               INTO v_total;
+            record('RESIDUAL', v_obj || ' [other screens, other folders]', 'kept by design', v_total,
+                   NULL, c_info, n(v_total) || ' node(s) keep a code that is also a client identifier: '
+                || 'their screen is not a party or an account, or their tree is not a folder tree');
+            IF v_total > 0 THEN
+               say('  INFO     ' || n(v_total) || ' node(s) on other screens or outside the folder trees '
+                   || 'keep a code that is also a client identifier (by design)');
+            END IF;
+
          ELSIF r.category = 'NODE_ROLE' AND r.column_name = 'PERE' THEN
-            scan(r.table_name, r.column_name, 'PERE', NULL);
-            judge(v_obj, 'PERE', FALSE);
+            -- A child points at what its parent node in its own tree became. A
+            -- pere that a node of the child's tree holds is consistent with it,
+            -- whatever it is - that node is checked above. One that no node of
+            -- the tree holds must not be an original identifier: either its
+            -- parent was renamed and it was not, or it never had a parent there
+            -- and was not translated.
+            -- One join, not a subquery per row: structure has tens of
+            -- thousands of rows.
+            EXECUTE IMMEDIATE
+               'SELECT COUNT(*),'
+            || ' COUNT(CASE WHEN p.code IS NULL AND ((k.p_old_on = ''Y'' AND k.a_old IS NULL)'
+            || '                                 OR (k.a_old_on = ''Y'' AND k.p_old IS NULL)) THEN 1 END),'
+            || ' COUNT(CASE WHEN p.code IS NULL AND ((k.p_old_on = ''N'' AND k.a_old IS NULL)'
+            || '                                 OR (k.a_old_on = ''N'' AND k.p_old IS NULL)) THEN 1 END),'
+            || ' COUNT(CASE WHEN p.code IS NULL AND k.p_old = ''Y'' AND k.a_old = ''Y'' THEN 1 END),'
+            || ' COUNT(CASE WHEN p.code IS NULL THEN 1 END)'
+            || '  FROM (SELECT NVL(t.structure, CHR(1)) AS tree, t.pere'
+            || '          FROM op.structure t WHERE t.pere IS NOT NULL) c'
+            || '  LEFT JOIN (SELECT DISTINCT NVL(x.structure, CHR(1)) AS tree, x.code'
+            || '               FROM op.structure x WHERE x.code IS NOT NULL) p'
+            || '         ON p.tree = c.tree AND p.code = c.pere'
+            || '  LEFT JOIN anon_meta.verify_key k ON k.key_code = c.pere'
+               INTO v_total, v_on, v_off, v_ambig, v_other;
+            classify('RESIDUAL', v_obj, 'each child points at its parent in its own tree', v_total, v_on,
+                     n(v_on) || ' child(ren) hold an original identifier that no node of their tree holds',
+                     v_ambig, v_off);
+            IF v_other > 0 THEN
+               record('RESIDUAL', v_obj || ' [parent not in its tree]', 'informational', v_total, v_other,
+                      c_info, n(v_other) || ' child(ren) point at a text no node of their own tree holds');
+               say('  INFO     ' || n(v_other) || ' structure.pere value(s) point at no node of their own tree');
+            END IF;
+
          ELSE
+            -- Only the rows its [only-where: ...] selects hold identifiers. A
+            -- column marked [no-harvest] holds other codes as well, so the
+            -- values that are no identifier are not counted as unknown there.
             scan(r.table_name, r.column_name,
                  CASE r.category WHEN 'BANK_ACCOUNT' THEN 'ACCOUNT' WHEN 'MIXED' THEN 'MIXED'
-                                 ELSE 'PARTY' END, NULL);
-            judge(v_obj, r.category, TRUE);
+                                 ELSE 'PARTY' END, r.row_scope);
+            judge(v_obj, r.category, NVL(r.harvest, 'Y') = 'Y');
          END IF;
       END LOOP;
 
       -- Values in identifier columns that are no recorded original and no
-      -- replacement. Many are legitimate - a currency, a product, a system code.
-      -- A dangling reference to a party that no longer exists is client data,
-      -- though, and is in scope only once confirmed (anon_meta.confirmed_identity).
+      -- replacement. A code whose master was deleted is captured by the run
+      -- (found only in references), so what is left is mostly legitimate - a
+      -- currency, a product, a system code - or in a MIXED column, where the
+      -- kind of an unknown value cannot be told. A sensitive one belongs in
+      -- anon_meta.confirmed_identity.
       IF v_unk_rows > 0 THEN
          record('RESIDUAL', 'values that are no recorded identifier', 'review if client data',
                 NULL, v_unk_rows, c_warn,
@@ -633,6 +688,32 @@ BEGIN
             show('FAIL', v_obj, v_bad, v_total, 'values still present');
          END IF;
       END LOOP;
+
+      -- structure's folder rows - rows with no screen. Their text is free
+      -- text, except on a folder row named after a client, whose label is
+      -- checked in PART 4. Checked when the inventory covers the column.
+      SELECT COUNT(*) INTO v_bad
+        FROM anon_meta.anon_inventory WHERE table_name = 'STRUCTURE' AND column_name = 'DESCRIPTION';
+      IF v_bad > 0 AND object_exists('STRUCTURE', 'DESCRIPTION') AND object_exists('STRUCTURE', 'ECRAN') THEN
+         v_obj := 'structure.description [folder rows]';
+         EXECUTE IMMEDIATE
+            'SELECT COUNT(*), COUNT(CASE WHEN t.description IS NOT NULL'
+         || '                             AND t.description <> ''' || c_mask || ''''
+         || '                             AND t.description <> SUBSTR(''' || c_mask || ''', 1, LENGTH(t.description))'
+         || '                            THEN 1 END)'
+         || '  FROM op.structure t'
+         || ' WHERE t.ecran IS NULL'
+         || '   AND NOT (' || v_folders || ' AND EXISTS (SELECT 1 FROM anon_meta.identity_plan pp'
+         || '            WHERE pp.run_id = ' || v_run || ' AND (pp.old_code = t.code OR pp.new_code = t.code)))'
+            INTO v_total, v_bad;
+         IF v_bad = 0 THEN
+            record('FREETEXT', v_obj, 'empty or masked', v_total, 0, c_pass);
+         ELSE
+            record('FREETEXT', v_obj, 'empty or masked', v_total, v_bad, c_fail,
+                   'the text of folder rows survived');
+            show('FAIL', v_obj, v_bad, v_total, 'values still present');
+         END IF;
+      END IF;
    END;
 
    SELECT COUNT(*), COUNT(CASE WHEN status = c_fail THEN 1 END)
@@ -717,6 +798,17 @@ BEGIN
                         't.ecran = ''w_compte_banque''', v_obj || ' [account nodes]');
             check_owned(r.table_name, r.column_name, r.rule, 'PARTY', NULL,
                         't.ecran = ''w_tiers''', v_obj || ' [party nodes]');
+            -- A folder row named after a client: the party it is named after,
+            -- else the account.
+            IF v_trees IS NOT NULL THEN
+               check_owned(r.table_name, r.column_name, r.rule, 'PARTY', NULL, v_folders,
+                           v_obj || ' [party folders]');
+               check_owned(r.table_name, r.column_name, r.rule, 'ACCOUNT', NULL,
+                           v_folders || ' AND NOT EXISTS (SELECT 1 FROM anon_meta.identity_plan pp'
+                        || ' WHERE pp.run_id = ' || v_run || ' AND pp.domain = ''PARTY'''
+                        || ' AND (pp.old_code = t.code OR pp.new_code = t.code))',
+                           v_obj || ' [account folders]');
+            END IF;
          ELSIF r.category = 'BANK_ACCOUNT' THEN
             check_owned(r.table_name, r.column_name, r.rule, 'ACCOUNT', NULL, NULL, v_obj);
          ELSIF r.category = 'PARTY' THEN
