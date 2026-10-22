@@ -1,10 +1,10 @@
 -- ============================================================================
 -- run/stop - Ask a run to stop
 -- ============================================================================
--- Sent by run_op_anonymization.bat to its monitor session (as OP) on Ctrl+C.
--- The run reads the request between two columns: it completes the column it
--- is working on, enables the triggers of OP again, and ends STOPPED. Can also
--- be run by hand, from any session as OP:
+-- Sent by the wrapper (run_op_anonymization.bat or .sh) to its monitor
+-- session (as OP) on Ctrl+C. The run reads the request between two columns:
+-- it completes the column it is working on, enables the triggers of OP again,
+-- and ends STOPPED. Can also be run by hand, from any session as OP:
 --
 --   sqlplus op/<password>@<database> @op/sql/run/stop.sql <run id>
 --

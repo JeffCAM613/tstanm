@@ -79,15 +79,16 @@ tbody tr:last-child td{border-bottom:none}
 <ul class="task">
 <li>☐ A <strong>restored copy</strong> of the database - not production</li>
 <li>☐ Oracle <strong>19c</strong> or later</li>
-<li>☐ The <strong>Oracle client with SQL*Plus</strong> on the machine you run from, <code>sqlplus.exe</code> in <code>PATH</code> (or in <code>ORACLE_HOME\bin</code>), and the database reachable by an alias in <code>tnsnames.ora</code> or as <code>host:port/service</code></li>
-<li>☐ <strong>Windows PowerShell 5.1</strong> - part of every supported Windows version</li>
+<li>☐ The <strong>Oracle client with SQL*Plus</strong> on the machine you run from - Windows or Linux - and the database reachable by an alias in <code>tnsnames.ora</code> or as <code>host:port/service</code></li>
+<li>☐ On <strong>Windows</strong>: <code>sqlplus.exe</code> in <code>PATH</code> (or in <code>ORACLE_HOME\bin</code>), and <strong>Windows PowerShell 5.1</strong> - part of every supported Windows version</li>
+<li>☐ On <strong>Linux</strong>: <code>sqlplus</code> in <code>PATH</code> (or in <code>$ORACLE_HOME/bin</code>), <strong>bash 4.2</strong> or later and <strong>awk</strong> - part of every supported distribution (section 12)</li>
 <li>☐ The <strong>SYS</strong> password and the <strong>OP</strong> schema password</li>
 <li>☐ A <strong>tablespace</strong> for the tool's own metadata schema, <code>ANON_META</code> (a few MB)</li>
 <li>☐ About <strong>an hour</strong> of uninterrupted time for a run on a production-sized copy</li>
 <li>☐ A machine <strong>on the same network as the database</strong></li>
 </ul>
 <p>A run keeps one database session open for its whole length. A network interruption on a VPN can end it; run from a host near the database rather than from a remote laptop.</p>
-<p>Check that SQL*Plus reaches the database:</p>
+<p>Check that SQL*Plus reaches the database - the same two commands on Windows and on Linux:</p>
 <pre><code>sqlplus -V
 tnsping YOUR_DATABASE</code></pre>
 <hr>
@@ -98,19 +99,23 @@ tnsping YOUR_DATABASE</code></pre>
 |  |- inventory_op.csv              what is anonymized, shipped
 |  |- inventory_op_custom.csv       this site's additions and corrections
 |- op\
-|  |- run_op_anonymization.bat      &gt;&gt;&gt; the only thing you run &lt;&lt;&lt;
-|  |- lib\                          the run's screen and report (PowerShell)
+|  |- run_op_anonymization.bat      &gt;&gt;&gt; what you run on Windows &lt;&lt;&lt;
+|  |- run_op_anonymization.sh       &gt;&gt;&gt; what you run on Linux &lt;&lt;&lt;
+|  |- lib\                          the run's screen and report (PowerShell; bash and awk)
 |  |- sql\                          the engine and the scripts the run sends
 |  |- verify\                       the verification
 |  |- logs\                         one folder per run
 |- docs\                            this guide and the technical guide
 |- tests\manual\                    optional helper scripts
 |- tools\                           optional analysis scripts</code></pre>
-<p>You only ever launch <code>op\run_op_anonymization.bat</code>. Everything else is called for you.</p>
+<p>You only ever launch <code>op\run_op_anonymization.bat</code> on Windows, or <code>op/run_op_anonymization.sh</code> on Linux. Everything else is called for you. Both run the same engine, the same SQL and the same checks, show the same screens and write the same <code>report.html</code>; the Linux options are written <code>--dryrun</code>, <code>--auto</code>... (section 12).</p>
 <hr>
 <h2 id="4-step-1---configure">4. Step 1 - Configure</h2>
 <pre><code>cd Anonymization_v4
 copy config\anonymization.template.ini config\anonymization.ini</code></pre>
+<p>On Linux:</p>
+<pre><code>cd Anonymization_v4
+cp config/anonymization.template.ini config/anonymization.ini</code></pre>
 <p>Open <code>config\anonymization.ini</code> and fill in the database and the tablespace. <strong>Leave the passwords blank</strong>: they are then asked for when the run starts, masked, and passed to SQL*Plus on its input only - never on a command line, never written down. The file is fully commented.</p>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left">Setting</th>
@@ -168,10 +173,15 @@ copy config\anonymization.template.ini config\anonymization.ini</code></pre>
 <pre><code>set ANON_SYS_PASSWORD=...
 set ANON_OP_PASSWORD=...
 op\run_op_anonymization.bat /auto /dryrun</code></pre>
+<p>On Linux:</p>
+<pre><code>export ANON_SYS_PASSWORD=...
+export ANON_OP_PASSWORD=...
+op/run_op_anonymization.sh --auto --dryrun</code></pre>
 <hr>
 <h2 id="5-step-2---the-dry-run">5. Step 2 - The dry run</h2>
 <p><strong>Always do this first.</strong> A dry run makes every check a run makes, plans every translation, and counts what a run would change - table by table, column by column - on the same code path. It changes nothing.</p>
 <pre><code>op\run_op_anonymization.bat /dryrun</code></pre>
+<pre><code>op/run_op_anonymization.sh --dryrun          # on Linux</code></pre>
 <h3 id="getting-ready">Getting ready</h3>
 <p>The run finds SQL*Plus, reads the configuration, asks what it leaves blank, connects as SYS and as OP, creates or updates <code>ANON_META</code>, installs the engine and loads the inventory. Each is one line:</p>
 <pre><code> OP Anonymization 0.5.0                                                  dry run
@@ -200,7 +210,7 @@ op\run_op_anonymization.bat /auto /dryrun</code></pre>
    Bank account (CB_)        yes            yes      yes
    Free text                 always emptied
    Every switch is on: a full anonymization.</code></pre>
-<p>A missing SQL*Plus, a wrong alias or a wrong password is a line here, before anything else happens. Items "not here" are normal: the inventory covers several KTP/CTI versions, and no database has every table.</p>
+<p>A missing SQL*Plus, a wrong alias or a wrong password is a line here, before anything else happens. On Linux the screen is the same, with <code>/</code> in the paths; a password is not shown at all while it is typed. Items "not here" are normal: the inventory covers several KTP/CTI versions, and no database has every table.</p>
 <h3 id="the-checks">The checks</h3>
 <p>The first step plans the run and makes its checks, then shows them as a table:</p>
 <pre><code> 1 of 2  Checking and planning (read-only)                         done    0:41
@@ -252,6 +262,7 @@ op\run_op_anonymization.bat /auto /dryrun</code></pre>
 <hr>
 <h2 id="6-step-3---the-run">6. Step 3 - The run</h2>
 <pre><code>op\run_op_anonymization.bat</code></pre>
+<pre><code>op/run_op_anonymization.sh                   # on Linux</code></pre>
 <p>The same getting ready and the same checks, on the database as it is now. If they pass, the run says what it will change and asks:</p>
 <pre><code> ===============================================================================
   Ready. This replaces the client data of OP on OPDB:
@@ -311,14 +322,14 @@ op\run_op_anonymization.bat /auto /dryrun</code></pre>
 <p>Every run ends with its exit code in words, for example <code>Exit code 0: done, verified: PASS.</code></p>
 <hr>
 <h2 id="7-the-run-folder-and-reporthtml">7. The run folder and report.html</h2>
-<p>Every run - dry runs, refused and failed runs included - leaves a folder `op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;`:</p>
+<p>Every run - dry runs, refused and failed runs included - leaves a folder <code>op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;` (</code>op/logs/...` on Linux):</p>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left">File</th>
 <th style="text-align:left"></th>
 </tr></thead><tbody>
 <tr>
 <td style="text-align:left"><code>report.html</code></td>
-<td style="text-align:left">The result: opened in your browser at the end (<code>/no-open</code> leaves it closed)</td>
+<td style="text-align:left">The result: opened in your browser at the end (<code>/no-open</code> leaves it closed). On a Linux server, which has no browser, its path is shown: copy it to a PC to read it</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>report.txt</code></td>
@@ -361,9 +372,11 @@ op\run_op_anonymization.bat /auto /dryrun</code></pre>
 <h2 id="8-stopping-a-run-and-when-something-goes-wrong">8. Stopping a run, and when something goes wrong</h2>
 <h3 id="ctrlc">Ctrl+C</h3>
 <p><code>Ctrl+C</code> asks the run to stop <strong>after the table or column it is working on</strong>. The run completes that one, enables the triggers of OP again, and ends <strong>STOPPED</strong> (exit code 5). Every table or column done is complete; nothing is half done.</p>
-<p><strong>Closing the window during a run is not safe:</strong> the triggers of OP could stay disabled. If it happens, run this from SQL*Plus as OP:</p>
+<p>On Linux, <code>kill -INT &lt;pid&gt;</code> - or <code>kill &lt;pid&gt;</code> - from another terminal does the same as Ctrl+C: for a run started in the background, for example (section 12).</p>
+<p><strong>Closing the window during a run is not safe on Windows:</strong> the triggers of OP could stay disabled. If it happens, run this from SQL*Plus as OP:</p>
 <pre><code>sqlplus op/&lt;password&gt;@&lt;database&gt; @op\sql\run\recover.sql &lt;run id&gt;</code></pre>
 <p>While the run is still working in the database it changes nothing - the run then ends by itself and enables the triggers again. Otherwise it records the run as failed and enables the triggers of OP again. Then a new run resumes.</p>
+<p>On Linux, a closed terminal or a dropped SSH connection does not stop the run: it goes on to its end without its screen, verifies, and leaves its folder as usual - <code>console.log</code> there says how far it has got. A run that must not depend on the connection at all is better started in <code>tmux</code> or <code>screen</code>, or in the background (section 12).</p>
 <h3 id="a-new-run-resumes">A new run resumes</h3>
 <p><strong>It is safe to run again.</strong> Fix the cause and run the same command: no restore, no flag. The translations recorded so far are kept, so every identity gets the same replacement as before, and what is already done is found done. A run after a stop or a failure therefore converges on the same result as one that never stopped. It takes about as long as the first, because every table is read again.</p>
 <h3 id="when-you-must-not-simply-run-again">When you must NOT simply run again</h3>
@@ -412,6 +425,26 @@ DROP USER atrace CASCADE;</code></pre>
 <td style="text-align:left"><code>sqlplus not found</code></td>
 <td style="text-align:left">No Oracle client in <code>PATH</code> or <code>ORACLE_HOME\bin</code></td>
 <td style="text-align:left">Install the client, or add its <code>bin</code> folder to <code>PATH</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sqlplus does not start (...)</code> (Linux)</td>
+<td style="text-align:left">sqlplus is there but cannot load its libraries</td>
+<td style="text-align:left">Set <code>ORACLE_HOME</code> - and, for an Instant Client unpacked from a zip, <code>LD_LIBRARY_PATH</code> - as the client's installation says</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>Permission denied</code> starting <code>run_op_anonymization.sh</code></td>
+<td style="text-align:left">The file lost its execute permission on the way: a tool that unpacks without permissions</td>
+<td style="text-align:left"><code>chmod +x op/run_op_anonymization.sh</code>, or start it as <code>sh op/run_op_anonymization.sh</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>bad interpreter</code>, or <code>$'\r': command not found</code></td>
+<td style="text-align:left">A <code>.sh</code> or <code>.awk</code> file was saved with Windows line endings</td>
+<td style="text-align:left"><code>sed -i 's/\r$//' op/run_op_anonymization.sh op/lib/*.sh op/lib/*.awk</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>needs bash 4.2 or later</code></td>
+<td style="text-align:left">The host's bash is older</td>
+<td style="text-align:left">Run from a host with bash 4.2 or later: Red Hat and Oracle Linux 7 and later have it</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>the connection as SYS ... failed: ORA-12154</code></td>
@@ -530,7 +563,68 @@ my_new_table,contact_email,NULL_OUT,NONE,CUSTOM,</code></pre>
 DROP USER atrace CASCADE;</code></pre>
 <p>Keep the run folders: they hold counts only, and say what was done to the copy.</p>
 <hr>
-<h2 id="12-quick-reference">12. Quick reference</h2>
+<h2 id="12-running-on-linux">12. Running on Linux</h2>
+<p><code>op/run_op_anonymization.sh</code> is the same run as <code>op\run_op_anonymization.bat</code>: the same engine, SQL, checks, screens, run folder and <code>report.html</code>, from the same <code>config/anonymization.ini</code>. It needs bash 4.2 or later, awk and the usual system commands: nothing to install beyond the Oracle client.</p>
+<h3 id="unpacking">Unpacking</h3>
+<pre><code>unzip Anonymization_v4_0.5.0.zip
+cd Anonymization_v4
+op/run_op_anonymization.sh --help</code></pre>
+<p><code>unzip</code> keeps the script executable. After a tool that does not: <code>chmod +x op/run_op_anonymization.sh</code>, or start it as <code>sh op/run_op_anonymization.sh</code>.</p>
+<h3 id="the-oracle-client">The Oracle client</h3>
+<p>The run uses the <code>sqlplus</code> it finds in <code>PATH</code>, or else in <code>$ORACLE_HOME/bin</code>, and checks that it starts before anything else. A full client or a database home needs <code>ORACLE_HOME</code>; an Instant Client unpacked from a zip needs <code>LD_LIBRARY_PATH</code> as well - an RPM installation sets it up by itself. <code>TNS_ADMIN</code> says where <code>tnsnames.ora</code> is when it is not in the client's own folder; with <code>ORACLE_SID=host:port/service</code> no <code>tnsnames.ora</code> is needed. The run reads Oracle error codes, never their texts, so an <code>NLS_LANG</code> in another language does not matter to it.</p>
+<h3 id="long-runs">Long runs</h3>
+<p>A run keeps its sessions open for its whole length. Start it where nothing can cut it short: in <code>tmux</code> or <code>screen</code>, then detach; or in the background, asking nothing:</p>
+<pre><code>export ANON_SYS_PASSWORD=...
+export ANON_OP_PASSWORD=...
+nohup op/run_op_anonymization.sh --auto --force &gt; run.out 2&gt;&amp;1 &amp;
+tail -f run.out</code></pre>
+<p>Without a terminal the live lines are written once a minute instead of rewritten in place. To stop such a run as Ctrl+C would, <code>kill -INT &lt;pid&gt;</code>. If the terminal of a run started by hand closes, the run goes on to its end (section 8).</p>
+<h3 id="reporthtml">report.html</h3>
+<p>A server has no browser: the end of the run gives the path of <code>report.html</code>. Copy it to a PC - for example <code>scp server:&lt;folder&gt;/op/logs/&lt;run&gt;/report.html .</code> - and open it there. It holds counts and names of tables and columns only.</p>
+<h3 id="what-differs-from-windows">What differs from Windows</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left"></th>
+<th style="text-align:left">Windows</th>
+<th style="text-align:left">Linux</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">Command</td>
+<td style="text-align:left"><code>op\run_op_anonymization.bat</code></td>
+<td style="text-align:left"><code>op/run_op_anonymization.sh</code></td>
+</tr>
+<tr>
+<td style="text-align:left">Options</td>
+<td style="text-align:left"><code>/dryrun</code>, <code>/auto</code>, <code>/force</code>, <code>/verbose</code>, <code>/no-open</code>, <code>/no-color</code>, <code>/inventory</code>, <code>/help</code></td>
+<td style="text-align:left">the same with <code>--</code>: <code>--dryrun</code>... (<code>-dryrun</code> and <code>/dryrun</code> are accepted too)</td>
+</tr>
+<tr>
+<td style="text-align:left">A password while it is typed</td>
+<td style="text-align:left">shown as <code>*</code></td>
+<td style="text-align:left">not shown</td>
+</tr>
+<tr>
+<td style="text-align:left">The terminal closed during a run</td>
+<td style="text-align:left">not safe: <code>recover.sql</code> (section 8)</td>
+<td style="text-align:left">the run goes on to its end</td>
+</tr>
+<tr>
+<td style="text-align:left">Stopping from another terminal</td>
+<td style="text-align:left"><code>op\sql\run\stop.sql &lt;run id&gt;</code> as OP</td>
+<td style="text-align:left">the same, or <code>kill -INT &lt;pid&gt;</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>report.html</code> at the end</td>
+<td style="text-align:left">opened in the browser</td>
+<td style="text-align:left">its path; opened only on a desktop</td>
+</tr>
+<tr>
+<td style="text-align:left">The wrapper</td>
+<td style="text-align:left">PowerShell, <code>op\lib*.ps1</code></td>
+<td style="text-align:left">bash and awk, <code>op/lib/*.sh</code> and <code>*.awk</code></td>
+</tr>
+</tbody></table></div>
+<hr>
+<h2 id="13-quick-reference">13. Quick reference</h2>
 <pre><code>op\run_op_anonymization.bat /dryrun           what a run would change; changes nothing
 op\run_op_anonymization.bat                   the run: checks, then asks for YES
 op\run_op_anonymization.bat /auto             asks nothing (still asks for YES)
@@ -538,13 +632,21 @@ op\run_op_anonymization.bat /auto /force      asks nothing at all
 op\run_op_anonymization.bat /verbose          every line of the engine on the screen
 op\run_op_anonymization.bat /no-open          report.html not opened at the end
 op\run_op_anonymization.bat /help             every option</code></pre>
+<p>On Linux:</p>
+<pre><code>op/run_op_anonymization.sh --dryrun           what a run would change; changes nothing
+op/run_op_anonymization.sh                    the run: checks, then asks for YES
+op/run_op_anonymization.sh --auto             asks nothing (still asks for YES)
+op/run_op_anonymization.sh --auto --force     asks nothing at all
+op/run_op_anonymization.sh --verbose          every line of the engine on the screen
+op/run_op_anonymization.sh --no-open          report.html not opened at the end
+op/run_op_anonymization.sh --help             every option</code></pre>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left"></th>
 <th style="text-align:left"></th>
 </tr></thead><tbody>
 <tr>
 <td style="text-align:left">Run folder</td>
-<td style="text-align:left">`op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;`</td>
+<td style="text-align:left"><code>op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;` (</code>op/logs/...` on Linux)</td>
 </tr>
 <tr>
 <td style="text-align:left">Passwords without questions</td>
@@ -567,4 +669,5 @@ op\run_op_anonymization.bat /help             every option</code></pre>
 <td style="text-align:left"><code>0</code> PASS (a dry run: completed) - <code>1</code> failed or not started - <code>2</code> FAIL - <code>3</code> REVIEW REQUIRED - <code>4</code> INCOMPLETE - <code>5</code> stopped</td>
 </tr>
 </tbody></table></div>
+<p>On Linux the same commands, with <code>/</code> in the paths; a run is also stopped by <code>kill -INT &lt;pid&gt;</code>.</p>
 </div></body></html>

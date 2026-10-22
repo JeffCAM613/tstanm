@@ -3,9 +3,9 @@
 -- ============================================================================
 -- The engine enables the triggers of OP again on every way out of a run - a
 -- failure and a stop included - but not when its own session is lost (the
--- connection broken, the window closed). Sent by run_op_anonymization.bat to
--- its monitor session (as OP) when that happens; can be run by hand from any
--- session as OP:
+-- connection broken, the window closed). Sent by the wrapper
+-- (run_op_anonymization.bat or .sh) to its monitor session (as OP) when that
+-- happens; can be run by hand from any session as OP:
 --
 --   sqlplus op/<password>@<database> @op/sql/run/recover.sql <run id>
 --

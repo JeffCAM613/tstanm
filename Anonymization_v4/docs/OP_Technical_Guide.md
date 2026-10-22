@@ -158,7 +158,8 @@ next release replaces.
 The CSVs are on the machine that runs the tool, not necessarily on the database server, so they are
 not read as external tables. The run turns them into `INSERT` statements and sends them on the input
 of its worker session (section 8); `inventory.sql` in the run folder is that text.
-`op\run_op_anonymization.bat /inventory <file>` writes it to a file and stops.
+`op\run_op_anonymization.bat /inventory <file>` - or `op/run_op_anonymization.sh --inventory <file>`
+on Linux, which writes the same statements - writes it to a file and stops.
 
 ---
 
@@ -323,6 +324,12 @@ op\run_op_anonymization.bat          launcher: starts lib\anon.ps1, returns its 
 op\lib\anon.ps1                      configuration, questions, sessions, steps, run folder
 op\lib\anon_screen.ps1               the screen: steps, live lines, checks table, the end
 op\lib\anon_html.ps1                 report.html
+op/run_op_anonymization.sh           Linux launcher: starts lib/anon.sh in bash
+op/lib/anon.sh                       the same as anon.ps1, in bash
+op/lib/anon_screen.sh                the screen while the run works
+op/lib/anon_results.awk              the figures of a run, read from run/results.sql
+op/lib/anon_end.awk                  the end of the run on the screen
+op/lib/anon_html.awk                 report.html
 op\sql\10_create_metadata_schema.sql ANON_META, created or migrated in place (SYS)
 op\sql\30_install_engine.sql         the op.anon_engine package
 op\sql\21_validate_inventory.sql     the loaded inventory, checked
@@ -347,6 +354,13 @@ the environment of a process it starts.
 Each command sent to a kept session is followed by `PROMPT <marker>`; the wrapper reads the output up
 to that marker. The engine's state - the run, its plan - stays in the worker session from the checks
 to the work, so nothing has to be attached again after the confirmation.
+
+On Linux each session is a `sqlplus` in a process group of its own. Its input is a named pipe the
+wrapper writes to - the `CONNECT` line passes through it, and is never stored - and its output a file
+the wrapper reads as it grows; both are in a temporary folder only its owner can read, removed at
+the end. The process group keeps Ctrl+C at the terminal away from `sqlplus`, which would otherwise
+cancel the statement it runs. The wrapper needs bash 4.2 or later, awk (gawk, mawk or busybox) and
+the usual system commands; it starts nothing else.
 
 ### The steps
 
@@ -444,6 +458,10 @@ table or column (`check_stop`) and raises `ORA-20018`. `apply.sql` then enables 
 ends the run STOPPED. Before the work, the wrapper ends the run STOPPED itself once the step under way
 returns. The exit code is 5.
 
+On Linux, Ctrl+C is the SIGINT the wrapper receives - SIGTERM, from `kill`, is taken the same way -
+and `sqlplus` never receives it (section 8). A SIGHUP, when the terminal closes, stops nothing: the
+run goes on to its end without its screen, and leaves its folder.
+
 ### Failures
 
 An error ends the run FAILED with the error recorded (`anon_run.error_text`, `anon_step_log`). The
@@ -524,7 +542,8 @@ Every run leaves `op\logs\<date>_<time>_R-<run>\`: `report.html`, `report.txt` (
 lines), `verify.txt`, `console.log` (the screen and the engine), `results.txt`, `manifest.txt`
 (`key=value`) and `inventory.sql`.
 
-`report.html` is written by `anon_html.ps1` from the files of the folder - `results.txt` above all,
+`report.html` is written by `anon_html.ps1` - `anon_html.awk` on Linux, which writes the same page:
+the regression suite compares the two - from the files of the folder - `results.txt` above all,
 which `run/results.sql` prints from what the run and the verification recorded. It **reads, never
 re-checks**: there is one place that decides whether a column is clean, and the report is not it. It
 holds counts and names of tables and columns only. The queries that list the unclassified parties
@@ -655,6 +674,9 @@ The application's schema objects are never renamed. Its French vocabulary:
 |---|---|
 | `op\run_op_anonymization.bat` | The entry point: starts `lib\anon.ps1` in Windows PowerShell 5.1 and returns its exit code |
 | `op\lib\anon.ps1`, `anon_screen.ps1`, `anon_html.ps1` | The run, its screen, its report |
+| `op/run_op_anonymization.sh` | The entry point on Linux: starts `lib/anon.sh` in bash and returns its exit code |
+| `op/lib/anon.sh`, `anon_screen.sh` | The run and its screen, on Linux |
+| `op/lib/anon_results.awk`, `anon_end.awk`, `anon_html.awk` | The figures of a run, the end of the run on the screen and its report, on Linux |
 | `op\sql\10_create_metadata_schema.sql` | Creates or migrates `anon_meta` and the `atrace` view; the grants. Runs as SYS |
 | `op\sql\21_validate_inventory.sql` | Rejects impossible rule/category pairs and misspelt options; parses the options |
 | `op\sql\30_install_engine.sql` | The `op.anon_engine` package |
@@ -725,6 +747,6 @@ The application's schema objects are never renamed. Its French vocabulary:
 | **BIC components and account numbers** | Not covered: they need rules the engine does not have (a BIC mapped component by component, account numbers generated format-valid). The EPF anonymization covers them; `inventory_op_custom.csv` lists them, commented out |
 | **A re-run costs a full run** | No checkpoint, by design (section 11) |
 | **A stable network** | The worker session is open for the whole run. Run from a host near the database |
-| **Closing the window during a run** | The triggers of OP can stay disabled until `run/recover.sql` is run |
+| **Closing the window during a run** | On Windows the triggers of OP can stay disabled until `run/recover.sql` is run. On Linux the run goes on to its end |
 | **The triggers of OP** | A run disables every trigger of OP and enables every trigger again at its end - including one that was disabled before the run |
 | **The estimate of a dry run** | A rough figure: statements on large tables do not scale with the rows they change |

@@ -2,8 +2,9 @@
 -- 00 - OP anonymization in one sqlplus session
 -- ============================================================================
 -- The whole run as one script, for sqlplus without the wrapper and for the
--- regression suite. run_op_anonymization.bat runs the same steps through the
--- entry scripts of sql/run, in sessions it watches, and shows them live.
+-- regression suite. The wrapper - run_op_anonymization.bat on Windows,
+-- run_op_anonymization.sh on Linux - runs the same steps through the entry
+-- scripts of sql/run, in sessions it watches, and shows them live.
 --
 -- To run it directly:
 --   sqlplus /nolog @00_run_op_anonymization.sql <sid> <syspwd> <oppwd> \
@@ -193,8 +194,9 @@ PROMPT
 PROMPT ====================================================================
 PROMPT  The engine's lines appear when each phase ends. Its progress is in
 PROMPT  anon_meta.anon_step_log and anon_meta.anon_progress as it happens:
-PROMPT  to watch a long run, use tests\manual\monitor_op_progress.sql in a
-PROMPT  second session. run_op_anonymization.bat shows the run live.
+PROMPT  to watch a long run, use tests/manual/monitor_op_progress.sql in a
+PROMPT  second session. run_op_anonymization.bat (Windows) and
+PROMPT  run_op_anonymization.sh (Linux) show the run live.
 PROMPT ====================================================================
 
 DECLARE

@@ -1,9 +1,10 @@
 -- ============================================================================
 -- run/start - Configure and open a run
 -- ============================================================================
--- Sent by run_op_anonymization.bat to its worker session (as OP), once the
--- engine is installed and the inventory loaded and validated. The run then
--- exists in anon_meta.anon_run, and the session's module names it.
+-- Sent by the wrapper (run_op_anonymization.bat or .sh) to its worker session
+-- (as OP), once the engine is installed and the inventory loaded and
+-- validated. The run then exists in anon_meta.anon_run, and the session's
+-- module names it.
 --
 --   @start.sql <mode> <ent> <ptf> <cpty> <uncl> <acct>
 --              <ent_desc> <ptf_desc> <cpty_desc> <uncl_desc> <acct_desc>

@@ -1,9 +1,10 @@
 -- ============================================================================
 -- run/poll - One look at a run while it works (read-only)
 -- ============================================================================
--- Sent by run_op_anonymization.bat to its monitor session (as OP) about every
--- two seconds while the worker session runs: what the run has logged since
--- the last look, where it is now, and the progress of a long statement.
+-- Sent by the wrapper (run_op_anonymization.bat or .sh) to its monitor
+-- session (as OP) about every two seconds while the worker session runs: what
+-- the run has logged since the last look, where it is now, and the progress
+-- of a long statement.
 --
 --   @poll.sql <run id> <last step id seen> <RUN | VERIFY>
 --

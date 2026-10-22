@@ -238,7 +238,7 @@ histo_operation,description,NULL_OUT,NONE,BASE,</code></pre>
 <h3 id="overrides">Overrides</h3>
 <p>The shipped file is loaded first, the site file second. For each site row the load deletes the shipped row of the same <code>(table, column)</code> before inserting its own, so a site row <strong>replaces</strong> the shipped one - which is how a wrong classification is corrected at a site without editing a file the next release replaces.</p>
 <h3 id="how-the-csvs-reach-the-database">How the CSVs reach the database</h3>
-<p>The CSVs are on the machine that runs the tool, not necessarily on the database server, so they are not read as external tables. The run turns them into <code>INSERT</code> statements and sends them on the input of its worker session (section 8); <code>inventory.sql</code> in the run folder is that text. <code>op\run_op_anonymization.bat /inventory &lt;file&gt;</code> writes it to a file and stops.</p>
+<p>The CSVs are on the machine that runs the tool, not necessarily on the database server, so they are not read as external tables. The run turns them into <code>INSERT</code> statements and sends them on the input of its worker session (section 8); <code>inventory.sql</code> in the run folder is that text. <code>op\run_op_anonymization.bat /inventory &lt;file&gt;</code> - or <code>op/run_op_anonymization.sh --inventory &lt;file&gt;</code> on Linux, which writes the same statements - writes it to a file and stops.</p>
 <hr>
 <h2 id="4-identities">4. Identities</h2>
 <h3 id="two-domains">Two domains</h3>
@@ -399,6 +399,12 @@ histo_operation,description,NULL_OUT,NONE,BASE,</code></pre>
 op\lib\anon.ps1                      configuration, questions, sessions, steps, run folder
 op\lib\anon_screen.ps1               the screen: steps, live lines, checks table, the end
 op\lib\anon_html.ps1                 report.html
+op/run_op_anonymization.sh           Linux launcher: starts lib/anon.sh in bash
+op/lib/anon.sh                       the same as anon.ps1, in bash
+op/lib/anon_screen.sh                the screen while the run works
+op/lib/anon_results.awk              the figures of a run, read from run/results.sql
+op/lib/anon_end.awk                  the end of the run on the screen
+op/lib/anon_html.awk                 report.html
 op\sql\10_create_metadata_schema.sql ANON_META, created or migrated in place (SYS)
 op\sql\30_install_engine.sql         the op.anon_engine package
 op\sql\21_validate_inventory.sql     the loaded inventory, checked
@@ -438,6 +444,7 @@ op\verify\verify_op_coverage.sql     the verification</code></pre>
 </tr>
 </tbody></table></div>
 <p>Each command sent to a kept session is followed by <code>PROMPT &lt;marker&gt;</code>; the wrapper reads the output up to that marker. The engine's state - the run, its plan - stays in the worker session from the checks to the work, so nothing has to be attached again after the confirmation.</p>
+<p>On Linux each session is a <code>sqlplus</code> in a process group of its own. Its input is a named pipe the wrapper writes to - the <code>CONNECT</code> line passes through it, and is never stored - and its output a file the wrapper reads as it grows; both are in a temporary folder only its owner can read, removed at the end. The process group keeps Ctrl+C at the terminal away from <code>sqlplus</code>, which would otherwise cancel the statement it runs. The wrapper needs bash 4.2 or later, awk (gawk, mawk or busybox) and the usual system commands; it starts nothing else.</p>
 <h3 id="the-steps">The steps</h3>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left">Dry run</th>
@@ -621,6 +628,7 @@ op\verify\verify_op_coverage.sql     the verification</code></pre>
 <p><code>anon_meta.anon_run.status</code>: <code>RUNNING</code>, then <code>COMPLETED</code>; <code>FAILED</code> on an error; <code>REFUSED</code> when the checks found it unsafe; <code>CANCELLED</code> when it was not confirmed; <code>STOPPED</code> when it was asked to stop.</p>
 <h3 id="ctrlc">Ctrl+C</h3>
 <p>The wrapper reads Ctrl+C as a key while sessions work. During the work it sends <code>run/stop.sql</code> through the monitor session, which sets <code>anon_run.stop_requested</code>; the engine reads it before each table or column (<code>check_stop</code>) and raises <code>ORA-20018</code>. <code>apply.sql</code> then enables the triggers again and ends the run STOPPED. Before the work, the wrapper ends the run STOPPED itself once the step under way returns. The exit code is 5.</p>
+<p>On Linux, Ctrl+C is the SIGINT the wrapper receives - SIGTERM, from <code>kill</code>, is taken the same way - and <code>sqlplus</code> never receives it (section 8). A SIGHUP, when the terminal closes, stops nothing: the run goes on to its end without its screen, and leaves its folder.</p>
 <h3 id="failures">Failures</h3>
 <p>An error ends the run FAILED with the error recorded (<code>anon_run.error_text</code>, <code>anon_step_log</code>). The triggers of OP are enabled again on every way out of <code>apply.sql</code>. If the worker's session itself is lost, the wrapper runs <code>run/recover.sql</code> through the monitor session; after a closed window, an operator runs it by hand. It changes nothing while the run's database session is still there - a lost connection does not stop a call under way, and the run then ends by itself - and otherwise records the run FAILED and, when the run had disabled the triggers of OP and not enabled them again, enables them.</p>
 <h3 id="resuming-is-running-again">Resuming is running again</h3>
@@ -719,7 +727,7 @@ op\verify\verify_op_coverage.sql     the verification</code></pre>
 <hr>
 <h2 id="14-the-run-folder-and-reporthtml">14. The run folder and report.html</h2>
 <p>Every run leaves <code>op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;`: </code>report.html<code>, </code>report.txt<code> (the engine's lines), </code>verify.txt<code>, </code>console.log<code> (the screen and the engine), </code>results.txt<code>, </code>manifest.txt<code> (</code>key=value<code>) and </code>inventory.sql`.</p>
-<p><code>report.html</code> is written by <code>anon_html.ps1</code> from the files of the folder - <code>results.txt</code> above all, which <code>run/results.sql</code> prints from what the run and the verification recorded. It <strong>reads, never re-checks</strong>: there is one place that decides whether a column is clean, and the report is not it. It holds counts and names of tables and columns only. The queries that list the unclassified parties are printed in it for the operator to run, never run by the tool.</p>
+<p><code>report.html</code> is written by <code>anon_html.ps1</code> - <code>anon_html.awk</code> on Linux, which writes the same page: the regression suite compares the two - from the files of the folder - <code>results.txt</code> above all, which <code>run/results.sql</code> prints from what the run and the verification recorded. It <strong>reads, never re-checks</strong>: there is one place that decides whether a column is clean, and the report is not it. It holds counts and names of tables and columns only. The queries that list the unclassified parties are printed in it for the operator to run, never run by the tool.</p>
 <hr>
 <h2 id="15-metadata-schema-reference">15. Metadata schema reference</h2>
 <p>Everything the tool stores lives in <code>anon_meta</code>, created by the first run and migrated in place by later versions: missing columns are added and constraints widened; nothing that records an original value is ever dropped.</p>
@@ -916,6 +924,18 @@ DROP USER atrace CASCADE;   -- once the EPF anonymization has run</code></pre>
 <tr>
 <td style="text-align:left"><code>op\lib\anon.ps1</code>, <code>anon_screen.ps1</code>, <code>anon_html.ps1</code></td>
 <td style="text-align:left">The run, its screen, its report</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/run_op_anonymization.sh</code></td>
+<td style="text-align:left">The entry point on Linux: starts <code>lib/anon.sh</code> in bash and returns its exit code</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/lib/anon.sh</code>, <code>anon_screen.sh</code></td>
+<td style="text-align:left">The run and its screen, on Linux</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>op/lib/anon_results.awk</code>, <code>anon_end.awk</code>, <code>anon_html.awk</code></td>
+<td style="text-align:left">The figures of a run, the end of the run on the screen and its report, on Linux</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>op\sql\10_create_metadata_schema.sql</code></td>
@@ -1130,7 +1150,7 @@ DROP USER atrace CASCADE;   -- once the EPF anonymization has run</code></pre>
 </tr>
 <tr>
 <td style="text-align:left"><strong>Closing the window during a run</strong></td>
-<td style="text-align:left">The triggers of OP can stay disabled until <code>run/recover.sql</code> is run</td>
+<td style="text-align:left">On Windows the triggers of OP can stay disabled until <code>run/recover.sql</code> is run. On Linux the run goes on to its end</td>
 </tr>
 <tr>
 <td style="text-align:left"><strong>The triggers of OP</strong></td>

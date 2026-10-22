@@ -101,6 +101,59 @@ html_report() {
      . '$(cygpath -w "$V4/op/lib/anon_html.ps1")'; \$null = Write-HtmlReport '$(cygpath -w "$WORK/run")'" \
      || ko "report.html could not be written"
 }
+# The same report.html written from the same files by the Linux wrapper's code
+# (anon_html.awk), given the Windows launcher's texts: "same" when it is the
+# page anon_html.ps1 wrote, line endings apart.
+html_parity() {
+  rm -rf "$WORK/run_awk" && mkdir -p "$WORK/run_awk"
+  cp "$WORK/run/manifest.txt" "$WORK/run/results.txt" "$WORK/run_awk/"
+  LC_ALL=C ANON_FOLDER="$WORK/run_awk" ANON_HTML_LAUNCHER='op\run_op_anonymization.bat' ANON_HTML_OPTION='/' \
+    ANON_HTML_CONFIG='config\anonymization.ini' awk -f "$V4/op/lib/anon_results.awk" -f "$V4/op/lib/anon_html.awk"
+  if cmp -s <(tr -d '\r' < "$WORK/run/report.html") <(tr -d '\r' < "$WORK/run_awk/report.html"); then echo same; else echo different; fi
+}
+# The end of the run on the screen from the files of html_report, by
+# anon_screen.ps1 (end_screen.ps1) and by anon_end.awk: "same" when every line
+# and its colour are. Args: status verdict colour.
+end_parity() {
+  local dry=0
+  grep -q '^mode=DRYRUN' "$WORK/run/manifest.txt" && dry=1
+  { printf '%s\n' "STATUS|$1" "DRY|$dry" "TNS|$SVC" 'LAUNCHER|op/run_op_anonymization.sh' 'WIDTH|100' "VERDICT|$2" "COLOR|$3" \
+                  'OPTION|/' 'CONFIG|config\anonymization.ini' 'VERIFY|op\verify\verify_op_coverage.sql'
+    sed -n 's/^ANON_R_CHECK|/ANON_CHECK|/p' "$WORK/run/results.txt"; } > "$WORK/end_state.txt"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/end_screen.ps1")" \
+    "$(cygpath -w "$WORK/run/results.txt")" "$(cygpath -w "$WORK/end_state.txt")" | tr -d '\r' > "$WORK/end_ps.txt"
+  LC_ALL=C ANON_RESULTS="$WORK/run/results.txt" ANON_STATE="$WORK/end_state.txt" \
+    awk -f "$V4/op/lib/anon_results.awk" -f "$V4/op/lib/anon_end.awk" > "$WORK/end_awk.txt"
+  if [ -s "$WORK/end_awk.txt" ] && cmp -s "$WORK/end_ps.txt" "$WORK/end_awk.txt"; then echo same; else echo different; fi
+}
+# The Linux wrapper, op/run_op_anonymization.sh, in the container on the
+# synced tree: lx <name> [options...]. Its output in $WORK/lx_<name>.out, its
+# exit code in RC. LX_INPUT: a file in the container for its input.
+lx() {
+  local name=$1; shift
+  docker exec -e ANON_SYS_PASSWORD="$SYSPWD" -e ANON_OP_PASSWORD="${LX_OP_PASSWORD:-op}" -e LX_INPUT="${LX_INPUT:-/dev/null}" \
+    -w /tmp/v4 "$CT" bash -c 'op/run_op_anonymization.sh "$@" < "$LX_INPUT"' lx "$@" > "$WORK/lx_$name.out" 2>&1
+  RC=$?
+}
+# What the last run folder of the Linux wrapper says: lx_folder <file> <pattern>
+# counts the matching lines of one of its files.
+lx_folder() { docker exec "$CT" bash -c 'f=$(ls -d /tmp/v4/op/logs/*/ | tail -1) && grep -c -E "$2" "$f/$1"' lx "$@"; }
+# The Linux wrapper in the background, as its own process group - as a
+# terminal runs it: lx_start <name> [options...]; lx_signal <signal> sends a
+# signal to that group, as Ctrl+C at the terminal does; lx_wait sets RC when it
+# has ended. lx_until <pattern> waits until its output shows the pattern.
+lx_start() {
+  local name=$1; shift
+  docker exec "$CT" bash -c 'rm -f /tmp/lx_bg.pid /tmp/lx_bg.rc /tmp/lx_bg.out' > /dev/null
+  docker exec -d -e ANON_SYS_PASSWORD="$SYSPWD" -e ANON_OP_PASSWORD=op -w /tmp/v4 "$CT" bash -c \
+    'set -m; op/run_op_anonymization.sh "$@" > /tmp/lx_bg.out 2>&1 < /dev/null & echo $! > /tmp/lx_bg.pid; wait $!; echo $? > /tmp/lx_bg.rc' lx "$@"
+  LX_BG=$name
+}
+lx_until()  { local i; for i in $(seq 240); do docker exec "$CT" grep -q -E "$1" /tmp/lx_bg.out 2> /dev/null && return 0; sleep 1; done; return 1; }
+lx_signal() { docker exec "$CT" bash -c 'kill -s "$1" -- "-$(cat /tmp/lx_bg.pid)"' lx "$1"; }
+lx_wait()   { local i; for i in $(seq 900); do docker exec "$CT" test -s /tmp/lx_bg.rc && break; sleep 1; done
+              RC=$(docker exec "$CT" cat /tmp/lx_bg.rc 2> /dev/null)
+              docker exec "$CT" cat /tmp/lx_bg.out > "$WORK/lx_$LX_BG.out" 2> /dev/null; }
 # Raw data again, the metadata kept: what a re-import of the same client does.
 reload_raw() {
   sysrun "BEGIN
@@ -550,6 +603,8 @@ if wanted S19; then
   check "  ... the rows renamed, by table" "$(grep -c 'Where their X_ values went: 13 rows in 4 tables' "$WORK/run/report.html")" "1"
   check "  ... the verdict" "$(grep -c 'class="badge">Done, review required<' "$WORK/run/report.html")" "1"
   check "  ... and no identifier" "$(grep -cwE "$x_codes" "$WORK/run/report.html")" "0"
+  check "  ... and the Linux wrapper writes the same page" "$(html_parity)" "same"
+  check "the end of the run on the screen: the same on Windows and on Linux" "$(end_parity COMPLETED 'REVIEW REQUIRED' Yellow)" "same"
 
   fresh
   run EXECUTE "y y y n y" "y y y y y" "y y y y y" y; check "renaming of X_ off: EXECUTE completes" "$RC" "0"
@@ -669,6 +724,8 @@ if wanted S22; then
   check "report.html of the dry run: what a run would change" "$(grep -c '<h2>What a run would change</h2>' "$WORK/run/report.html")" "1"
   check "  ... one query per reason, ready to copy" "$(grep -c '<button type="button">Copy</button>' "$WORK/run/report.html")" "4"
   check "  ... and no identifier" "$(grep -cwE "$codes" "$WORK/run/report.html")" "0"
+  check "  ... and the Linux wrapper writes the same page" "$(html_parity)" "same"
+  check "the end of the dry run on the screen: the same on Windows and on Linux" "$(end_parity COMPLETED 'DRY RUN' Green)" "same"
 
   # A run asked to stop: it stops between two columns, before the first.
   session "@sql/run/start.sql EXECUTE $on 1 n y" '@sql/run/plan.sql' '@sql/run/record.sql' \
@@ -702,6 +759,94 @@ if wanted S22; then
   check "  ... the run ends REFUSED, with the check that refused it" \
         "$(val "SELECT r.status || '/' || c.status FROM anon_meta.anon_run r JOIN anon_meta.anon_check c ON c.run_id = r.run_id
                 WHERE r.run_id = $run_id AND c.code = 'NOT_ANONYMIZED'")" "REFUSED/NOT_MET"
+fi
+
+# --- S23 --------------------------------------------------------------------------
+if wanted S23; then
+  section "S23 the Linux wrapper, op/run_op_anonymization.sh, end to end in the container"
+  # A sandbox configuration in the container's copy only: with --auto, the
+  # switches it leaves out are y.
+  printf 'ORACLE_SID=%s\nTABLESPACE_DATA=USERS\nTABLESPACE_INDEX=USERS\nPARALLEL_DEGREE=1\n' "$SVC" \
+    | docker exec -i "$CT" bash -c 'cat > /tmp/v4/config/anonymization.ini'
+  docker exec -w /tmp/v4 "$CT" op/run_op_anonymization.sh --inventory /tmp/v4/inv_sh.sql > /dev/null
+  check "the shell launcher writes the inventory the batch file writes" \
+        "$(docker exec "$CT" cat /tmp/v4/inv_sh.sql | cmp -s - <(tr -d '\r' < "$INV") && echo same)" "same"
+
+  fresh
+  lx dry --dryrun --auto; check "dry run: completed, exit code 0" "$RC" "0"
+  check "  ... the checks, the count, what a run would change" \
+        "$(grep -cE 'Every required check is met: a run can go ahead|2 of 2  Counting what a run would change|A run would change 153 rows in 11 tables' "$WORK/lx_dry.out")" "3"
+  check "  ... its folder" "$(docker exec "$CT" bash -c 'ls "$(ls -d /tmp/v4/op/logs/*/ | tail -1)"' | tr '\n' ' ')" \
+        "console.log inventory.sql manifest.txt report.html report.txt results.txt "
+  lx run --auto --force; check "run: PASS, exit code 0" "$RC" "0"
+  check "  ... the steps, the three kinds of work, the verification" \
+        "$(grep -cE '^ 2 of 4  Recording the translations +done|^ +(Free text|Identifiers|Labels and attributes) +\[#+\] 100%|^ 4 of 4  Verifying \(read-only\) +done' "$WORK/lx_run.out")" "5"
+  check "  ... its manifest" "$(lx_folder manifest.txt '^(mode=EXECUTE|status=COMPLETED|verdict=PASS|exit_code=0)$')" "4"
+  check "  ... and the seven files of a run" "$(docker exec "$CT" bash -c 'ls "$(ls -d /tmp/v4/op/logs/*/ | tail -1)" | wc -l')" "7"
+  lx again --auto --force
+  check "the same run again: nothing changed, PASS" "$RC/$(grep -c 'DONE   0 rows changed' "$WORK/lx_again.out")" "0/1"
+
+  sysrun "DROP USER anon_meta CASCADE;"
+  lx refused --auto --force
+  check "a copy anonymized before, its translations lost: NOT STARTED, exit code 1" \
+        "$RC/$(grep -c 'NOT STARTED   Nothing was changed. Data not anonymized before: not met.' "$WORK/lx_refused.out")" "1/1"
+
+  fresh; sysfile @tests/regression/fixture_review.sql > /dev/null
+  lx review --auto --force; check "values left for review: REVIEW REQUIRED, exit code 3" "$RC" "3"
+
+  fresh
+  docker exec "$CT" bash -c 'echo ANONYMIZE_ENTITY=n >> /tmp/v4/config/anonymization.ini'
+  lx incomplete --auto --force; check "a switch off: INCOMPLETE, exit code 4" "$RC" "4"
+  check "  ... said before the run" "$(grep -c 'Switched off: entity codes. Their client data stays' "$WORK/lx_incomplete.out")" "1"
+  docker exec "$CT" bash -c "sed -i '/^ANONYMIZE_ENTITY=n\$/d' /tmp/v4/config/anonymization.ini"
+
+  docker exec "$CT" bash -c 'printf "no\n" > /tmp/lx_no.txt'
+  LX_INPUT=/tmp/lx_no.txt lx cancel --auto
+  check "no at the question: NOT STARTED, exit code 1" "$RC/$(grep -c 'NOT STARTED   You did not type YES' "$WORK/lx_cancel.out")" "1/1"
+  LX_OP_PASSWORD=wrong lx badpwd --auto --force
+  check "a wrong OP password: one line, exit code 1" \
+        "$RC/$(grep -c 'the connection as OP to .* failed: ORA-01017' "$WORK/lx_badpwd.out")" "1/1"
+
+  # Ctrl+C - SIGINT to the process group, as a terminal sends it - while a
+  # free-text statement on 600,000 rows works: the run stops after it.
+  fresh
+  sysrun "BEGIN
+            FOR r IN (SELECT CEIL(600000 / GREATEST(COUNT(*), 1)) AS n FROM op.histo_operation) LOOP
+               EXECUTE IMMEDIATE 'INSERT /*+ APPEND */ INTO op.histo_operation SELECT h.* FROM op.histo_operation h,
+                                  (SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= :n)' USING r.n;
+            END LOOP;
+            COMMIT;
+            DBMS_STATS.GATHER_TABLE_STATS('OP', 'HISTO_OPERATION');
+          END;
+          /"
+  lx_start stop --auto --force
+  if lx_until '3 of 4  Anonymizing'; then sleep 3; lx_signal INT; fi
+  lx_wait
+  check "SIGINT during the work: STOPPED, exit code 5" "$RC/$(grep -c 'STOPPED   On request, after' "$WORK/lx_stop.out")" "5/1"
+  check "  ... sqlplus did not receive it: the run ended STOPPED in the database" \
+        "$(val "SELECT status || '/' || stop_requested FROM anon_meta.anon_run WHERE run_id = $(last_run)")" "STOPPED/Y"
+
+  # SIGHUP - the terminal closed - stops nothing: the run goes on to its end.
+  fresh
+  lx_start hangup --auto --force
+  if lx_until 'Getting ready'; then lx_signal HUP; fi
+  lx_wait
+  check "SIGHUP: the run goes on to its end, PASS" "$RC/$(lx_folder manifest.txt '^verdict=PASS$')" "0/1"
+  check "  ... and its console.log is complete" "$(lx_folder console.log 'Exit code 0: done, verified: PASS[.]')" "1"
+
+  # report.html of that Linux run, and the page anon_html.ps1 writes from the
+  # same folder: the same, the platform's command and path apart.
+  rm -rf "$WORK/run" && mkdir -p "$WORK/run"
+  folder=$(docker exec "$CT" bash -c 'ls -d /tmp/v4/op/logs/*/ | tail -1')
+  for f in manifest.txt results.txt report.txt verify.txt report.html; do docker exec "$CT" cat "$folder$f" > "$WORK/run/$f"; done
+  mv "$WORK/run/report.html" "$WORK/run/report_linux.html"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference = 'Stop'; . '$(cygpath -w "$V4/op/lib/anon_screen.ps1")';
+     . '$(cygpath -w "$V4/op/lib/anon_html.ps1")'; \$null = Write-HtmlReport '$(cygpath -w "$WORK/run")'" \
+     || ko "report.html could not be written"
+  check "report.html of a Linux run: the page Windows writes from the same folder" \
+        "$(tr -d '\r' < "$WORK/run/report.html" | sed -e 's#op\\run_op_anonymization[.]bat#op/run_op_anonymization.sh#g' \
+             -e 's# /dryrun# --dryrun#g' -e 's#config\\anonymization[.]ini#config/anonymization.ini#g' \
+           | cmp -s - "$WORK/run/report_linux.html" && echo same)" "same"
 fi
 
 # --- Result ---------------------------------------------------------------------

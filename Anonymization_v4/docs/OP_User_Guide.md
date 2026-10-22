@@ -35,10 +35,12 @@ switched on, in `config\anonymization.ini`.
 
 - [ ] A **restored copy** of the database - not production
 - [ ] Oracle **19c** or later
-- [ ] The **Oracle client with SQL\*Plus** on the machine you run from, `sqlplus.exe` in `PATH` (or
-      in `ORACLE_HOME\bin`), and the database reachable by an alias in `tnsnames.ora` or as
-      `host:port/service`
-- [ ] **Windows PowerShell 5.1** - part of every supported Windows version
+- [ ] The **Oracle client with SQL\*Plus** on the machine you run from - Windows or Linux - and the
+      database reachable by an alias in `tnsnames.ora` or as `host:port/service`
+- [ ] On **Windows**: `sqlplus.exe` in `PATH` (or in `ORACLE_HOME\bin`), and **Windows PowerShell
+      5.1** - part of every supported Windows version
+- [ ] On **Linux**: `sqlplus` in `PATH` (or in `$ORACLE_HOME/bin`), **bash 4.2** or later and
+      **awk** - part of every supported distribution (section 12)
 - [ ] The **SYS** password and the **OP** schema password
 - [ ] A **tablespace** for the tool's own metadata schema, `ANON_META` (a few MB)
 - [ ] About **an hour** of uninterrupted time for a run on a production-sized copy
@@ -47,7 +49,7 @@ switched on, in `config\anonymization.ini`.
 A run keeps one database session open for its whole length. A network interruption on a VPN can end
 it; run from a host near the database rather than from a remote laptop.
 
-Check that SQL\*Plus reaches the database:
+Check that SQL\*Plus reaches the database - the same two commands on Windows and on Linux:
 
 ```batch
 sqlplus -V
@@ -65,8 +67,9 @@ Anonymization_v4\
 |  |- inventory_op.csv              what is anonymized, shipped
 |  |- inventory_op_custom.csv       this site's additions and corrections
 |- op\
-|  |- run_op_anonymization.bat      >>> the only thing you run <<<
-|  |- lib\                          the run's screen and report (PowerShell)
+|  |- run_op_anonymization.bat      >>> what you run on Windows <<<
+|  |- run_op_anonymization.sh       >>> what you run on Linux <<<
+|  |- lib\                          the run's screen and report (PowerShell; bash and awk)
 |  |- sql\                          the engine and the scripts the run sends
 |  |- verify\                       the verification
 |  |- logs\                         one folder per run
@@ -75,7 +78,10 @@ Anonymization_v4\
 |- tools\                           optional analysis scripts
 ```
 
-You only ever launch `op\run_op_anonymization.bat`. Everything else is called for you.
+You only ever launch `op\run_op_anonymization.bat` on Windows, or `op/run_op_anonymization.sh` on
+Linux. Everything else is called for you. Both run the same engine, the same SQL and the same
+checks, show the same screens and write the same `report.html`; the Linux options are written
+`--dryrun`, `--auto`... (section 12).
 
 ---
 
@@ -84,6 +90,13 @@ You only ever launch `op\run_op_anonymization.bat`. Everything else is called fo
 ```batch
 cd Anonymization_v4
 copy config\anonymization.template.ini config\anonymization.ini
+```
+
+On Linux:
+
+```bash
+cd Anonymization_v4
+cp config/anonymization.template.ini config/anonymization.ini
 ```
 
 Open `config\anonymization.ini` and fill in the database and the tablespace. **Leave the passwords
@@ -114,6 +127,14 @@ set ANON_OP_PASSWORD=...
 op\run_op_anonymization.bat /auto /dryrun
 ```
 
+On Linux:
+
+```bash
+export ANON_SYS_PASSWORD=...
+export ANON_OP_PASSWORD=...
+op/run_op_anonymization.sh --auto --dryrun
+```
+
 ---
 
 ## 5. Step 2 - The dry run
@@ -124,6 +145,10 @@ changes nothing.
 
 ```batch
 op\run_op_anonymization.bat /dryrun
+```
+
+```bash
+op/run_op_anonymization.sh --dryrun          # on Linux
 ```
 
 ### Getting ready
@@ -161,6 +186,8 @@ OP, creates or updates `ANON_META`, installs the engine and loads the inventory.
 ```
 
 A missing SQL\*Plus, a wrong alias or a wrong password is a line here, before anything else happens.
+On Linux the screen is the same, with `/` in the paths; a password is not shown at all while it is
+typed.
 Items "not here" are normal: the inventory covers several KTP/CTI versions, and no database has
 every table.
 
@@ -243,6 +270,10 @@ column name.
 op\run_op_anonymization.bat
 ```
 
+```bash
+op/run_op_anonymization.sh                   # on Linux
+```
+
 The same getting ready and the same checks, on the database as it is now. If they pass, the run
 says what it will change and asks:
 
@@ -301,11 +332,11 @@ Every run ends with its exit code in words, for example `Exit code 0: done, veri
 ## 7. The run folder and report.html
 
 Every run - dry runs, refused and failed runs included - leaves a folder
-`op\logs\<date>_<time>_R-<run>\`:
+`op\logs\<date>_<time>_R-<run>\` (`op/logs/...` on Linux):
 
 | File | |
 |---|---|
-| `report.html` | The result: opened in your browser at the end (`/no-open` leaves it closed) |
+| `report.html` | The result: opened in your browser at the end (`/no-open` leaves it closed). On a Linux server, which has no browser, its path is shown: copy it to a PC to read it |
 | `report.txt` | What the engine printed, line by line |
 | `verify.txt` | What the verification printed (a run) |
 | `console.log` | Every line of the screen, and the engine's |
@@ -339,8 +370,11 @@ It reads what the run and the verification recorded; it re-checks nothing.
 one, enables the triggers of OP again, and ends **STOPPED** (exit code 5). Every table or column done
 is complete; nothing is half done.
 
-**Closing the window during a run is not safe:** the triggers of OP could stay disabled. If it
-happens, run this from SQL\*Plus as OP:
+On Linux, `kill -INT <pid>` - or `kill <pid>` - from another terminal does the same as Ctrl+C: for a
+run started in the background, for example (section 12).
+
+**Closing the window during a run is not safe on Windows:** the triggers of OP could stay disabled.
+If it happens, run this from SQL\*Plus as OP:
 
 ```batch
 sqlplus op/<password>@<database> @op\sql\run\recover.sql <run id>
@@ -349,6 +383,11 @@ sqlplus op/<password>@<database> @op\sql\run\recover.sql <run id>
 While the run is still working in the database it changes nothing - the run then ends by itself and
 enables the triggers again. Otherwise it records the run as failed and enables the triggers of OP
 again. Then a new run resumes.
+
+On Linux, a closed terminal or a dropped SSH connection does not stop the run: it goes on to its end
+without its screen, verifies, and leaves its folder as usual - `console.log` there says how far it
+has got. A run that must not depend on the connection at all is better started in `tmux` or
+`screen`, or in the background (section 12).
 
 ### A new run resumes
 
@@ -383,6 +422,10 @@ DROP USER atrace CASCADE;
 | What you see | What it means | What to do |
 |---|---|---|
 | `sqlplus not found` | No Oracle client in `PATH` or `ORACLE_HOME\bin` | Install the client, or add its `bin` folder to `PATH` |
+| `sqlplus does not start (...)` (Linux) | sqlplus is there but cannot load its libraries | Set `ORACLE_HOME` - and, for an Instant Client unpacked from a zip, `LD_LIBRARY_PATH` - as the client's installation says |
+| `Permission denied` starting `run_op_anonymization.sh` | The file lost its execute permission on the way: a tool that unpacks without permissions | `chmod +x op/run_op_anonymization.sh`, or start it as `sh op/run_op_anonymization.sh` |
+| `bad interpreter`, or `$'\r': command not found` | A `.sh` or `.awk` file was saved with Windows line endings | `sed -i 's/\r$//' op/run_op_anonymization.sh op/lib/*.sh op/lib/*.awk` |
+| `needs bash 4.2 or later` | The host's bash is older | Run from a host with bash 4.2 or later: Red Hat and Oracle Linux 7 and later have it |
 | `the connection as SYS ... failed: ORA-12154` | The database alias is unknown | Check `ORACLE_SID` and `tnsnames.ora`, or use `host:port/service` |
 | `... failed: ORA-01017` | Wrong password | It is asked again, three times at most |
 | `Inventory  it cannot be used as written` | A CSV row pairs a rule with a category that cannot apply, or a column option is misspelt | The lines are named; correct them (in `inventory_op_custom.csv` for a site row) |
@@ -454,7 +497,69 @@ Keep the run folders: they hold counts only, and say what was done to the copy.
 
 ---
 
-## 12. Quick reference
+## 12. Running on Linux
+
+`op/run_op_anonymization.sh` is the same run as `op\run_op_anonymization.bat`: the same engine, SQL,
+checks, screens, run folder and `report.html`, from the same `config/anonymization.ini`. It needs
+bash 4.2 or later, awk and the usual system commands: nothing to install beyond the Oracle client.
+
+### Unpacking
+
+```bash
+unzip Anonymization_v4_0.5.0.zip
+cd Anonymization_v4
+op/run_op_anonymization.sh --help
+```
+
+`unzip` keeps the script executable. After a tool that does not: `chmod +x
+op/run_op_anonymization.sh`, or start it as `sh op/run_op_anonymization.sh`.
+
+### The Oracle client
+
+The run uses the `sqlplus` it finds in `PATH`, or else in `$ORACLE_HOME/bin`, and checks that it
+starts before anything else. A full client or a database home needs `ORACLE_HOME`; an Instant Client
+unpacked from a zip needs `LD_LIBRARY_PATH` as well - an RPM installation sets it up by itself.
+`TNS_ADMIN` says where `tnsnames.ora` is when it is not in the client's own folder; with
+`ORACLE_SID=host:port/service` no `tnsnames.ora` is needed. The run reads Oracle error codes, never
+their texts, so an `NLS_LANG` in another language does not matter to it.
+
+### Long runs
+
+A run keeps its sessions open for its whole length. Start it where nothing can cut it short: in
+`tmux` or `screen`, then detach; or in the background, asking nothing:
+
+```bash
+export ANON_SYS_PASSWORD=...
+export ANON_OP_PASSWORD=...
+nohup op/run_op_anonymization.sh --auto --force > run.out 2>&1 &
+tail -f run.out
+```
+
+Without a terminal the live lines are written once a minute instead of rewritten in place. To stop
+such a run as Ctrl+C would, `kill -INT <pid>`. If the terminal of a run started by hand closes, the
+run goes on to its end (section 8).
+
+### report.html
+
+A server has no browser: the end of the run gives the path of `report.html`. Copy it to a PC - for
+example `scp server:<folder>/op/logs/<run>/report.html .` - and open it there. It holds counts and
+names of tables and columns only.
+
+### What differs from Windows
+
+| | Windows | Linux |
+|---|---|---|
+| Command | `op\run_op_anonymization.bat` | `op/run_op_anonymization.sh` |
+| Options | `/dryrun`, `/auto`, `/force`, `/verbose`, `/no-open`, `/no-color`, `/inventory`, `/help` | the same with `--`: `--dryrun`... (`-dryrun` and `/dryrun` are accepted too) |
+| A password while it is typed | shown as `*` | not shown |
+| The terminal closed during a run | not safe: `recover.sql` (section 8) | the run goes on to its end |
+| Stopping from another terminal | `op\sql\run\stop.sql <run id>` as OP | the same, or `kill -INT <pid>` |
+| `report.html` at the end | opened in the browser | its path; opened only on a desktop |
+| The wrapper | PowerShell, `op\lib\*.ps1` | bash and awk, `op/lib/*.sh` and `*.awk` |
+
+---
+
+## 13. Quick reference
 
 ```batch
 op\run_op_anonymization.bat /dryrun           what a run would change; changes nothing
@@ -466,11 +571,25 @@ op\run_op_anonymization.bat /no-open          report.html not opened at the end
 op\run_op_anonymization.bat /help             every option
 ```
 
+On Linux:
+
+```bash
+op/run_op_anonymization.sh --dryrun           what a run would change; changes nothing
+op/run_op_anonymization.sh                    the run: checks, then asks for YES
+op/run_op_anonymization.sh --auto             asks nothing (still asks for YES)
+op/run_op_anonymization.sh --auto --force     asks nothing at all
+op/run_op_anonymization.sh --verbose          every line of the engine on the screen
+op/run_op_anonymization.sh --no-open          report.html not opened at the end
+op/run_op_anonymization.sh --help             every option
+```
+
 | | |
 |---|---|
-| Run folder | `op\logs\<date>_<time>_R-<run>\` |
+| Run folder | `op\logs\<date>_<time>_R-<run>\` (`op/logs/...` on Linux) |
 | Passwords without questions | `ANON_SYS_PASSWORD`, `ANON_OP_PASSWORD` |
 | Verify again | `sqlplus op/<pwd>@<database> @op\verify\verify_op_coverage.sql` |
 | Stop a run from another session | `sqlplus op/<pwd>@<database> @op\sql\run\stop.sql <run id>` |
 | After a closed window | `sqlplus op/<pwd>@<database> @op\sql\run\recover.sql <run id>` |
 | Exit codes | `0` PASS (a dry run: completed) - `1` failed or not started - `2` FAIL - `3` REVIEW REQUIRED - `4` INCOMPLETE - `5` stopped |
+
+On Linux the same commands, with `/` in the paths; a run is also stopped by `kill -INT <pid>`.

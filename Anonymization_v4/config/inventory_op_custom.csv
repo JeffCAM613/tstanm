@@ -68,7 +68,8 @@
 # some KTP versions.
 #
 # ALWAYS run a dry run after editing this file:
-#     op\run_op_anonymization.bat /dryrun
+#     op\run_op_anonymization.bat /dryrun        (Windows)
+#     op/run_op_anonymization.sh --dryrun        (Linux)
 # It checks every row - whether the object is in the database, whether the
 # replacements fit the column - and counts the rows a run would change.
 # ============================================================================

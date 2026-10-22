@@ -38,6 +38,6 @@ is a data-classification question for whoever owns the schema.
 | Script | Purpose |
 |---|---|
 | `build_docs.js` | Renders `docs/*.md` to `.html` and `.docx`. Needs Node.js. The outputs are committed, so nobody receiving a release ever needs to run it. |
-| `make_release.ps1` | Builds the release zip from an explicit include list. |
+| `make_release.ps1` | Builds the release zip from an explicit include list: one zip for Windows and Linux, in which `unzip` keeps the shell launcher executable. |
 
 Both are excluded from a release by `make_release.ps1` itself.

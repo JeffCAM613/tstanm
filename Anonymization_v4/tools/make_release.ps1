@@ -8,6 +8,12 @@
  version is the engine's (c_version in op/sql/30_install_engine.sql) unless
  -Version gives another.
 
+ One zip serves Windows and Linux. Each entry carries Unix permissions -
+ rwxr-xr-x for a shell script, rw-r--r-- for the rest - and the archive says
+ it was made on Unix, so that unzip on Linux applies them and
+ op/run_op_anonymization.sh can be run as it comes out. Windows tools ignore
+ both.
+
  The contents are an EXPLICIT INCLUDE LIST, never a copy-with-exclusions.
  A release that ships a file nobody meant to ship is the failure worth
  designing against, and an allow-list fails closed: a new file is absent
@@ -69,11 +75,18 @@ $include = @(
    'config/inventory_op.csv',
    'config/inventory_op_custom.csv',
 
-   # the run itself: the launcher, its PowerShell, the SQL it sends
+   # the run itself: the launchers, the wrapper - PowerShell on Windows, bash
+   # and awk on Linux - and the SQL they send
    'op/run_op_anonymization.bat',
+   'op/run_op_anonymization.sh',
    'op/lib/anon.ps1',
    'op/lib/anon_screen.ps1',
    'op/lib/anon_html.ps1',
+   'op/lib/anon.sh',
+   'op/lib/anon_screen.sh',
+   'op/lib/anon_results.awk',
+   'op/lib/anon_end.awk',
+   'op/lib/anon_html.awk',
    'op/sql/00_run_op_anonymization.sql',
    'op/sql/10_create_metadata_schema.sql',
    'op/sql/21_validate_inventory.sql',
@@ -153,6 +166,10 @@ $zip = Join-Path (Resolve-Path $OutDir) ("Anonymization_v4_$Version.zip")
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+if ($null -eq [System.IO.Compression.ZipArchiveEntry].GetProperty('ExternalAttributes')) {
+   Remove-Item -LiteralPath $stage -Recurse -Force
+   throw 'Writing Unix permissions into the zip needs .NET Framework 4.7.2 or later.'
+}
 
 # Entries are added one at a time with explicit forward slashes. Neither
 # CreateFromDirectory nor Compress-Archive can be trusted here: on .NET
@@ -163,13 +180,33 @@ $archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
 try {
    foreach ($f in Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName) {
       $name = $f.FullName.Substring($stage.Length).TrimStart('\') -replace '\\', '/'
-      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+      $entry = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
          $archive, $f.FullName, $name,
-         [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+         [System.IO.Compression.CompressionLevel]::Optimal)
+      # A regular file (0100000) and its permissions, in the upper 16 bits.
+      $mode = 0x81A4                                          # rw-r--r--
+      if ($f.Extension -eq '.sh') { $mode = 0x81ED }          # rwxr-xr-x
+      $entry.ExternalAttributes = $mode -shl 16
    }
 } finally {
    $archive.Dispose()
 }
+
+# .NET records every entry as made on Windows, and unzip ignores the
+# permissions of such an entry: each central directory entry is marked as
+# made on Unix (the upper byte of "version made by" set to 3).
+$bytes = [System.IO.File]::ReadAllBytes($zip)
+$end = $bytes.Length - 22                    # the end record; the zip has no comment
+if ([BitConverter]::ToUInt32($bytes, $end) -ne 0x06054b50) { throw "No end of central directory in $zip." }
+$entries = [BitConverter]::ToUInt16($bytes, $end + 10)
+$at = [int][BitConverter]::ToUInt32($bytes, $end + 16)
+for ($i = 0; $i -lt $entries; $i++) {
+   if ([BitConverter]::ToUInt32($bytes, $at) -ne 0x02014b50) { throw "Unexpected central directory in $zip." }
+   $bytes[$at + 5] = 3
+   $at += 46 + [BitConverter]::ToUInt16($bytes, $at + 28) + [BitConverter]::ToUInt16($bytes, $at + 30) +
+          [BitConverter]::ToUInt16($bytes, $at + 32)
+}
+[System.IO.File]::WriteAllBytes($zip, $bytes)
 
 Remove-Item -LiteralPath $stage -Recurse -Force
 

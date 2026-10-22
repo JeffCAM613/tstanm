@@ -5,8 +5,8 @@
 --
 --   sqlplus op/<password>@<TNS> @tests/manual/monitor_op_progress.sql
 --
--- run_op_anonymization.bat shows the same live: this is for a DBA in SQL*Plus,
--- or for a run started from 00_run_op_anonymization.sql. sqlplus prints
+-- run_op_anonymization.bat and .sh show the same live: this is for a DBA in
+-- SQL*Plus, or for a run started from 00_run_op_anonymization.sql. sqlplus prints
 -- DBMS_OUTPUT only once a PL/SQL block ends, so the running session shows
 -- nothing for minutes at a time; the engine writes anon_meta.anon_progress and
 -- anon_meta.anon_step_log through autonomous transactions, visible from here

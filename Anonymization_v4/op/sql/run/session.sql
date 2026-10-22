@@ -1,8 +1,9 @@
 -- ============================================================================
 -- run/session - What a session is connected to
 -- ============================================================================
--- Sent by run_op_anonymization.bat right after each CONNECT, as SYS and as
--- OP, before anything else: the connection is tested before it is used.
+-- Sent by the wrapper (run_op_anonymization.bat or .sh) right after each
+-- CONNECT, as SYS and as OP, before anything else: the connection is tested
+-- before it is used.
 --
 -- Prints
 --   ANON_SESSION|<user>|<database>|<container>|<Oracle version>|<database clock>

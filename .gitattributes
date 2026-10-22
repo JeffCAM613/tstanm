@@ -1,4 +1,6 @@
-# Shell scripts must keep LF on every checkout: bash fails on CR line endings.
+# Shell scripts and the awk programs they run must keep LF on every checkout:
+# bash fails on CR line endings, and awk reads a CR as part of the program.
 *.sh  text eol=lf
+*.awk text eol=lf
 # cmd resolves goto/call labels unreliably in LF-only batch files.
 *.bat text eol=crlf

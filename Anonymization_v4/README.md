@@ -53,6 +53,14 @@ REM    anonymizes, then verifies the result.
 op\run_op_anonymization.bat
 ```
 
+On a Linux server, the same two steps with the shell launcher - the same engine, checks, screens
+and report:
+
+```bash
+op/run_op_anonymization.sh --dryrun
+op/run_op_anonymization.sh
+```
+
 Settings live in `config/anonymization.ini` (copy it from `anonymization.template.ini`). What it
 leaves blank is asked for when the run starts; passwords are best left blank - they are then asked
 for, masked, and passed to sqlplus on its input only.
@@ -75,7 +83,7 @@ new run resumes from there.
 | 4 | INCOMPLETE: a protection was switched off |
 | 5 | stopped with Ctrl+C |
 
-`op\run_op_anonymization.bat /help` lists every option.
+`op\run_op_anonymization.bat /help` (`op/run_op_anonymization.sh --help`) lists every option.
 
 ---
 
@@ -106,4 +114,5 @@ new run resumes from there.
   presented as complete anonymization.
 - All triggers on the OP schema are disabled for the duration of a run and enabled again at its
   end - also when it fails or is stopped with Ctrl+C. **Closing the window during a run is not
-  safe**: if it happens, `op\sql\run\recover.sql` ends the run and enables the triggers again.
+  safe** on Windows: if it happens, `op\sql\run\recover.sql` ends the run and enables the triggers
+  again. On Linux a closed terminal does not stop the run: it goes on to its end.

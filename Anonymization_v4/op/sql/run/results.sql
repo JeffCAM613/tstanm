@@ -1,9 +1,10 @@
 -- ============================================================================
 -- run/results - The figures of a run, for its screen and its report
 -- ============================================================================
--- Sent by run_op_anonymization.bat to its monitor session (as OP) once the
--- run has ended - and, after a run, once it has been verified. Everything the
--- end of the run on the screen and report.html show comes from these lines.
+-- Sent by the wrapper (run_op_anonymization.bat or .sh) to its monitor
+-- session (as OP) once the run has ended - and, after a run, once it has been
+-- verified. Everything the end of the run on the screen and report.html show
+-- comes from these lines.
 --
 -- READS, NEVER RE-CHECKS. Every figure comes from what the run and the
 -- verification recorded in anon_meta: one place decides whether a column is
