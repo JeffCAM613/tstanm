@@ -171,8 +171,8 @@ PROMPT
 PROMPT ==== 7. What the disputed columns hold =======================================
 PROMPT Rows by what their value is: a party only (tiers code or w_tiers node), an
 PROMPT account only (compte_banque code or w_compte_banque node), BOTH, or neither.
-PROMPT The MIXED columns, and val_bank_account.code - legacy wrote party codes there,
-PROMPT v3 and v4 treat it as bank accounts. A column missing here is skipped.
+PROMPT The MIXED columns, and val_bank_account.code - read as bank accounts, though
+PROMPT party codes can be found there. A column missing here is skipped.
 SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 DECLARE
    TYPE t_cols IS TABLE OF VARCHAR2(80);
@@ -225,9 +225,9 @@ END;
 
 PROMPT
 PROMPT ==== 8. Children whose parent text is a party node AND an account node =======
-PROMPT The parent cannot be told from the text. Legacy decided by the CHILD's
-PROMPT classification (Entite: the party's value, Compte: the account's); v4 leaves
-PROMPT them for review. By the child's screen and classification:
+PROMPT The parent cannot be told from the text alone. A run follows the parent node
+PROMPT of the child's own tree; only a parent with no node in that tree is left for
+PROMPT review. By the child's screen and classification:
 SELECT NVL(c.ecran, '(null)') AS ecran, NVL(c.structure, '(null)') AS structure,
        COUNT(*) AS children
   FROM op.structure c

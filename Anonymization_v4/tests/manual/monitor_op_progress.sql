@@ -5,10 +5,12 @@
 --
 --   sqlplus op/<password>@<TNS> @tests/manual/monitor_op_progress.sql
 --
--- Why this is needed: sqlplus only prints DBMS_OUTPUT once a PL/SQL block ends,
--- so the running session shows nothing for minutes at a time. The engine writes
--- anon_meta.anon_step_log through an autonomous transaction, so rows appear as
--- each item completes and are visible from here immediately.
+-- run_op_anonymization.bat shows the same live: this is for a DBA in SQL*Plus,
+-- or for a run started from 00_run_op_anonymization.sql. sqlplus prints
+-- DBMS_OUTPUT only once a PL/SQL block ends, so the running session shows
+-- nothing for minutes at a time; the engine writes anon_meta.anon_progress and
+-- anon_meta.anon_step_log through autonomous transactions, visible from here
+-- at once.
 --
 -- Re-run it whenever you want a fresh picture; it takes no locks.
 -- ============================================================================
@@ -47,6 +49,23 @@ SELECT run_id, run_mode, status,
              || ' min'
        END AS elapsed
   FROM anon_meta.anon_run
+ WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run);
+
+PROMPT
+PROMPT ====================================================================
+PROMPT  Now
+PROMPT ====================================================================
+
+COLUMN stage      FORMAT A34       HEADING 'DOING'
+COLUMN items      FORMAT A12       HEADING 'ITEMS'
+COLUMN pct        FORMAT 990       HEADING '%'
+COLUMN on_object  FORMAT 999,999   HEADING 'SECONDS ON IT'
+
+SELECT phase, stage, items_done || ' of ' || items_total AS items,
+       ROUND(100 * weight_done / NULLIF(weight_total, 0)) AS pct,
+       object_name,
+       ROUND((CAST(SYSTIMESTAMP AS DATE) - CAST(object_started AS DATE)) * 86400) AS on_object
+  FROM anon_meta.anon_progress
  WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run);
 
 PROMPT

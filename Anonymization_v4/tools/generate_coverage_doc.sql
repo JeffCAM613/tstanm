@@ -5,10 +5,9 @@
 --
 -- Run from the Anonymization_v4 folder - the output path is relative.
 --
--- The coverage document is generated rather than written because a hand-written
--- one drifts. In v3 the table list existed in the anonymization scripts, in the
--- scope document and in the verification script, maintained separately; by the
--- time anyone looked, all three disagreed.
+-- The coverage document is generated rather than written: a list kept by hand
+-- drifts away from the inventory that the engine, the dry run and the verifier
+-- all read. This one cannot.
 --
 -- Requires the inventory to be loaded (any run, including a dry run, loads it).
 -- Also reports whether each object actually exists on the connected instance,

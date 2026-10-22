@@ -1,128 +1,92 @@
-# OP Anonymization — Technical Guide
+# OP Anonymization - Technical Guide
 
-**KTP Payment Factory · OP schema · version 4**
-
-> **Out of date in parts — being rewritten.** This guide describes v4 before the typed-identity
-> fix of 2026-10-20. Where it disagrees with the following, the following is right — and so are
-> `config/anonymization.template.ini` and the headers of the two inventory CSVs:
->
-> - **Identifiers are typed.** Every party — entity `E_`, portfolio `P_`, counterparty `T_`, and
->   the new *unclassified party* `X_`, with the reason recorded — and every bank account `CB_` is
->   classified once, from the data, before anything changes. A column only ever receives the
->   translation of the domain it holds: `PARTY`, `BANK_ACCOUNT`, `MIXED` (reviewed columns holding
->   both) or `NODE_ROLE` (the structure tree, by each node's role). The category `ANY` is gone.
-> - **The three switches of a category are independent.** `ANONYMIZE_<CATEGORY>` renames
->   identifiers only; `_DESCRIPTION` and `_ATTRIBUTES` mask labels and attributes even when the
->   identifier is kept. Five categories, every switch on by default.
-> - **No checkbox exceptions.** `MIN_CODE_LENGTH` and the one-character column rule are gone:
->   every listed column is processed, a one-character identifier is anonymized like any other, and
->   a column that must not be touched is left out of the inventory.
-> - **Structure-only bank accounts.** A `w_compte_banque` node with no `compte_banque` row is
->   anonymized as a bank account. Never asked; `APPROVE_STRUCTURE_ONLY_ACCOUNTS=n` refuses them.
-> - **Codes of deleted masters** (2026-10-22). A value of a party or bank-account column that is no
->   identity is the code of a master row deleted in the past: it is renamed too - a party as `X_`,
->   an account as `CB_`. The dry run counts them by column. A column marked `[no-harvest]` in the
->   inventory holds other codes too and is not read for them.
-> - **The structure tree, tree by tree** (2026-10-22). A child's `pere` takes what its parent node
->   in the same tree became. Nodes on other screens keep their code and are not reported; folder
->   rows of the client trees are renamed after their client; other folder texts are emptied.
-> - **Free text that refuses NULL** gets the marker `ANONYMIZED`, with no warning.
-> - **Archived parties** (2026-10-22). A `tiers` row flagged N with no structure node at all is a
->   counterparty (`T_`), not an unclassified party.
-> - **Four verdicts**: PASS, FAIL, REVIEW REQUIRED, INCOMPLETE — exit codes 0, 2, 3, 4.
+**KTP Payment Factory - OP schema - version 0.5.0**
 
 Everything needed to understand, operate, maintain and extend the tool. For the shorter
-run-it-and-go instructions, read the *OP Anonymization — User Guide*.
+run-it-and-go instructions, read the *OP Anonymization - User Guide*.
 
 ---
 
 ## Contents
 
 1. [Purpose and scope](#1-purpose-and-scope)
-2. [The design principle](#2-the-design-principle-one-inventory-drives-everything)
+2. [The design principle: one inventory drives everything](#2-the-design-principle-one-inventory-drives-everything)
 3. [The inventory](#3-the-inventory)
-4. [Configuration flags](#4-configuration-flags)
-5. [Identifier generation](#5-identifier-generation)
-6. [Run lifecycle](#6-run-lifecycle)
-7. [Restartability](#7-restartability)
-8. [Logging](#8-logging)
-9. [The dry run](#9-the-dry-run)
-10. [Verification](#10-verification)
-11. [The HTML report](#11-the-html-report)
-12. [Metadata schema reference](#12-metadata-schema-reference)
-13. [Extending coverage](#13-extending-coverage)
-14. [Version compatibility](#14-version-compatibility)
-15. [Naming and vocabulary](#15-naming-and-vocabulary)
-16. [File reference](#16-file-reference)
-17. [Error codes](#17-error-codes)
-18. [Known limitations](#18-known-limitations)
-19. [History](#19-history)
+4. [Identities](#4-identities)
+5. [Switches](#5-switches)
+6. [Translations](#6-translations)
+7. [Applying the inventory](#7-applying-the-inventory)
+8. [The run](#8-the-run)
+9. [The checks](#9-the-checks)
+10. [Watching a run](#10-watching-a-run)
+11. [Stopping, failing and resuming](#11-stopping-failing-and-resuming)
+12. [The dry run](#12-the-dry-run)
+13. [Verification](#13-verification)
+14. [The run folder and report.html](#14-the-run-folder-and-reporthtml)
+15. [Metadata schema reference](#15-metadata-schema-reference)
+16. [Extending coverage](#16-extending-coverage)
+17. [Version compatibility](#17-version-compatibility)
+18. [Vocabulary](#18-vocabulary)
+19. [File reference](#19-file-reference)
+20. [Error codes](#20-error-codes)
+21. [Known limitations](#21-known-limitations)
 
 ---
 
 ## 1. Purpose and scope
 
-The tool removes client data from a restored copy of a KTP Payment Factory database so the copy can
+The tool removes client data from a restored copy of a KTP Payment Factory database, so the copy can
 be used for development, testing and support.
 
-Two schemas are in scope for the product as a whole:
-
-| Schema | Holds | Status |
+| Schema | Holds | Covered by |
 |---|---|---|
-| **OP** | Core treasury — entities, portfolios, counterparties, bank accounts, and around 60 `histo_*` history tables | **This tool. Complete and tested.** |
-| **EPF** (`OPPAYMENTS`) | Payment factory — payments, bulk payments, users, SWIFT/BIC data, audit trail | Not yet ported to v4. The previous-generation scripts remain in `Anonymization_EPF/`. |
+| **OP** | Core treasury: entities, portfolios, counterparties, bank accounts, and the `histo_*` history tables | **This tool** |
+| **EPF** (`OPPAYMENTS`) | Payment factory: payments, users, SWIFT/BIC data, audit trail | The EPF anonymization, run after this one. It reads the translations this tool records (`atrace.ref_tables_modif`) |
 
-v4 covers **580 columns across 167 tables**: 562 shipped plus 18 site-specific.
+The shipped inventory lists 560 columns, and the site inventory 16 more. On a given database some of
+them do not exist: the inventory covers several KTP/CTI versions.
 
 ### What "anonymized" means here
 
 Four treatments, declared per column:
 
-| Rule | Effect | Typical use |
-|---|---|---|
-| `CODE` | The value is looked up in the mapping and replaced with its generated equivalent | Any column holding an entity, portfolio, counterparty or bank account code |
-| `NULL_OUT` | Set to `NULL`. Where the column is `NOT NULL`, overwritten with the marker `ANONYMIZED` truncated to the column width | Free text and PII — names, addresses, phone, email, IBAN and RIB fragments |
-| `DESCRIPTION` | Overwritten with the anonymized code of the row itself | Label columns, so screens stay readable: a counterparty shows as `T_0000412` rather than blank |
-| `SELF_CODE` | Overwritten with the anonymized code of the row itself | A PII attribute that must stay populated because it is `NOT NULL` or subject to a format check |
+| Rule | Effect |
+|---|---|
+| `CODE` | The identifier is replaced with its translation, of its own domain (a party's or a bank account's) |
+| `NULL_OUT` | Emptied. Where the column refuses NULL, overwritten with the marker `ANONYMIZED`, cut to the column's width |
+| `DESCRIPTION` | A label, overwritten with its owner's replacement, so screens stay readable |
+| `SELF_CODE` | An attribute (address, contact detail), overwritten with its owner's replacement where it holds a value; an empty field stays empty |
 
 ### What is deliberately not anonymized
 
-- **Amounts, dates, currencies, product and system codes.** They carry no client identity and
+- **Amounts, dates, currencies, product and system codes.** They carry no client identity, and
   changing them would break reconciliation and reporting.
-- **One-character columns.** A single character is a checkbox state (`O`, `x`, `N`) far more often
-  than a client identifier, and substituting it would rewrite every matching flag in the schema.
-  Governed by `MIN_CODE_LENGTH`, default 2.
-- **Structural referential data** that has no client content.
+- **Columns left out of the inventory, with the reason in a comment**: for example the
+  one-character discriminators that say whether a neighbouring column holds a tiers or an entity.
+  Every listed column is processed by its rule; nothing is skipped by guesswork.
 
 ---
 
 ## 2. The design principle: one inventory drives everything
 
-Every `(table, column, rule, category)` pair is declared **once**, in a CSV. That one declaration
-drives four separate things:
+Every `(table, column, rule, category)` is declared **once**, in a CSV. That one declaration drives
+four things:
 
 ```
                      config/inventory_op.csv
                    + config/inventory_op_custom.csv
-                              │
-                              ▼
+                              |
+                              v
                    anon_meta.anon_inventory
-                              │
-        ┌─────────────┬───────┴────────┬─────────────────┐
-        ▼             ▼                ▼                 ▼
+                              |
+        +-------------+-------+--------+-----------------+
+        v             v                v                 v
     the engine    the dry run      the verifier    the coverage doc
 ```
 
-Coverage drift becomes structurally impossible: the script that changes the data, the check that
-proves it changed, and the document that describes it cannot disagree, because they read the same
-rows.
-
-This is the central fix over v3, where the anonymization scripts and the verification script each
-maintained their own hand-edited table list. By the time v4 was written the two lists had already
-drifted apart, and the documentation described a third list that matched neither.
-
-A second consequence: **custom inclusions stop being a special case.** They are simply additional
-rows from a second CSV, parsed by the same loader and treated identically downstream.
+The script that changes the data, the check that proves it changed and the document that describes it
+cannot disagree, because they read the same rows. A site's own columns are not a special case: they
+are rows of a second CSV, loaded the same way.
 
 ---
 
@@ -132,699 +96,635 @@ rows from a second CSV, parsed by the same loader and treated identically downst
 
 ```csv
 table_name,column_name,rule,category,source,notes
-structure,code,CODE,ANY,BASE,
-prevision_param,compte,CODE,BANK_ACCOUNT,BASE,
-cm_pooling_convention,value_1,NULL_OUT,NONE,BASE,
+structure,code,CODE,NODE_ROLE,BASE,[folders: Entite Compte Tiers Compta Compta_Ato] ...
+compte_regle,compte,CODE,BANK_ACCOUNT,BASE,
+histo_operation,description,NULL_OUT,NONE,BASE,
 ```
 
 | Field | Meaning |
 |---|---|
-| `table_name` | Table in the OP schema |
-| `column_name` | Column to anonymize |
-| `rule` | `CODE` · `NULL_OUT` · `DESCRIPTION` · `SELF_CODE` |
-| `category` | `ENTITY` · `PORTFOLIO` · `COUNTERPARTY` · `BANK_ACCOUNT` · `ANY` · `NONE` |
+| `table_name`, `column_name` | A table (or updatable view) of OP, and its column |
+| `rule` | `CODE` - `NULL_OUT` - `DESCRIPTION` - `SELF_CODE` |
+| `category` | What the column holds (a `CODE` row) or who owns the row (a `DESCRIPTION` or `SELF_CODE` row) |
 | `source` | `BASE` (shipped) or `CUSTOM` (site file) |
-| `notes` | Documentation only, never interpreted. **No commas.** |
+| `notes` | Free text, and the column options below. No commas |
 
-Lines starting with `#` are ignored. Blank lines are ignored. Values are case-insensitive.
+Lines starting with `#` and blank lines are ignored. Values are case-insensitive.
 
-### What `category` means, per rule
+### Categories
 
-- On **`CODE`** it says which slice of the mapping may apply.
-  - `BANK_ACCOUNT` restricts lookups to bank-account codes. This is necessary because a
-    `compte_banque.code` can be textually identical to a `tiers.code`; without the restriction a
-    column referencing one would be rewritten using the other's mapping.
-  - `ANY` means the column may hold an entity, portfolio or counterparty code, and the mapping is
-    searched unrestricted.
-- On **`DESCRIPTION`** and **`SELF_CODE`** it says which entity type owns the row, so the correct
-  per-category configuration flag gates it.
-- On **`NULL_OUT`** it is always `NONE`. Free text is never category-dependent.
+| Rule | Category | Means |
+|---|---|---|
+| `CODE` | `PARTY` | Party codes only. A bank account's replacement is never written here |
+| `CODE` | `BANK_ACCOUNT` | Bank-account codes only. A party's replacement is never written here, even when a party has the same text |
+| `CODE` | `MIXED` | Reviewed columns that hold both. A value known in one domain takes that domain's translation; a value that is a party AND an account is left as it is and reported for review, unless the column's `[group: ...]` settles it |
+| `CODE` | `NODE_ROLE` | `structure.code` and `structure.pere` only: each node by its role (section 7) |
+| `DESCRIPTION`, `SELF_CODE` | `PARTY`, `BANK_ACCOUNT`, `NODE_ROLE` (structure), or one party category | The owner of the row; a party category limits the column to owners of that category |
+| `NULL_OUT` | `NONE` | Free text is never category-dependent |
 
-> **`BANK_ACCOUNT` is a narrowing, and narrowing can be wrong.** A column classified
-> `CODE,BANK_ACCOUNT` that actually holds another category's codes will be under-anonymized, and the
-> engine will not notice. This happened in testing: `param_cpta_reg_gen.compte_ana` — *compte
-> analytique*, an analytical account — was classified `BANK_ACCOUNT` purely because its name
-> contains `compte`, and five rows of live client data survived a run that reported success. See
-> [§10](#10-verification) for what changed as a result.
+`ANY` is not accepted: every column says which domain it holds. A single party category on a `CODE`
+row is refused too - it would leave an unclassified party's code in clear.
 
-### Current composition
+### Column options
 
-| Rule | Category | Shipped | Custom |
-|---|---|---:|---:|
-| `CODE` | `ANY` | 390 | 1 |
-| `CODE` | `BANK_ACCOUNT` | 72 | — |
-| `NULL_OUT` | `NONE` | 92 | — |
-| `DESCRIPTION` | `ANY` | 2 | — |
-| `DESCRIPTION` | `BANK_ACCOUNT` | 1 | — |
-| `SELF_CODE` | `ANY` | 5 | — |
-| `SELF_CODE` | `ENTITY` | — | 5 |
-| `SELF_CODE` | `PORTFOLIO` | — | 5 |
-| `SELF_CODE` | `COUNTERPARTY` | — | 4 |
-| `SELF_CODE` | `BANK_ACCOUNT` | — | 3 |
-| | **Total** | **562** | **18** |
+Bracketed words in the notes field, parsed by `21_validate_inventory.sql` into columns of
+`anon_inventory`:
 
-580 rows in the files; **579 loaded**, because one custom row (`param_cpta_reg_gen.compte_ana`)
-overrides a shipped row rather than adding to it.
+| Option | On | Means |
+|---|---|---|
+| `[no-harvest]` | `CODE,PARTY` or `CODE,BANK_ACCOUNT` | The column holds other codes too (a BBAN, an IBAN, a condition code): a value that is no identity stays as it is, and is not captured as the code of a deleted master (section 4) |
+| `[only-where: <col> in <table>.<col> where <col> = <value>]` | `CODE` | Only the rows whose `<col>` names a `<table>` row with that value hold identifiers; the others are not renamed, read or checked |
+| `[group: <col>]` | `CODE,MIXED` | Rows with the same `<col>` hold one kind of code: a value that is a party AND an account takes the kind of its group's other values |
+| `[folders: <tree> ...]` | `structure.code` | The structure trees whose folder rows - rows with no screen - are named after clients |
+
+A misspelt option, or one on the wrong kind of column, stops the run before anything changes.
+
+### Fixed contracts
+
+`21_validate_inventory.sql` refuses an inventory that breaks what the identity model relies on:
+`tiers.code` is `CODE,PARTY`, `compte_banque.code` is `CODE,BANK_ACCOUNT`, `structure.code` and
+`structure.pere` are `CODE,NODE_ROLE`, `tiers` labels and attributes belong to parties and
+`compte_banque` ones to bank accounts.
 
 ### Overrides
 
-The two files are parsed in order, base then custom. For each custom row the loader emits a `DELETE`
-before its `INSERT`, so a row in the custom file **replaces** the shipped row for the same
-`(table, column)`.
-
-That is how a wrong classification in the shipped inventory gets corrected at a site without editing
-a file that will be overwritten by the next release. The primary key on
-`(table_name, column_name)` makes the delete necessary — without it a second row for the same column
-raises `ORA-00001`.
+The shipped file is loaded first, the site file second. For each site row the load deletes the
+shipped row of the same `(table, column)` before inserting its own, so a site row **replaces** the
+shipped one - which is how a wrong classification is corrected at a site without editing a file the
+next release replaces.
 
 ### How the CSVs reach the database
 
-The CSVs live on the client, not necessarily on the database server, so they cannot be read as
-external tables. `run_op_anonymization.bat` parses them and writes a temporary SQL file of `INSERT`
-statements, which the orchestrator runs. On failure that file is **kept** and its path printed —
-which is the only reason a batch quoting defect that had corrupted roughly 500 of 579 statements was
-ever found.
+The CSVs are on the machine that runs the tool, not necessarily on the database server, so they are
+not read as external tables. The run turns them into `INSERT` statements and sends them on the input
+of its worker session (section 8); `inventory.sql` in the run folder is that text.
+`op\run_op_anonymization.bat /inventory <file>` writes it to a file and stops.
 
 ---
 
-## 4. Configuration flags
+## 4. Identities
 
-### Where they take effect
+### Two domains
 
-Configuration says which categories to anonymize. v4 enforces that **at mapping generation, not at
-each column**:
+Every original code belongs to a **domain**, and only that domain's translation is ever written where
+it is used:
+
+| Domain | Found in | Category | Prefix |
+|---|---|---|---|
+| PARTY | `tiers.code`; `structure` nodes on the `w_tiers` screen; codes found only in party columns; confirmed references | ENTITY | `E_` |
+| | | PORTFOLIO | `P_` |
+| | | COUNTERPARTY | `T_` |
+| | | UNCLASSIFIED_PARTY | `X_` |
+| ACCOUNT | `compte_banque.code`; `structure` nodes on the `w_compte_banque` screen; codes found only in bank-account columns | BANK_ACCOUNT | `CB_` |
+
+The same text can be a party AND an account. They are different objects, and each keeps its own
+replacement: the shared text proves nothing.
+
+### Classification of a party, in this order
+
+| | Category |
+|---|---|
+| No `tiers` row | UNCLASSIFIED_PARTY, reason MISSING_MASTER |
+| Flag `O` and a `w_tiers` node | PORTFOLIO |
+| Flag `N` and an `Entite` node on `w_tiers` | ENTITY (wins over another classification of the same party) |
+| Flag `N` and another `w_tiers` node, no `Entite` | COUNTERPARTY |
+| Flag `N` and no structure node at all - an archived party | COUNTERPARTY |
+| No structure node, flag not `N` | UNCLASSIFIED_PARTY, NO_STRUCTURE |
+| Nodes on other screens only | UNCLASSIFIED_PARTY, NO_PARTY_SCREEN |
+| Flag neither `O` nor `N` (empty, another value, or two different values) | UNCLASSIFIED_PARTY, UNKNOWN_FLAG |
+| Flag `N`, `w_tiers` nodes with no classification | UNCLASSIFIED_PARTY, UNKNOWN_CLASSIFICATION |
+
+An account node is any node on the `w_compte_banque` screen, whatever its classification. A
+`w_compte_banque` node with no `compte_banque` row is a bank account unless
+`APPROVE_STRUCTURE_ONLY_ACCOUNTS=n`, in which case a run that finds one refuses to start.
+
+The reasons are recorded in `anon_meta.unclassified_reason` in words - one line (`brief`), in full
+(`why`), what would classify the party (`fix`) - with a query that lists the parties of a run.
+
+### Codes found only in references
+
+A value of a `CODE,PARTY` or `CODE,BANK_ACCOUNT` column that is no identity of that domain is the
+code of a master row deleted in the past. It is captured too (`anon_meta.reference_harvest`), found
+only in references (`REFERENCE_ONLY`): a party as UNCLASSIFIED_PARTY, MISSING_MASTER; an account as
+BANK_ACCOUNT. Not read for them: columns marked `[no-harvest]`, rows outside `[only-where: ...]`,
+blank values, values longer than the master's code column, replacements already in `code_map`, and
+`CHAR` columns (their padding would make a code of its own). A code of a `MIXED` column is not
+harvested - its kind cannot be told - but can be confirmed by hand in
+`anon_meta.confirmed_identity`.
+
+### Captured once
+
+The first time a run that changes data sees an identity, it records it in
+`anon_meta.identity_inventory` with its category and reason, from the raw data. A later run keeps
+that record: a replacement already written never changes because master data was repaired since.
+When today's facts would classify an identity differently, the recorded category is kept and the
+difference is reported (classification drift; the verification then says REVIEW REQUIRED).
+
+---
+
+## 5. Switches
+
+Each of the five categories has three **independent** switches in `config\anonymization.ini`:
+
+| Switch | Acts on |
+|---|---|
+| `ANONYMIZE_<CATEGORY>` | Renaming the identifiers and every typed reference to them (`CODE`) |
+| `ANONYMIZE_<CATEGORY>_DESCRIPTION` | Labels (`DESCRIPTION`) |
+| `ANONYMIZE_<CATEGORY>_ATTRIBUTES` | Attributes and addresses (`SELF_CODE`) |
+
+They act **per identity**, by its category, not per column: with `ANONYMIZE_COUNTERPARTY=n` every
+column still runs, and the counterparties' codes - only those - are kept. Labels and attributes are
+masked with the identity's replacement, so they can be masked while the identifier itself is kept. A
+switch never moves an identity into another category.
+
+`NULL_OUT` has no switch: free text is always emptied.
+
+A switch at `n` leaves client data in place by configuration: the verification then reports
+INCOMPLETE, never PASS. When an identity's one translation belongs to another category than its own
+(an earlier translation kept after the data changed), an operation runs only if both categories allow
+it.
+
+---
+
+## 6. Translations
+
+### Generated, never regenerated
+
+A replacement is the category's prefix and seven digits: `E_0000001`, `CB_0000001`. New translations
+are numbered after every existing one of their category, in the binary order of the original text, so
+the same data always gets the same numbers and extending a map never moves an identity to another
+value. An identity needs a translation when any of its three switches is on.
+
+`anon_meta.code_map` holds them, keyed by `(category, old_code)`, with a unique index on `new_code`.
+It is the only record of the original values and is **never dropped by a run**. An existing
+translation is reused, never regenerated.
+
+### The plan
+
+Each run builds `anon_meta.identity_plan`: every identity with its category, where it was found, its
+switches and its one translation - reused (`EXISTING`), new (`NEW`) or not needed (`NONE`). A dry
+run counts against this plan, and a run applies it, so the two cannot disagree. The plan of the
+latest completed run is kept: the verification checks the data against it, because after the run
+only the plan still knows what each value was.
+
+### Typed lookups
+
+From the plan, each run rebuilds:
+
+| Table | Holds |
+|---|---|
+| `code_lookup` | One lookup per domain (`PARTY`, `ACCOUNT`), the `MIXED` lookup (identities known in one domain only), the `AMBIGUOUS` texts (party AND account), and the values of each domain (`VALUE_P`, `VALUE_A`) that settle a `MIXED` group |
+| `node_lookup` | What each structure node becomes, tree by tree |
+| `owner_key` | How a label or an attribute finds its owner: by its original code or by its replacement, so labels are masked correctly whether or not the identifier was renamed |
+
+A `CODE` column reads only its own domain's lookup. There is no fallback to another domain.
+
+---
+
+## 7. Applying the inventory
+
+In this order:
+
+1. **Free text** (`NULL_OUT`), table by table: every `NULL_OUT` column of a table in one statement.
+   A column the dictionary calls nullable but that refuses NULL at run time (`ORA-01407`) gets the
+   marker. Then the text of the structure's folder rows that are not named after a client.
+2. **Identifiers** (`CODE`), column by column, each through its domain's lookup.
+3. **Labels and attributes** (`DESCRIPTION`, `SELF_CODE`), one statement per table, rule and owner
+   category.
+
+Each statement is its own transaction. Tables at or above 100,000 rows get a `PARALLEL` hint
+(`PARALLEL_DEGREE`).
+
+### The structure tree
+
+`structure` holds party nodes, account nodes and folders, in several trees (`structure.structure`).
+A node is renamed by its screen: an account node with its account's translation, a party node with
+its party's. A folder row - a row with no screen - of a tree listed by `[folders: ...]` is renamed
+when its code is a client identifier (the party's translation first, else the account's). Any other
+node keeps its code. A child's `pere` takes exactly what its parent node in the **same tree** became,
+so a parent and its children cannot disagree. A `pere` with no node in its child's tree takes the
+translation of the one domain its text belongs to, and is left for review when it is both.
+
+### Left for review
+
+Values whose role the data does not settle are left as they are and logged `REVIEW` - a value that
+is a party AND an account in a `MIXED` column (unless its group settles it), a parent with no node in
+its child's tree that is both. They are client values still in place: the verification says REVIEW
+REQUIRED while they remain.
+
+---
+
+## 8. The run
+
+### The pieces
 
 ```
-ANONYMIZE_COUNTERPARTY=n
-   └─ no COUNTERPARTY rows are generated in anon_meta.code_map
-        └─ every CODE column finds no match for counterparty values
-             └─ counterparty codes are left alone, everywhere, automatically
+op\run_op_anonymization.bat          launcher: starts lib\anon.ps1, returns its exit code
+op\lib\anon.ps1                      configuration, questions, sessions, steps, run folder
+op\lib\anon_screen.ps1               the screen: steps, live lines, checks table, the end
+op\lib\anon_html.ps1                 report.html
+op\sql\10_create_metadata_schema.sql ANON_META, created or migrated in place (SYS)
+op\sql\30_install_engine.sql         the op.anon_engine package
+op\sql\21_validate_inventory.sql     the loaded inventory, checked
+op\sql\run\*.sql                     the entry scripts the run sends
+op\verify\verify_op_coverage.sql     the verification
 ```
 
-This is why v4 has no per-column conditionals. v3 needed roughly 200
-`IF flag = 'y' THEN … ELSE …` blocks to achieve the same thing in two of its scripts, and got it
-wrong in a third, which ignored the flags entirely while documenting that it honoured them.
+### Sessions
 
-### The mental model to correct
+The wrapper starts `sqlplus -S -L /nolog` processes and writes on their standard input; **the
+passwords travel only there**, in the `CONNECT` line. None is on a command line, in a file, or in
+the environment of a process it starts.
 
-**Disabling a category does not remove columns from the run.** Every column is still visited and its
-`UPDATE` still executes. What changes is what is in the mapping — and a value that is not in the
-mapping is left alone. So one column can be *partly* anonymized:
-
-```
-ANONYMIZE_COUNTERPARTY=n
-   └─ the UPDATE on histo_flux.tiers still runs
-        ├─ rows holding a counterparty code:  no match, left as-is
-        └─ rows holding an entity code:       still replaced
-```
-
-The consequence: **a flat covered/skipped list cannot be produced from the CSV alone.** For a
-`CODE,ANY` column the answer depends on what values the column actually holds on a given instance.
-
-The exception is `CODE,BANK_ACCOUNT`. Those only ever look at bank-account codes, so the flag
-genuinely is a whole-column on/off switch and the answer *is* knowable in advance.
-
-| Rows | Rule + category | Governed by | Predictable from the CSV alone? |
-|---:|---|---|---|
-| 72 | `CODE` + `BANK_ACCOUNT` | `ANONYMIZE_BANK_ACCOUNT` | **Yes — off means the column is 100% untouched** |
-| 391 | `CODE` + `ANY` | all four category flags, per value | No — depends on instance data |
-| 92 | `NULL_OUT` | nothing | **Yes — always erased** |
-| 3 | `DESCRIPTION` | `ANONYMIZE_*_DESCRIPTION` | Yes |
-| 5 | `SELF_CODE` + `ANY` | any `ANONYMIZE_*_ATTRIBUTES` | Yes |
-| 17 | `SELF_CODE` + category | that category's `_ATTRIBUTES` | Yes |
-
-`tools/analyze_flag_impact.sql` resolves the remaining 391 against a real instance.
-
-### The three flag families
-
-| Flag | Gates | Replaces |
+| Session | Connected as | Runs |
 |---|---|---|
-| `ANONYMIZE_<CATEGORY>` | `CODE` — whether the category's identifiers are mapped at all | v2's `Ent0` + `EntC` |
-| `ANONYMIZE_<CATEGORY>_DESCRIPTION` | `DESCRIPTION` — the label column | `EntD` / `FoldD` / `TierD` / `CpteD` |
-| `ANONYMIZE_<CATEGORY>_ATTRIBUTES` | `SELF_CODE` — the extra PII attribute columns | `Ent1`–`Ent5` and the equivalents |
+| test | SYS, then OP | `run/session.sql`: what the connection reaches |
+| SYS | SYS | `10_create_metadata_schema.sql` |
+| worker | OP, kept open | `30_install_engine.sql`, `run/engine.sql`, the inventory, `21_validate_inventory.sql`, `run/inventory.sql`, then `run/start.sql`, `run/plan.sql`, and `run/count.sql` (a dry run) or `run/record.sql` and `run/apply.sql` (a run) |
+| monitor | OP, kept open | `run/poll.sql` about every two seconds; `run/stop.sql` on Ctrl+C; `run/results.sql` at the end |
+| verifier | OP | `verify_op_coverage.sql` (a run) |
 
-Descriptions and attributes are gated separately because the vendor package separated them, and the
-separation is useful: a support copy often wants readable labels while still scrubbing phone numbers
-and personal names.
+Each command sent to a kept session is followed by `PROMPT <marker>`; the wrapper reads the output up
+to that marker. The engine's state - the run, its plan - stays in the worker session from the checks
+to the work, so nothing has to be attached again after the confirmation.
 
-Both require their own category to be enabled, because both write the row's anonymized identifier —
-without a mapping there is nothing to write.
+### The steps
 
-`NULL_OUT` has no flag. Free text and PII are always erased.
+| Dry run | Run |
+|---|---|
+| Getting ready | Getting ready |
+| 1 of 2 Checking and planning (read-only) | 1 of 4 Checking and planning (read-only) |
+| 2 of 2 Counting what a run would change | The confirmation: `Type YES to start` |
+| | 2 of 4 Recording the translations |
+| | 3 of 4 Anonymizing |
+| | 4 of 4 Verifying (read-only) |
 
-### What replaced the `Ent1`–`Ent5` slots
+The confirmation comes **after** the checks: a run its checks refuse never asks for it. `/force`
+skips it.
 
-In v2 each category had five free-form slots holding column names, applied only to `op.tiers` and
-`op.compte_banque`. **Which** columns are treated this way is now declared in the inventory with
-rule `SELF_CODE`, so there is no five-column ceiling and no table restriction. The flags remain as
-the on/off switch those slots gave you by being left blank.
+### The entry scripts
 
-The 17 `SELF_CODE` rows in `inventory_op_custom.csv` are what one site had put in those slots. They
-live in the custom file precisely because they are that site's choice, not a product default.
+Every line the wrapper reads begins with `ANON_` and has fields separated by `|`. Counts, and names
+of tables and columns, only - never an identifier.
 
----
-
-## 5. Identifier generation
-
-Codes are generated **deterministically and set-based**:
-
-```sql
-INSERT INTO anon_meta.code_map (category, old_code, new_code)
-SELECT :category, code,
-       :prefix || LPAD(ROW_NUMBER() OVER (ORDER BY code), 7, '0')
-  FROM (<category source query>);
-```
-
-| Category | Prefix | Width |
+| Script | Does | Prints |
 |---|---|---|
-| Entity | `E_` | 9 |
-| Portfolio | `P_` | 9 |
-| Counterparty | `T_` | 9 |
-| Bank account | `CB_` | 10 |
+| `session.sql` | Says what the connection reaches | `ANON_SESSION` |
+| `engine.sql` | Says whether the engine is valid, and its version | `ANON_ENGINE` |
+| `inventory.sql` | Counts the loaded inventory against this database | `ANON_INVENTORY` |
+| `start.sql` | `configure`, `start_run` | `ANON_RUN`, `ANON_RESULT` |
+| `plan.sql` | `preflight`; a refusal ends the run REFUSED | `ANON_RESULT`, `ANON_CHECK`, `ANON_IDENTITIES`, `ANON_SCOPE`, `ANON_ESTIMATE` |
+| `count.sql` | The dry run's work | `ANON_RESULT` |
+| `record.sql` | `generate_code_map` | `ANON_RESULT` |
+| `apply.sql` | Triggers off, `apply_inventory`, triggers on - on every way out | `ANON_RESULT` |
+| `finish.sql` | Ends a run that does not go on: CANCELLED, STOPPED | `ANON_RESULT` |
+| `poll.sql` | One look at a run | `ANON_STEP`, `ANON_PROGRESS`, `ANON_LONGOP`, `ANON_RUNSTATE`, `ANON_VERIFY` |
+| `stop.sql` | Asks a run to stop | `ANON_STOP` |
+| `results.sql` | The figures of a run | `ANON_R_...` |
+| `recover.sql` | Ends a run whose session was lost, unless that session still works; enables the triggers of OP when the run left them disabled | `ANON_RECOVER` |
 
-Uniqueness is guaranteed by construction, so there is no collision probe and no retry loop. The
-whole mapping is produced in one statement per category rather than one round-trip per code, and the
-result is reproducible — the same source data always yields the same mapping.
-
-v3 instead drew a random 7-digit number per code, queried the mapping table to check for a
-collision, and retried up to 100 times.
-
-**Width is checked before any data is touched.** Preflight compares the generated width against
-`all_tab_columns` for every `CODE` column in the inventory and refuses to start if a target is too
-narrow. v3 would have discovered that as an `ORA-12899` partway through a run it could not resume.
-
-### `code_map_any`
-
-A second table holds the resolved unrestricted lookup — one row per distinct original, with
-collisions across categories resolved by priority (entity > portfolio > counterparty > bank
-account). `CODE,ANY` columns read this; `CODE,BANK_ACCOUNT` columns read `code_map` filtered to that
-category.
-
-Six originals currently exist in more than one category. Verification reports them as an
-informational warning; they were reviewed and are correct by design.
+`op\sql\00_run_op_anonymization.sql` runs the same steps as one script in one session, for SQL\*Plus
+without the wrapper; the regression suite uses it.
 
 ---
 
-## 6. Run lifecycle
+## 9. The checks
 
-```
-run_op_anonymization.bat
-   ├─ settle configuration (file, prompts, defaults)
-   ├─ parse both CSVs into a temporary INSERT script
-   └─ sqlplus @sql/00_run_op_anonymization.sql  (22 positional parameters)
-        ├─ connect as SYS
-        ├─ @@10_create_metadata_schema.sql      create anon_meta if absent; truncate the inventory
-        ├─ connect as OP, assert the connection landed
-        ├─ @@30_install_engine.sql              compile the anon_engine package
-        ├─ @<temporary inventory script>        load 579 rows
-        ├─ @@21_validate_inventory.sql          reject impossible rule/category pairs
-        ├─ anon_engine.configure / start_run
-        ├─ anon_engine.preflight                DRY RUN STOPS HERE
-        ├─ disable triggers            (45 on the tested instance)
-        ├─ generate or reuse the mapping
-        ├─ apply the inventory         NULL_OUT → CODE → DESCRIPTION/SELF_CODE
-        ├─ re-enable triggers          (runs even when the run fails)
-        └─ finish_run
-   ├─ verify/verify_op_coverage.sql            after a successful EXECUTE
-   └─ verify/generate_report.sql               always, even when verification fails
-```
+`preflight` records each check by name in `anon_meta.anon_check`, met or not, with what it measured
+and, for one not met, what happens and what to do:
 
-Triggers are re-enabled by a handler that runs before the error propagates, so a failed run does not
-leave the schema with its audit triggers off.
+| Check | Needed | Not met when |
+|---|---|---|
+| Identity tables | required | `tiers`, `structure` or `compte_banque` lacks a column the identities are read from, or an identifier is longer than 80 characters |
+| Data not anonymized before | required | An original has the form of a replacement and no translation owns it, or a master row holds another domain's replacement: the copy was anonymized before |
+| Earlier translations | required | An identity has two or more earlier translations and none matches its category now, or a recorded identity's translation is missing |
+| Replacements unique | required | A planned replacement already exists, equals an original, or does not fit in seven digits |
+| Replacements fit their columns | required | A column is too narrow or not text for its replacements, a `NOT NULL` free-text column cannot be masked, or an `[only-where: ...]` cannot be applied |
+| Bank accounts only on the structure | info (required with `APPROVE_STRUCTURE_ONLY_ACCOUNTS=n`) | Such nodes exist and the setting says they are not bank accounts |
+| Free text that cannot be emptied | info | - (says which columns get the marker) |
+| Inventory objects in this database | optional (required with `FAIL_ON_MISSING_OBJECT=y`) | Inventory items are missing |
 
-Verification's exit code is captured and becomes the batch's exit code. The report is generated
-either way, because a failed verification is exactly when it is most wanted.
+A required check not met raises `ORA-20011` (`-20012`, `-20013`, `-20016` for the specific cases):
+the run ends **REFUSED** and nothing has changed. Each finding is also logged `ERROR` in
+`anon_step_log` with its details.
 
 ---
 
-## 7. Restartability
+## 10. Watching a run
 
-**A failed run can be re-run directly. No restore, no flag, no checkpoint.**
+The engine's own lines (`DBMS_OUTPUT`) appear only when a call ends, and the work is one call. So the
+engine also writes, as it goes, in autonomous transactions that a second session sees at once:
 
-The guarantee is that every operation is a no-op when its work is already done, so re-executing the
-whole inventory converges on the same result whether the previous run reached 5% or 95%.
+| Where | What |
+|---|---|
+| `anon_meta.anon_step_log` | One row per inventory item, numbered by `step_id` (a sequence): the monitor reads only the rows after the last one it has shown |
+| `anon_meta.anon_progress` | One row per run, rewritten before each planning stage, table or column: the phase, what the engine does in words, the items done of those planned, the object, and the same weighed by the rows of the tables (from the optimizer statistics) |
+| `v$session.module` | `ANON R-000001`: the monitor finds the run's session, and the progress of a long statement in `v$session_longops`. `10_create_metadata_schema.sql` grants OP read access to these two views; without it the live lines show tables and columns only |
+
+The live line of each kind of work shows its bar, the items done, the object with the percentage of
+its long statement, the rows so far, and the time left - from the weighed progress, once there is
+enough of it to say.
+
+`tests\manual\monitor_op_progress.sql` gives a DBA the same view from SQL\*Plus.
+
+---
+
+## 11. Stopping, failing and resuming
+
+### Statuses of a run
+
+`anon_meta.anon_run.status`: `RUNNING`, then `COMPLETED`; `FAILED` on an error; `REFUSED` when the
+checks found it unsafe; `CANCELLED` when it was not confirmed; `STOPPED` when it was asked to stop.
+
+### Ctrl+C
+
+The wrapper reads Ctrl+C as a key while sessions work. During the work it sends `run/stop.sql`
+through the monitor session, which sets `anon_run.stop_requested`; the engine reads it before each
+table or column (`check_stop`) and raises `ORA-20018`. `apply.sql` then enables the triggers again and
+ends the run STOPPED. Before the work, the wrapper ends the run STOPPED itself once the step under way
+returns. The exit code is 5.
+
+### Failures
+
+An error ends the run FAILED with the error recorded (`anon_run.error_text`, `anon_step_log`). The
+triggers of OP are enabled again on every way out of `apply.sql`. If the worker's session itself is
+lost, the wrapper runs `run/recover.sql` through the monitor session; after a closed window, an
+operator runs it by hand. It changes nothing while the run's database session is still there - a
+lost connection does not stop a call under way, and the run then ends by itself - and otherwise
+records the run FAILED and, when the run had disabled the triggers of OP and not enabled them
+again, enables them.
+
+### Resuming is running again
+
+Every operation is a no-op when its work is done, and the translations are reused, never
+regenerated, so a new run converges on the same result whether the previous one reached 5% or 95%:
 
 | Rule | Why a second pass changes nothing |
 |---|---|
-| `CODE` | Matches `WHERE column IN (SELECT old_code …)`. An already-substituted value is a *new* code, which is not in `old_code`, so it does not match. |
-| `NULL_OUT` | Matches `WHERE column IS NOT NULL`. Already empty, nothing to do. |
-| `DESCRIPTION` / `SELF_CODE` | Matches only rows where the column does not already equal its row's code. |
-| Mapping | Reused, never regenerated — identifiers stay stable across runs. |
+| `CODE` | It matches originals only; a replacement is not an original |
+| `NULL_OUT` | It matches values that are not empty (or not the marker) |
+| `DESCRIPTION` / `SELF_CODE` | They match values that differ from the owner's replacement |
+| Identities | Captured once; a row already renamed is read back to its original through its own domain's translation |
 
-### It does not skip completed steps
-
-There is no checkpoint; the whole inventory is re-executed. That is deliberate — skipping based on a
-previous run's log would be wrong the moment the configuration changed or the database was partially
-restored, whereas idempotent re-execution is correct in every case.
-
-**The cost:** a re-run re-scans every table and takes roughly as long as the original even though it
-changes almost nothing.
-
-### What a clean re-run looks like
-
-```
-mapping ................ REUSED  (n existing mappings)
-NULL_OUT items ......... NOOP
-CODE items ............. NOOP
-DESCRIPTION / SELF_CODE  NOOP
-```
-
-`REUSED` on all four categories is the signal that the mapping survived. Identifiers being
-*generated* instead means `anon_meta` was dropped and the previous run's work can no longer be
-reconciled — restore and start over.
-
-This was proven directly: runs 3 and 4 against an already-anonymized instance showed the dry run
-predicting exactly one change and the execute making exactly that one change.
-
-### When you must not re-run
-
-**After restoring the database.** The mapping refers to values the restore has put back, so the two
-are out of step. `DROP USER anon_meta CASCADE` first.
-
-> This is the behaviour not to take for granted if you have used v3. There, every run dropped the
-> mapping table and generated fresh random identifiers, so a failed run left renamed rows whose
-> originals could no longer be recovered.
+There is no checkpoint: the whole inventory is applied again. That is correct whatever changed in
+between, at the cost of reading every table again.
 
 ---
 
-## 8. Logging
+## 12. The dry run
 
-Every inventory item produces exactly one `anon_step_log` row — **including items that changed zero
-rows**.
+`/dryrun` runs the same checks and plans the same translations, then counts - with the same lookups,
+filters and statements as a run, but `SELECT COUNT(*)` instead of `UPDATE` - what each table and
+column would change. Nothing in OP and nothing in `code_map` or `identity_inventory` changes.
 
-| Status | Meaning |
+It also gives a rough estimate of a run's time: the planning it took, the rows to change at the rate
+of the last completed run on this database (rows changed per second of work) - or else its own scans
+plus a default rate - and one more pass for the verification (`anon_engine.estimate`).
+
+---
+
+## 13. Verification
+
+`op\verify\verify_op_coverage.sql` checks the result against the plan of the latest completed run and
+the same inventory the engine used. Results go to `anon_meta.verify_result`.
+
+| Part | Checks |
 |---|---|
-| `OK` | Applied, *n* rows changed |
-| `NOOP` | Applied, 0 rows changed — already clean, or nothing matched |
-| `SKIPPED` | Table or column does not exist here (`ORA-00942` / `ORA-00904`) |
-| `DISABLED` | Excluded by configuration |
-| `ERROR` | Anything else — the run fails |
+| Identities | Each identity has exactly one translation of its own domain; masters and nodes carry it; classification unchanged since capture |
+| Residual identifiers | For every identifier column: is an original of its domain, or of the other one, still there? Is a replacement of the wrong domain there? **The primary test** |
+| Free text | Every `NULL_OUT` column is empty or holds the marker |
+| Labels and attributes | Each holds its owner's replacement; no empty field was filled in |
+| Mapping integrity | Replacements unique, of their own domain, none equal to an original |
+| Protections switched off | What each switch at `n` left in place |
+| Prefix conformance | How much of each master column carries a prefix: information only |
 
-The `NOOP` / `SKIPPED` distinction is the point. v3's `merge_codes` printed nothing at all when zero
-rows matched, so a misspelled column name and a genuinely clean column produced identical output:
-silence.
+It asks *"is any value here still an original?"* - a question with a definite answer - rather than
+*"does this value look anonymized?"*. A currency code, a product code or a system value in an
+identifier column is not a failure; values that are no recorded identifier are counted as a warning,
+outside the verdict (a client code among them belongs in `anon_meta.confirmed_identity`). Every
+prefix test uses `ESCAPE`: in Oracle `_` is a wildcard.
 
-Errors other than missing-object are not swallowed. The orchestrator runs under
-`WHENEVER SQLERROR EXIT FAILURE`, so a failed run returns a non-zero exit code.
+### The verdict
 
-### Live progress
-
-The step log is written through an **autonomous transaction**, so progress is visible from a second
-session immediately, even though SQL\*Plus will not print `DBMS_OUTPUT` until the block finishes:
-
-```batch
-sqlplus op/<pwd>@<TNS> @tests\manual\monitor_op_progress.sql
-```
-
-### Counters
-
-The run summary counts each object once. Preflight visits every object too, and until this was fixed
-both visits were counted — a run reporting `skipped 304` was describing 152 objects.
-
----
-
-## 9. The dry run
-
-`/dryrun` runs the same code path with `p_dry_run => TRUE`. It:
-
-- resolves every inventory row against `all_tab_columns` and reports what is missing here,
-- checks generated code width against every `CODE` target,
-- identifies one-character columns and reports that they will be left alone,
-- identifies `NOT NULL` free-text columns that cannot be emptied,
-- counts the rows each item *would* change,
-- writes `DRYRUN` rows to the step log,
-- issues **no DML**, and
-- **exits non-zero if any check fails.**
-
-It is a rehearsal, not a summary. v3's `/dryrun` lived entirely in the batch file, echoed a hardcoded
-list of five filenames — three of which the real run did not execute — issued four `COUNT(*)`
-queries, never consulted the inventory, and could not fail.
-
----
-
-## 10. Verification
-
-`verify/verify_op_coverage.sql` reads the same inventory the engine used, so it cannot check a
-different set of columns than the one that was anonymized. Results are written to
-`anon_meta.verify_result` and the script exits non-zero on any failure.
-
-| Part | Question | Pass/fail? |
+| Verdict | Exit code | When |
 |---|---|---|
-| 1 | Does any **original identifier** still exist in any identifier column? | **Yes — this is the test** |
-| 2 | Is every free-text / PII column empty or masked? | Yes |
-| 3 | Do anonymized rows agree with their own code? | Warning only |
-| 4 | Is the mapping unique, complete and unambiguous? | Yes |
-| 5 | How much of each identifier column carries a prefix? | Informational |
+| PASS | 0 | Every protection on, nothing original left, nothing left for review |
+| FAIL | 2 | An original is still where it should have been replaced, or a replacement of the wrong domain is present |
+| REVIEW REQUIRED | 3 | Values were left as they are on purpose, or a classification drifted |
+| INCOMPLETE | 4 | No exposure where protection was on, but a protection was switched off |
 
-### Residual detection, not prefix matching
-
-Part 1 asks *"is any value here still one of the originals?"* — a question with a definite answer
-that cannot be fooled.
-
-The older scripts instead asked *"does this value look anonymized?"* by testing a prefix. That is
-weaker in two ways:
-
-1. **It produced false passes.** The OP script used `LIKE 'E_%'` — and in Oracle `_` is a
-   single-character wildcard, so a real currency code `EUR` matched and was counted as anonymized.
-   Every prefix test in v4 uses `ESCAPE`, as the EPF script correctly did.
-2. **Even written correctly, it asks the wrong question.** Plenty of values legitimately have no
-   prefix — currency codes, product codes, system references that were never client data. Those are
-   not failures. Prefix conformance is reported as information, not pass/fail.
-
-### Part 1 deliberately does not mirror the engine
-
-An earlier version restricted `BANK_ACCOUNT` columns to bank-account codes, exactly as the engine
-does. That meant a column whose declared category was too narrow was missed by the engine **and** by
-the check meant to catch it. Both agreed; both were wrong. On the test instance that hid five live
-client codes in `param_cpta_reg_gen.compte_ana`, and verification reported `PASS`.
-
-Part 1 now searches the **full** mapping regardless of the declared category. The verifier's job is
-to test the outcome, not to re-apply the engine's assumptions. Any original left anywhere is a leak,
-whatever category it belongs to.
-
-**The general rule this illustrates:** it is legitimate for the checker to share a *definition* with
-the engine — what an anonymized value looks like. It is not legitimate for it to share an
-*assumption* about where to look.
-
-### Things that are deliberately not failures
-
-- **One-character columns.** The engine leaves them alone by design, so failing them would mean a
-  correct run could never pass.
-- **`NOT NULL` free text.** It cannot be emptied. It is masked with `ANONYMIZED` where the column is
-  character-typed; where it is not, the gap is reported as a warning — loud, but not a run failure.
-- **Missing objects.** Reported as `SKIP`, with a row count of nothing.
+The verification exits 1 when it cannot run; the run's exit code is then 2 - changed but not
+verified is not a pass.
 
 ---
 
-## 11. The HTML report
+## 14. The run folder and report.html
 
-`verify/generate_report.sql` writes `op/logs/report_<timestamp>.html` — a single self-contained file
-with inline CSS and no external dependencies.
+Every run leaves `op\logs\<date>_<time>_R-<run>\`: `report.html`, `report.txt` (the engine's
+lines), `verify.txt`, `console.log` (the screen and the engine), `results.txt`, `manifest.txt`
+(`key=value`) and `inventory.sql`.
 
-### It reads, it never re-checks
-
-Every number comes from `anon_meta.verify_result`, joined to `anon_inventory` and `anon_run`. The
-report performs no verification of its own.
-
-That is deliberate. Duplicating the check logic is exactly how the engine and the verifier came to
-share one wrong assumption and both miss five live client codes. There is one place that decides
-whether a column is clean, and the renderer is not it.
-
-If `verify_result` is empty the script raises `ORA-20070` and stops, rather than rendering an empty
-report that would look like a pass.
-
-### Structure
-
-| Section | Contents |
-|---|---|
-| Verdict banner | `PASS` / `FAIL` with the headline figures |
-| Six tiles | Columns in scope · verified clean · rows exposed · not on instance · identifiers mapped · rows changed |
-| Coverage by treatment | One row per rule, with columns / clean / exposed / not checked |
-| Shipped inventory | Every column from `inventory_op.csv`, grouped by table |
-| Custom-added inventory | The same for `inventory_op_custom.csv` |
-| Not checked on this instance | Tables absent here, grouped, with the reason |
-| Mapping integrity | Uniqueness, completeness, per-category counts |
-
-Failures sort to the top **within each table group** and are shaded, so nothing needing action can be
-buried a few hundred rows down.
-
-### Clean and Exposed, not anonymized and not-anonymized
-
-| Column | Means |
-|---|---|
-| **Rows** | Every row in the column |
-| **Exposed** | Rows still holding an original client value — the only figure that should ever be non-zero |
-| **Clean** | Rows − Exposed |
-
-A `CODE` column can legitimately hold currency codes, product codes and system references that were
-never client data and correctly carry no prefix. Counting those as "not anonymized" would show
-alarming figures on a perfectly clean database — the trap the v3 verifier fell into.
-
-### Regenerating
-
-It reads stored results, so it can be re-run at any time without a run and without changing
-anything. It always reflects the most recent verification.
+`report.html` is written by `anon_html.ps1` from the files of the folder - `results.txt` above all,
+which `run/results.sql` prints from what the run and the verification recorded. It **reads, never
+re-checks**: there is one place that decides whether a column is clean, and the report is not it. It
+holds counts and names of tables and columns only. The queries that list the unclassified parties
+are printed in it for the operator to run, never run by the tool.
 
 ---
 
-## 12. Metadata schema reference
+## 15. Metadata schema reference
 
-Everything the tool stores lives in `anon_meta`, created on first run and never dropped as part of a
-run.
+Everything the tool stores lives in `anon_meta`, created by the first run and migrated in place by
+later versions: missing columns are added and constraints widened; nothing that records an original
+value is ever dropped.
 
-| Object | Purpose |
+| Table | Holds |
 |---|---|
-| `code_map` | `category`, `old_code`, `new_code`. The mapping. Retained across runs. |
-| `code_map_any` | Resolved unrestricted lookup — one row per distinct original, cross-category collisions resolved by priority |
-| `anon_inventory` | The loaded inventory. Truncated and reloaded each run. PK `(table_name, column_name)` |
-| `anon_run` | One row per run: `run_id`, `run_mode` (`EXECUTE` / `DRYRUN`), `status`, timestamps, `config_json` |
-| `anon_step_log` | One row per inventory item per run: `phase`, `object_name`, `rows_affected`, `elapsed_ms`, `status`, `message` |
-| `verify_result` | One row per check: `part`, `check_name`, `expectation`, `total_rows`, `bad_rows`, `status`, `detail` |
-| `atrace.ref_tables_modif` | A view over `code_map` in a separate schema, for EPF compatibility |
+| `code_map` | `category`, `old_code`, `new_code`, `run_id`, `id_applied`. The translations. **Holds original client identifiers** |
+| `identity_inventory` | Every original identity: `domain`, `old_code`, `category`, `x_reason`, `membership`, `map_category`. **Holds original client identifiers** |
+| `confirmed_identity` | Identities confirmed by hand, for codes found only in `MIXED` or `[no-harvest]` columns. **Holds original client identifiers** |
+| `reference_harvest` | Codes found only in references, by column, per run. **Holds original client identifiers** |
+| `identity_plan` | What a run intends for each identity (section 6). **Holds original client identifiers** |
+| `code_lookup`, `node_lookup`, `owner_key` | The lookups of the latest run, rebuilt every run. **Hold original client identifiers** |
+| `anon_inventory` | The loaded inventory, with the parsed column options. Truncated and reloaded every run |
+| `anon_run` | One row per run: mode, status, times, switches (`config_json`), counts found (`dataset_json`), `tool_version`, `stop_requested`, `error_text` |
+| `anon_run_setting` | The three switches of each category, per run |
+| `anon_step_log` | One row per inventory item per run, numbered by `step_id`: phase, object, status, rows, rows given an X_ value, milliseconds, message |
+| `anon_progress` | Where a run is now (section 10) |
+| `anon_check` | The checks of each run (section 9) |
+| `field_baseline` | The NULL counts of attribute columns before a run masks them |
+| `verify_result`, `verify_key` | The latest verification, and its scratch table |
+| `unclassified_reason` | The reasons of unclassified parties, in words, with their queries |
 
-> `anon_run.run_mode` is not called `mode`. `MODE` is an Oracle reserved word, and naming the column
-> that caused the first live test to fail with `ORA-00904` plus four cascading errors. Quoting it as
-> `"MODE"` would have worked but would have made the identifier case-sensitive forever.
+Status values of `anon_step_log`: `OK`, `NOOP` (no row changed - worth a look on a column you
+expected to change), `SKIPPED` (not in this database), `DISABLED` (switched off), `REVIEW`, `DRYRUN`
+(would change *n* rows), `ERROR`.
 
-### The `atrace` compatibility surface
+### The atrace compatibility view
 
-EPF's cascade phase reads `atrace.ref_tables_modif`. v4 exposes that name and shape as a view over
-`code_map` so the existing EPF scripts keep working until EPF is ported.
-
-A view compiles with its **owner's** rights, so `atrace` needs its own `SELECT` on
-`anon_meta.code_map`, granted `WITH GRANT OPTION` so it can pass the privilege on to `op`. Missing
-that produced an `ORA-00942` on view creation that looked like a missing schema and was not one.
+The EPF anonymization reads `atrace.ref_tables_modif` to carry the OP renames into OPPAYMENTS. The
+view exposes exactly one row per identity - its own translation - and only translations a completed
+run applied to identifiers (`code_map.id_applied`): one used only to mask a label never renames
+anything downstream.
 
 ### After handover
 
 ```sql
 DROP USER anon_meta CASCADE;
-DROP USER atrace CASCADE;   -- only once EPF has also run
+DROP USER atrace CASCADE;   -- once the EPF anonymization has run
 ```
-
-`code_map` maps every anonymized identifier back to the real one. It is kept so a failed run can
-resume and so verification can be re-run — not as a key to hold on to.
 
 ---
 
-## 13. Extending coverage
+## 16. Extending coverage
 
-Add a line to `config/inventory_op_custom.csv`:
+Add a line to `config\inventory_op_custom.csv` (section 3), then a dry run to check it and count what
+it would change. Nothing else changes: the engine, the dry run, the verification, the report and the
+coverage document read it.
 
-```csv
-my_new_table,entity_code,CODE,ANY,CUSTOM,Added for the 2026 module
-my_new_table,contact_email,NULL_OUT,NONE,CUSTOM,
-```
-
-Then dry-run to confirm it resolves, run for real, and optionally regenerate the coverage document:
-
-```batch
-sqlplus op/<pwd>@<TNS> @tools\generate_coverage_doc.sql
-```
-
-No SQL changes anywhere. The engine, the dry run, the verifier, the report and the coverage document
-all pick it up.
+`tools\generate_coverage_doc.sql` writes the coverage document from the loaded inventory, and says
+what exists on the connected database.
 
 ### Choosing the rule
 
-| Situation | Rule | Category |
+| The column holds | Rule | Category |
 |---|---|---|
-| Holds an entity / portfolio / counterparty code | `CODE` | `ANY` |
-| References `compte_banque.code` | `CODE` | `BANK_ACCOUNT` |
-| Free text or PII | `NULL_OUT` | `NONE` |
-| PII that must stay populated (`NOT NULL`, format check) | `SELF_CODE` | the owning category |
+| Party codes | `CODE` | `PARTY` |
+| Bank-account codes | `CODE` | `BANK_ACCOUNT` |
+| Both, confirmed by review | `CODE` | `MIXED` |
+| Free text or personal data | `NULL_OUT` | `NONE` |
+| Personal data that must stay populated | `SELF_CODE` | the owner's domain |
 
-`SELF_CODE` requires the table to have a `code` column, since the value written *is* that row's
-anonymized code. The `histo_*` tables do not have one, which is why a `NOT NULL` free-text column
-there is masked rather than self-coded.
+Decide from what the column **holds**, not from its name: `compte_ana` (*compte analytique*, an
+analytical account) holds party codes too. `tools\analyze_flag_impact.sql` measures, per column, how
+many values belong to each category.
+
+`DESCRIPTION` and `SELF_CODE` find the owner through the table's `code` column, so they apply to
+tables that have one.
 
 ### Is the inventory complete?
 
-The tool guarantees that **the inventory is followed exactly**. It cannot know whether the inventory
-lists everything that needs anonymizing — that is a data-classification question for whoever owns the
-schema. `tools/scan_for_leaks.sql` samples the schema for values that look like client identifiers
-but are not in the inventory, as an aid to that review.
+The tool guarantees that **the inventory is followed exactly**. Whether it lists everything that
+needs anonymizing is a data-classification question for the owner of the schema.
+`tools\scan_for_leaks.sql` walks every character column of OP for recorded originals, as an aid to
+that review.
 
 ---
 
-## 14. Version compatibility
+## 17. Version compatibility
 
-### Older OP versions — supported
-
-The shipped inventory spans several KTP/CTI releases. On the tested instance 147 of 580 items did
-not exist, and the run completed cleanly: missing objects are resolved at preflight, logged as
-`SKIPPED`, and never touched.
-
-Set `FAIL_ON_MISSING_OBJECT=y` for a strict run where any drift from the inventory is a failure.
-
-### Newer OP versions — supported
-
-Adding coverage for a new table or column is one line in `inventory_op_custom.csv`. No SQL, no
-release of the tool. This path is proven: the `compte_ana` correction was delivered exactly this way.
-
-### What would need real work
-
-A new *kind* of anonymization — something none of the four rules expresses. That means a new rule in
-the engine and matching handling in the verifier. Nothing currently on the horizon needs one.
+- **Older OP versions.** Missing tables and columns are found by the checks, logged `SKIPPED` and
+  never touched. `FAIL_ON_MISSING_OBJECT=y` makes any of them a refusal.
+- **Newer OP versions.** A new table or column is one line in `inventory_op_custom.csv`.
+- **An `ANON_META` created by an earlier version** is migrated in place by the next run: columns
+  added, constraints widened, a derived table of the earlier design dropped. Its translations are
+  reused where they agree with the identity's domain and category; where they cannot be trusted, the
+  checks refuse the run and say why.
+- **A new kind of anonymization** - something none of the four rules expresses - needs a new rule in
+  the engine and in the verification.
 
 ---
 
-## 15. Naming and vocabulary
+## 18. Vocabulary
 
-Our own objects use English names. The vendor's schema objects are **never** renamed — doing so would
-break the application.
-
-| v3 | v4 |
-|---|---|
-| `atrace` (schema) | `anon_meta` |
-| `pack_anonym` | `anon_engine` |
-| `merge_codes` | `anon_engine.apply_code_mapping` |
-| `generate_unique_mappings` | `anon_engine.generate_code_map` |
-| `op_code_mapping` | `code_map` |
-| `EntC` / `FoldC` / `TierC` / `CpteC` | `ANONYMIZE_ENTITY` / `_PORTFOLIO` / `_COUNTERPARTY` / `_BANK_ACCOUNT` |
-| `ENTITE` / `PORTEFEUILLE` / `TIERS` / `COMPTE` | `ENTITY` / `PORTFOLIO` / `COUNTERPARTY` / `BANK_ACCOUNT` |
-
-### The vendor's French vocabulary
+The application's schema objects are never renamed. Its French vocabulary:
 
 | Term | Means |
 |---|---|
 | `entite` | Legal entity |
 | `portefeuille` | Portfolio |
-| `tiers` | Counterparty / third party |
+| `tiers` | Third party; `tiers.code` is the party master |
 | `compte_banque` | Bank account |
-| `structure` | The entity table |
-| `libelle` | Label, description |
-| `adresse1`–`adresse5` | Address lines |
+| `structure` | The structure tree: party nodes, account nodes, folders; `pere` is the parent node |
+| `ecran` | The screen a node belongs to: `w_tiers` (party), `w_compte_banque` (bank account) |
+| `flag_portefeuille` | `O` a portfolio, `N` an entity or a counterparty |
+| `libelle` | Label |
+| `adresse1`-`adresse5` | Address lines |
 | `nom_pp` / `prenom_pp` | Surname / given name of a natural person |
-| `email_adress` | Email address (the vendor's spelling) |
-| `histo_*` | History tables — the bulk of the row count |
-| `compte_ana` | *Compte analytique* — an **analytical** account, not a bank account |
-
-That last one is not trivia. It is the word that caused a misclassification which survived a full run
-and a verification pass.
+| `email_adress` | Email address (the column's own spelling) |
+| `histo_*` | History tables - the bulk of the row count |
+| `compte_ana` | *Compte analytique*: an analytical account, not a bank account |
 
 ---
 
-## 16. File reference
+## 19. File reference
 
 ### What runs
 
 | Path | Role |
 |---|---|
-| `op/run_op_anonymization.bat` | The only entry point. Settles configuration, turns the CSVs into loadable SQL, calls SQL\*Plus, returns its exit code. No logic. |
-| `op/sql/00_run_op_anonymization.sql` | Orchestrator. 22 positional parameters. |
-| `op/sql/10_create_metadata_schema.sql` | Creates `anon_meta` and the `atrace` view. Runs as SYS. |
-| `op/sql/21_validate_inventory.sql` | Rejects impossible rule/category pairs before anything runs. |
-| `op/sql/30_install_engine.sql` | The `anon_engine` package — 23 procedures and functions. |
-| `op/verify/verify_op_coverage.sql` | The five-part check. Writes `verify_result`. Non-zero exit on failure. |
-| `op/verify/generate_report.sql` | Renders the HTML report from stored results. |
+| `op\run_op_anonymization.bat` | The entry point: starts `lib\anon.ps1` in Windows PowerShell 5.1 and returns its exit code |
+| `op\lib\anon.ps1`, `anon_screen.ps1`, `anon_html.ps1` | The run, its screen, its report |
+| `op\sql\10_create_metadata_schema.sql` | Creates or migrates `anon_meta` and the `atrace` view; the grants. Runs as SYS |
+| `op\sql\21_validate_inventory.sql` | Rejects impossible rule/category pairs and misspelt options; parses the options |
+| `op\sql\30_install_engine.sql` | The `op.anon_engine` package |
+| `op\sql\run\*.sql` | The entry scripts (section 8) |
+| `op\sql\00_run_op_anonymization.sql` | The whole run as one SQL\*Plus script |
+| `op\verify\verify_op_coverage.sql` | The verification |
 
 ### Configuration
 
 | Path | Role |
 |---|---|
-| `config/anonymization.template.ini` | Fully commented template. Copy it. |
-| `config/anonymization.ini` | Your settings. **Not in version control** — it is the file that ends up holding a real SID and possibly passwords. |
-| `config/inventory_op.csv` | Shipped coverage, 562 rows |
-| `config/inventory_op_custom.csv` | Site additions and corrections, 18 rows |
+| `config\anonymization.template.ini` | The commented template |
+| `config\anonymization.ini` | The settings of this site: a copy of the template |
+| `config\inventory_op.csv` | The shipped inventory |
+| `config\inventory_op_custom.csv` | The site's additions and corrections |
 
 ### Optional
 
 | Path | Role |
 |---|---|
-| `tools/generate_coverage_doc.sql` | Writes the coverage document from the loaded inventory |
-| `tools/analyze_flag_impact.sql` | Resolves what each flag actually governs against a real instance |
-| `tools/scan_for_leaks.sql` | Samples the schema for identifier-shaped values not in the inventory |
-| `tests/manual/monitor_op_progress.sql` | Live progress from a second session |
-| `tests/manual/row_counts.sql` | What you are dealing with, before you start |
-| `tests/manual/check_tables_exist.sql` | Which inventory objects exist here |
-| `tests/manual/check_locks.sql` | Who is holding what |
-| `tests/manual/inspect_code_map.sql` | Mapping contents — **shows real client values; keep local** |
-
-`tests/manual/` is ad-hoc only and never part of a run.
-
-### Everything else
-
-`unofficial docs/` holds the working notes from the rebuild: the test log, the defect record, open
-questions, the flag-impact analysis, and the session-2 test plan. They are accurate but are working
-documents, not deliverables.
+| `tools\generate_coverage_doc.sql` | The coverage document, from the loaded inventory |
+| `tools\analyze_flag_impact.sql` | What each switch governs, measured on a database |
+| `tools\scan_for_leaks.sql` | Recorded originals anywhere in OP, inventory or not |
+| `tests\manual\monitor_op_progress.sql` | A run's progress from SQL\*Plus |
+| `tests\manual\row_counts.sql` | The size of what a run works on |
+| `tests\manual\check_tables_exist.sql` | Which inventory objects exist here |
+| `tests\manual\check_locks.sql` | Who holds the `anon_meta` tables (as SYS) |
+| `tests\manual\typed_identity_diagnostics.sql` | Before a run, on raw data: the identities, by kind - counts only |
+| `tests\manual\inspect_code_map.sql` | The translations - **shows original client values; keep its output local** |
 
 ---
 
-## 17. Error codes
+## 20. Error codes
 
 | Code | Raised by | Means |
 |---|---|---|
-| `ORA-20010` | engine | No category is enabled — every `ANONYMIZE_*` flag is `n` |
-| `ORA-20011` | preflight | Columns cannot hold a generated identifier: too narrow, or not character-typed. **Nothing was changed.** |
-| `ORA-20012` | preflight | Inventory items missing and `FAIL_ON_MISSING_OBJECT=y`. Nothing was changed. |
-| `ORA-20013` | engine | Core entity tables not shaped as expected — no identifiers can be derived. Usually the wrong database. |
-| `ORA-20020` | validation | The inventory is empty — CSV not found, or every line is a comment |
-| `ORA-20021` | validation | Rows pair a rule with a category that cannot apply |
-| `ORA-20023` | setup | `anon_inventory` is locked by another session. The message names the holder. |
-| `ORA-20030` | verify | `code_map` is empty — nothing to verify |
-| `ORA-20031` | verify | Checks failed — client data is still present |
-| `ORA-20070` | report | `verify_result` is empty — run the verifier first |
+| `ORA-20011` | `preflight` | Checks found the run unsafe. **Nothing was changed.** The run ends REFUSED |
+| `ORA-20012` | `preflight` | Inventory items missing and `FAIL_ON_MISSING_OBJECT=y`. Nothing was changed |
+| `ORA-20013` | `preflight` | The identity tables are not shaped as expected - usually the wrong database. Nothing was changed |
+| `ORA-20014` | `configure` | A switch is neither y nor n, or `PARALLEL_DEGREE` is not a number |
+| `ORA-20015` | engine | A category not valid for its rule reached the engine (the validation should have stopped it) |
+| `ORA-20016` | `preflight` | An identifier is longer than the 80 characters `anon_meta` records. Nothing was changed |
+| `ORA-20017` | engine | A `NOT NULL` column that is not text can be neither emptied nor masked |
+| `ORA-20018` | engine | The run was asked to stop, and stopped between two columns (STOPPED) |
+| `ORA-20019` | `request_stop` | The run to stop is not running |
+| `ORA-20020` | validation | The inventory is empty |
+| `ORA-20021` | validation | Inventory rows that cannot be applied as written; they are listed |
+| `ORA-20023` | `10_create_metadata_schema.sql` | `anon_inventory` is held by another session |
+| `ORA-20030` | verification | No completed run with a plan: nothing to verify |
+| `ORA-20040`, `-20050`, `-20060` | tools | The coverage document, the switch analysis or the leak scan needs a loaded inventory or a completed run |
 
 ### Oracle errors worth recognising
 
 | Code | Meaning here |
 |---|---|
-| `ORA-03114: not connected` | The client had already lost the connection. Network, not code. |
-| `ORA-03113: end-of-file` | The server-side process died. Different problem, different fix. |
-| `ORA-00942` / `ORA-00904` | Missing table / column. Caught and logged as `SKIPPED`, not an error. |
-| `ORA-01407` | Cannot set a `NOT NULL` column to `NULL`. Handled by masking. |
+| `ORA-03114: not connected` | The client lost the connection: the network, not the code. Run again from a host near the database |
+| `ORA-03113: end-of-file` | The server process died |
+| `ORA-01407` | A column refused NULL: handled with the marker |
+| `ORA-00054` | A table is held by another session |
 
 ---
 
-## 18. Known limitations
+## 21. Known limitations
 
 | | |
 |---|---|
-| **Inventory completeness is out of scope** | The tool guarantees the inventory is followed exactly. Whether the inventory lists everything that needs anonymizing is a classification question for the schema owner. `tools/scan_for_leaks.sql` assists. |
-| **A re-run costs a full run** | No checkpointing, by design. See [§7](#7-restartability). |
-| **Passwords are visible in the process list** | They are passed to SQL\*Plus as arguments. Inherited from v3, normal for an internal DBA tool, worth knowing on a shared host. |
-| **The run needs a stable network** | One session for the length of the run. Run from a host near the database. |
-| **`NOT NULL` free text on non-character columns** | Cannot be emptied or masked. Reported as a warning; there is currently one such column. |
-| **EPF is not ported** | `Anonymization_EPF/` still holds the previous-generation scripts. The v4 verifier already carries EPF's best idea — residual detection — so the port is mostly a second inventory. |
-
----
-
-## 19. History
-
-| When | What | Result |
-|---|---|---|
-| Feb 2021 | Vendor base — `pack_anonym`, per-entity iterative rename, 98 audit triggers | 8–12 hour runtime |
-| v2 | Batch driver with interactive prompts | — |
-| v3 | Set-based rewrite: bulk pre-clear plus `MERGE`/`UPDATE` against a mapping table | 20–40 minutes |
-| Jul 2026 | KTP/CTI table scope added, then CTI tables, then `/dryrun` and custom inclusions | Each addition brought its own numbered script and its own hand-maintained table list |
-| Aug–Sep 2026 | **v4** — rebuilt around a single inventory | 580 columns, 167 tables, reconciled against v3 |
-
-### What v4 fixed
-
-Eleven defects were found by reading v3, including: custom inclusions could never work (the table
-holding them was dropped before it was read); folder layout did not match the paths the scripts
-resolved, so neither orchestrator could run; re-running after a partial failure destroyed the link
-between original and anonymized values; `DROP USER atrace CASCADE` destroyed the EPF cascade source;
-and the OP verifier's unescaped `LIKE 'E_%'` systematically overstated coverage.
-
-Roughly 200 KB of the 340 KB v3 codebase was unreachable and was not carried forward.
-
-### What real testing found
-
-Eight further defects (T1–T8) were found and fixed by running v4 against a live instance — a reserved
-word used as a column name, a privilege chain on the compatibility view, a nested aggregate, a batch
-quoting bug that corrupted roughly 500 of 579 `INSERT` statements, and the `compte_ana`
-misclassification that the verifier shared and therefore could not catch.
-
-### The result
-
-| | |
-|---|---|
-| Mapping | 2,885 identifiers — 76 entity, 32 portfolio, 761 counterparty, 2,016 bank account |
-| Rows changed | 44,460,155 |
-| Duration | 29 minutes |
-| Errors | 0 |
-| Triggers | 45 disabled and re-enabled |
-| Verification | 432 passed, 0 failed |
-| Restartability | Proven — the dry run predicted exactly one change and the execute made exactly that one change |
+| **Inventory completeness** | The tool follows the inventory exactly; whether it lists everything is a classification question for the schema owner. `tools\scan_for_leaks.sql` helps |
+| **BIC components and account numbers** | Not covered: they need rules the engine does not have (a BIC mapped component by component, account numbers generated format-valid). The EPF anonymization covers them; `inventory_op_custom.csv` lists them, commented out |
+| **A re-run costs a full run** | No checkpoint, by design (section 11) |
+| **A stable network** | The worker session is open for the whole run. Run from a host near the database |
+| **Closing the window during a run** | The triggers of OP can stay disabled until `run/recover.sql` is run |
+| **The triggers of OP** | A run disables every trigger of OP and enables every trigger again at its end - including one that was disabled before the run |
+| **The estimate of a dry run** | A rough figure: statements on large tables do not scale with the rows they change |

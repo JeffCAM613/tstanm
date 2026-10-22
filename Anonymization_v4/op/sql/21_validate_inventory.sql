@@ -22,15 +22,13 @@
 --   SELF_CODE    category - ENTITY, PORTFOLIO, COUNTERPARTY, UNCLASSIFIED_PARTY
 --   NULL_OUT     NONE
 --
--- ANY is refused. It meant "whichever category matches this text", which is
--- how a party reference received a bank account's replacement. Each column
--- now says which domain it holds.
+-- ANY is refused. It would mean "whichever domain matches this text" - and a
+-- party reference could then receive a bank account's replacement. Each
+-- column says which domain it holds.
 --
 -- ENTITY, PORTFOLIO, COUNTERPARTY and UNCLASSIFIED_PARTY are refused on CODE.
 -- A single-category lookup would leave an unclassified (X_) party untouched in
--- a column that holds parties. Before this version those values were accepted
--- and silently treated as ANY - the category said one thing and the engine
--- did another.
+-- a column that holds parties.
 --
 -- A few contracts are fixed, because the identity model depends on them:
 --   tiers.code is PARTY, compte_banque.code is BANK_ACCOUNT, structure.code
@@ -108,7 +106,7 @@ BEGIN
 
       IF r.category = 'ANY' THEN
          bad(r.table_name, r.column_name, r.rule, r.category, r.source,
-             'ANY is no longer accepted: name the domain the column holds - PARTY, '
+             'ANY is not accepted: name the domain the column holds - PARTY, '
           || 'BANK_ACCOUNT, or MIXED once reviewed (CODE); PARTY or a party category '
           || '(DESCRIPTION, SELF_CODE).');
 

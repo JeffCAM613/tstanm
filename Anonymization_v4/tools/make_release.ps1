@@ -4,7 +4,9 @@
 ============================================================================
    powershell -ExecutionPolicy Bypass -File tools\make_release.ps1
 
- Writes ..\Anonymization_v4_<yyyyMMdd>.zip beside the project folder.
+ Writes ..\Anonymization_v4_<version>.zip beside the project folder. The
+ version is the engine's (c_version in op/sql/30_install_engine.sql) unless
+ -Version gives another.
 
  The contents are an EXPLICIT INCLUDE LIST, never a copy-with-exclusions.
  A release that ships a file nobody meant to ship is the failure worth
@@ -14,14 +16,16 @@
 
  Deliberately absent, and why:
 
-   config/anonymization.ini   the filled-in file - real SID, possibly real
-                              passwords. The template ships instead.
-   op/logs/                   run output: instance names, row counts,
+   config/anonymization.ini   the filled-in file - real database name,
+                              possibly real passwords. The template ships
+                              instead.
+   op/logs/                   run folders: database names, row counts,
                               anything the database wrote to stderr
-   unofficial docs/           the rebuild's working notes, including a test
-                              log naming a real instance
-   epf/                       not ported to v4; nothing to run
+   unofficial docs/           maintainers' working notes
+   epf/                       notes only; nothing to run
    tests/manual/*.txt         terminal transcripts from a real database
+   tests/regression/          the regression suite: it needs a disposable
+                              database container
    tools/build_docs.js        maintainer tool; its outputs are shipped
    tools/make_release.ps1     this file
 ============================================================================
@@ -40,7 +44,12 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Resolve-Path (Join-Path $here '..')
 if (-not $OutDir)  { $OutDir  = (Resolve-Path (Join-Path $here '..\..')).Path }
-if (-not $Version) { $Version = (Get-Date -Format 'yyyyMMdd') }
+if (-not $Version) {
+   $engine = Get-Content -LiteralPath (Join-Path $root 'op\sql\30_install_engine.sql')
+   $match = $engine | Select-String -Pattern "c_version\s+CONSTANT\s+VARCHAR2\(\d+\)\s*:=\s*'([^']+)'" | Select-Object -First 1
+   if ($null -eq $match) { throw 'The engine version (c_version) was not found in op/sql/30_install_engine.sql.' }
+   $Version = $match.Matches[0].Groups[1].Value
+}
 
 # ---------------------------------------------------------------- contents --
 # Paths are relative to Anonymization_v4\ and may name a file or a directory.
@@ -60,14 +69,29 @@ $include = @(
    'config/inventory_op.csv',
    'config/inventory_op_custom.csv',
 
-   # the run itself
+   # the run itself: the launcher, its PowerShell, the SQL it sends
    'op/run_op_anonymization.bat',
+   'op/lib/anon.ps1',
+   'op/lib/anon_screen.ps1',
+   'op/lib/anon_html.ps1',
    'op/sql/00_run_op_anonymization.sql',
    'op/sql/10_create_metadata_schema.sql',
    'op/sql/21_validate_inventory.sql',
    'op/sql/30_install_engine.sql',
+   'op/sql/run/session.sql',
+   'op/sql/run/engine.sql',
+   'op/sql/run/inventory.sql',
+   'op/sql/run/start.sql',
+   'op/sql/run/plan.sql',
+   'op/sql/run/count.sql',
+   'op/sql/run/record.sql',
+   'op/sql/run/apply.sql',
+   'op/sql/run/finish.sql',
+   'op/sql/run/poll.sql',
+   'op/sql/run/stop.sql',
+   'op/sql/run/results.sql',
+   'op/sql/run/recover.sql',
    'op/verify/verify_op_coverage.sql',
-   'op/verify/generate_report.sql',
 
    # optional analysis - see tools/README.md before sharing their output
    'tools/README.md',
@@ -105,11 +129,11 @@ if ($missing.Count) {
           ($missing -join "`n  "))
 }
 
-# op\logs is created by the batch on first run, but shipping it empty makes the
-# layout obvious and gives the report somewhere to land.
+# op\logs is created by the first run, but shipping it empty makes the layout
+# obvious.
 New-Item -ItemType Directory -Path (Join-Path $top 'op\logs') -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $top 'op\logs\.keep') -Encoding utf8 -Value @(
-   'Run logs and HTML coverage reports are written here.'
+   'Each run writes its folder here: report.html, report.txt, console.log and the rest.'
 )
 
 # ------------------------------------------------------------------- verify --

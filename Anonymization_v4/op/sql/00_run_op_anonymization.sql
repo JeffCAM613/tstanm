@@ -1,8 +1,9 @@
 -- ============================================================================
--- 00 - OP anonymization orchestrator
+-- 00 - OP anonymization in one sqlplus session
 -- ============================================================================
--- Entry point. Normally invoked by run_op_anonymization.bat, which collects the
--- configuration and generates the inventory load file.
+-- The whole run as one script, for sqlplus without the wrapper and for the
+-- regression suite. run_op_anonymization.bat runs the same steps through the
+-- entry scripts of sql/run, in sessions it watches, and shows them live.
 --
 -- To run it directly:
 --   sqlplus /nolog @00_run_op_anonymization.sql <sid> <syspwd> <oppwd> \
@@ -71,9 +72,8 @@ SET TRIMSPOOL ON
 -- run prints.
 SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 
--- Any error from here on aborts the run and returns a non-zero exit code.
--- v3 had no such policy: a failure scrolled past and the script reported
--- success regardless.
+-- Any error from here on ends the run and returns a non-zero exit code: a
+-- failure never scrolls past as if the run had succeeded.
 WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR EXIT FAILURE
 
@@ -91,7 +91,7 @@ SPOOL &log_file
 
 PROMPT
 PROMPT ====================================================================
-PROMPT  KTP OP Anonymization (v4)
+PROMPT  OP Anonymization
 PROMPT ====================================================================
 
 
@@ -172,13 +172,15 @@ END;
 
 -- ============================================================================
 -- Preflight - resolve the inventory and check it can be applied.
--- Raises before anything is modified if it cannot.
+-- Raises before anything is modified if it cannot: the run is then REFUSED
+-- (its checks found it unsafe), or FAILED on any other error.
 -- ============================================================================
 BEGIN
    op.anon_engine.preflight;
 EXCEPTION
    WHEN OTHERS THEN
-      op.anon_engine.finish_run('FAILED', SQLERRM);
+      op.anon_engine.finish_run(CASE WHEN SQLCODE IN (-20011, -20012, -20013, -20016) THEN 'REFUSED'
+                                     ELSE 'FAILED' END, SQLERRM);
       RAISE;
 END;
 /
@@ -189,27 +191,36 @@ END;
 -- ============================================================================
 PROMPT
 PROMPT ====================================================================
-PROMPT  Live progress is written to anon_meta.anon_step_log as it happens.
-PROMPT  The output below appears only once each phase finishes, so to watch
-PROMPT  a long run open a second session and use:
-PROMPT      tests\manual\monitor_op_progress.sql
+PROMPT  The engine's lines appear when each phase ends. Its progress is in
+PROMPT  anon_meta.anon_step_log and anon_meta.anon_progress as it happens:
+PROMPT  to watch a long run, use tests\manual\monitor_op_progress.sql in a
+PROMPT  second session. run_op_anonymization.bat shows the run live.
 PROMPT ====================================================================
 
 DECLARE
    v_error VARCHAR2(4000);
+   v_code  NUMBER;
 BEGIN
    IF '&run_mode' = 'DRYRUN' THEN
       -- Rehearsal: the same code path, counting instead of updating.
-      op.anon_engine.generate_code_map;
-      op.anon_engine.apply_inventory;
+      BEGIN
+         op.anon_engine.generate_code_map;
+         op.anon_engine.apply_inventory;
+      EXCEPTION
+         WHEN OTHERS THEN
+            v_code  := SQLCODE;
+            v_error := SQLERRM;
+            op.anon_engine.finish_run(CASE WHEN v_code = -20018 THEN 'STOPPED' ELSE 'FAILED' END, v_error);
+            RAISE;
+      END;
       op.anon_engine.print_summary;
       op.anon_engine.finish_run('COMPLETED');
       RETURN;
    END IF;
 
    -- Triggers off for the duration. The nested handler guarantees they come
-   -- back on even when the run fails - leaving them disabled would leave the
-   -- application silently broken.
+   -- back on even when the run fails or is stopped - leaving them disabled
+   -- would leave the application silently broken.
    op.anon_engine.set_triggers(FALSE);
 
    BEGIN
@@ -217,9 +228,10 @@ BEGIN
       op.anon_engine.apply_inventory;
    EXCEPTION
       WHEN OTHERS THEN
+         v_code  := SQLCODE;
          v_error := SQLERRM;
          op.anon_engine.set_triggers(TRUE);
-         op.anon_engine.finish_run('FAILED', v_error);
+         op.anon_engine.finish_run(CASE WHEN v_code = -20018 THEN 'STOPPED' ELSE 'FAILED' END, v_error);
          RAISE;
    END;
 

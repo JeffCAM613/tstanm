@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OP Anonymization — User Guide</title>
+<title>OP Anonymization - User Guide</title>
 <style>
 :root{--ink:#1a1d21;--ink-2:#41484f;--ink-3:#6d757e;--line:#e2e5ea;--line-2:#eef0f3;
 --bg:#fff;--soft:#f7f8fa;--accent:#1d4ed8;--quote:#8a6100;--quote-bg:#fdf8ec}
@@ -44,87 +44,74 @@ tbody tr:last-child td{border-bottom:none}
 --bg:#15181c;--soft:#1c2026;--accent:#7aa2f7;--quote:#d9a441;--quote-bg:#241f13}}
 </style>
 </head><body><div class="wrap">
-<h1 id="op-anonymization-user-guide">OP Anonymization — User Guide</h1>
-<p><strong>KTP Payment Factory · OP schema · version 4</strong></p>
-<blockquote><p><strong>Out of date in parts — being rewritten.</strong> This guide describes v4 before the typed-identity fix of 2026-10-20. Where it disagrees with the following, the following is right — and so are <code>config/anonymization.template.ini</code> and the headers of the two inventory CSVs:</p>
-<ul>
-<li><strong>Identifiers are typed.</strong> Every party — entity <code>E_</code>, portfolio <code>P_</code>, counterparty <code>T_</code>, and the new <em>unclassified party</em> <code>X_</code>, with the reason recorded — and every bank account <code>CB_</code> is classified once, from the data, before anything changes. A column only ever receives the translation of the domain it holds: <code>PARTY</code>, <code>BANK_ACCOUNT</code>, <code>MIXED</code> (reviewed columns holding both) or <code>NODE_ROLE</code> (the structure tree, by each node's role). The category <code>ANY</code> is gone.</li>
-<li><strong>The three switches of a category are independent.</strong> <code>ANONYMIZE_&lt;CATEGORY&gt;</code> renames identifiers only; <code>_DESCRIPTION</code> and <code>_ATTRIBUTES</code> mask labels and attributes even when the identifier is kept. Five categories, every switch on by default.</li>
-<li><strong>No checkbox exceptions.</strong> <code>MIN_CODE_LENGTH</code> and the one-character column rule are gone: every listed column is processed, a one-character identifier is anonymized like any other, and a column that must not be touched is left out of the inventory.</li>
-<li><strong>Structure-only bank accounts.</strong> A <code>w_compte_banque</code> node with no <code>compte_banque</code> row is anonymized as a bank account. Never asked; <code>APPROVE_STRUCTURE_ONLY_ACCOUNTS=n</code> refuses them.</li>
-<li><strong>Codes of deleted masters</strong> (2026-10-22). A value of a party or bank-account column that is no identity is the code of a master row deleted in the past: it is renamed too - a party as <code>X_</code>, an account as <code>CB_</code>. The dry run counts them by column. A column marked <code>[no-harvest]</code> in the inventory holds other codes too and is not read for them.</li>
-<li><strong>The structure tree, tree by tree</strong> (2026-10-22). A child's <code>pere</code> takes what its parent node in the same tree became. Nodes on other screens keep their code and are not reported; folder rows of the client trees are renamed after their client; other folder texts are emptied.</li>
-<li><strong>Free text that refuses NULL</strong> gets the marker <code>ANONYMIZED</code>, with no warning.</li>
-<li><strong>Archived parties</strong> (2026-10-22). A <code>tiers</code> row flagged N with no structure node at all is a counterparty (<code>T_</code>), not an unclassified party.</li>
-<li><strong>Four verdicts</strong>: PASS, FAIL, REVIEW REQUIRED, INCOMPLETE — exit codes 0, 2, 3, 4.</li>
-</ul></blockquote>
-<p>This guide is for the person who runs the tool. It covers everything you need to complete a run successfully: what to prepare, what to type, what you will see, and how to confirm it worked.</p>
-<p>You do not need to understand the internals. If you want those, read the <em>OP Anonymization — Technical Guide</em> instead.</p>
+<h1 id="op-anonymization---user-guide">OP Anonymization - User Guide</h1>
+<p><strong>KTP Payment Factory - OP schema - version 0.5.0</strong></p>
+<p>This guide is for the person who runs the tool: what to prepare, what to type, what you will see, and how to know it worked. You do not need the internals for any of it; they are in the <em>OP Anonymization - Technical Guide</em>.</p>
 <hr>
 <h2 id="1-what-this-tool-does">1. What this tool does</h2>
-<p>It takes a <strong>restored copy</strong> of a KTP production database and removes the client data from the OP schema, so the copy can be used for testing and support without exposing real information.</p>
-<p>It does two things to 580 columns across 167 tables:</p>
+<p>It takes a <strong>restored copy</strong> of a KTP Payment Factory database and removes the client data from the OP schema, so that the copy can be used for testing and support without exposing real information.</p>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left"></th>
 <th style="text-align:left"></th>
 </tr></thead><tbody>
 <tr>
 <td style="text-align:left"><strong>Replaces identifiers</strong></td>
-<td style="text-align:left">Every entity, portfolio, counterparty and bank account code is swapped for a generated one — <code>T_0000412</code> instead of the real counterparty code. The same original always becomes the same replacement, everywhere in the schema, so the data stays internally consistent and the application still works.</td>
+<td style="text-align:left">Every party and bank-account code is classified once, from the data, and gets one generated replacement: <code>E_</code> for an entity, <code>P_</code> a portfolio, <code>T_</code> a counterparty, <code>X_</code> a party the data cannot classify, <code>CB_</code> a bank account. The replacement is written everywhere the code is used, so the data stays consistent and the application still works.</td>
 </tr>
 <tr>
-<td style="text-align:left"><strong>Erases free text and PII</strong></td>
-<td style="text-align:left">Names, addresses, phone numbers, emails, IBAN and RIB fragments are emptied outright.</td>
+<td style="text-align:left"><strong>Masks labels and attributes</strong></td>
+<td style="text-align:left">The description of a party or an account, its address lines and its contact details are overwritten with its replacement, so screens stay readable: a counterparty shows as <code>T_0000412</code>. An empty field stays empty.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Empties free text</strong></td>
+<td style="text-align:left">Comments, names typed as text, labels of operations: emptied outright.</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Proves the result</strong></td>
+<td style="text-align:left">After a run, a verification checks every column it covers and says PASS, FAIL, REVIEW REQUIRED or INCOMPLETE.</td>
 </tr>
 </tbody></table></div>
-<p>A run takes <strong>20–40 minutes</strong> on a production-sized instance and finishes with a verification pass and an HTML report you can open in a browser.</p>
+<p>What is covered is listed in <code>config\inventory_op.csv</code> and <code>config\inventory_op_custom.csv</code>; what is switched on, in <code>config\anonymization.ini</code>.</p>
 <blockquote><h3 id="read-this-before-anything-else">Read this before anything else</h3>
-<p><strong>This is irreversible and it changes millions of rows.</strong> Run it against a restored copy only. Never against production. The tool will ask you to type <code>YES</code> before it starts, and that confirmation is the last point at which you can stop.</p></blockquote>
+<p><strong>This is irreversible and it changes millions of rows.</strong> Run it against a restored copy only, never against production. A run asks you to type <code>YES</code> after its checks, and that is the last point at which you can stop with nothing changed.</p></blockquote>
 <hr>
 <h2 id="2-before-you-begin">2. Before you begin</h2>
-<h3 id="checklist">Checklist</h3>
 <ul class="task">
-<li>☐ A <strong>restored copy</strong> of the database — not production</li>
+<li>☐ A <strong>restored copy</strong> of the database - not production</li>
 <li>☐ Oracle <strong>19c</strong> or later</li>
-<li>☐ <strong>SQL*Plus</strong> installed and on your <code>PATH</code>, with a working TNS entry for the database</li>
-<li>☐ The <strong>SYS</strong> password</li>
-<li>☐ The <strong>OP</strong> schema password</li>
-<li>☐ The name of a <strong>data tablespace</strong> and an <strong>index tablespace</strong> for the tool's own metadata (it needs only a few MB, even on the largest instances)</li>
-<li>☐ Roughly <strong>an hour</strong> of uninterrupted time</li>
-<li>☐ You are running from a machine <strong>on the same network as the database</strong></li>
+<li>☐ The <strong>Oracle client with SQL*Plus</strong> on the machine you run from, <code>sqlplus.exe</code> in <code>PATH</code> (or in <code>ORACLE_HOME\bin</code>), and the database reachable by an alias in <code>tnsnames.ora</code> or as <code>host:port/service</code></li>
+<li>☐ <strong>Windows PowerShell 5.1</strong> - part of every supported Windows version</li>
+<li>☐ The <strong>SYS</strong> password and the <strong>OP</strong> schema password</li>
+<li>☐ A <strong>tablespace</strong> for the tool's own metadata schema, <code>ANON_META</code> (a few MB)</li>
+<li>☐ About <strong>an hour</strong> of uninterrupted time for a run on a production-sized copy</li>
+<li>☐ A machine <strong>on the same network as the database</strong></li>
 </ul>
-<h3 id="that-last-point-matters">That last point matters</h3>
-<p>Three test runs were lost to <code>ORA-03114: not connected to ORACLE</code> when driving the run from a remote workstation across a VPN. The run holds a single session open for the better part of an hour, and a brief network interruption kills it. The same run from a host on the database's own network completed without incident.</p>
-<p>If you can only reach the database remotely, run the tool from a jump box near the database rather than from your laptop.</p>
-<h3 id="check-sqlplus-is-ready">Check SQL*Plus is ready</h3>
+<p>A run keeps one database session open for its whole length. A network interruption on a VPN can end it; run from a host near the database rather than from a remote laptop.</p>
+<p>Check that SQL*Plus reaches the database:</p>
 <pre><code>sqlplus -V
-tnsping YOUR_SID</code></pre>
-<p>Both should succeed before you go further.</p>
+tnsping YOUR_DATABASE</code></pre>
 <hr>
 <h2 id="3-what-is-in-the-package">3. What is in the package</h2>
 <pre><code>Anonymization_v4\
-├─ config\
-│  ├─ anonymization.template.ini    copy this to make your own settings file
-│  ├─ anonymization.ini             your settings (you create it; not in version control)
-│  ├─ inventory_op.csv              the shipped list of what gets anonymized  (562 columns)
-│  └─ inventory_op_custom.csv       your site's additions and corrections      (18 columns)
-├─ op\
-│  ├─ run_op_anonymization.bat      &gt;&gt;&gt; the only thing you run &lt;&lt;&lt;
-│  ├─ sql\                          the engine
-│  ├─ verify\                       the checker and the report generator
-│  └─ logs\                         created on first run; holds logs and reports
-├─ docs\                            this guide and the technical guide
-├─ tests\manual\                    optional helper scripts (monitoring, row counts)
-└─ tools\                           optional analysis scripts</code></pre>
+|- config\
+|  |- anonymization.template.ini    copy it to anonymization.ini
+|  |- inventory_op.csv              what is anonymized, shipped
+|  |- inventory_op_custom.csv       this site's additions and corrections
+|- op\
+|  |- run_op_anonymization.bat      &gt;&gt;&gt; the only thing you run &lt;&lt;&lt;
+|  |- lib\                          the run's screen and report (PowerShell)
+|  |- sql\                          the engine and the scripts the run sends
+|  |- verify\                       the verification
+|  |- logs\                         one folder per run
+|- docs\                            this guide and the technical guide
+|- tests\manual\                    optional helper scripts
+|- tools\                           optional analysis scripts</code></pre>
 <p>You only ever launch <code>op\run_op_anonymization.bat</code>. Everything else is called for you.</p>
 <hr>
-<h2 id="4-step-1-configure">4. Step 1 — Configure</h2>
-<p>Copy the template:</p>
+<h2 id="4-step-1---configure">4. Step 1 - Configure</h2>
 <pre><code>cd Anonymization_v4
 copy config\anonymization.template.ini config\anonymization.ini</code></pre>
-<p>Open <code>config\anonymization.ini</code> and fill in the SID and the two tablespace names.</p>
-<p><strong>Leave both passwords blank.</strong> Anything left blank is asked for when you run, which keeps credentials off disk. The file is fully commented; every setting explains itself.</p>
-<p>The settings you are most likely to touch:</p>
+<p>Open <code>config\anonymization.ini</code> and fill in the database and the tablespace. <strong>Leave the passwords blank</strong>: they are then asked for when the run starts, masked, and passed to SQL*Plus on its input only - never on a command line, never written down. The file is fully commented.</p>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left">Setting</th>
 <th style="text-align:left">Default</th>
@@ -132,260 +119,289 @@ copy config\anonymization.template.ini config\anonymization.ini</code></pre>
 </tr></thead><tbody>
 <tr>
 <td style="text-align:left"><code>ORACLE_SID</code></td>
-<td style="text-align:left">—</td>
-<td style="text-align:left">The TNS name of the database</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">The database: its alias in <code>tnsnames.ora</code>, or <code>host:port/service</code></td>
 </tr>
 <tr>
 <td style="text-align:left"><code>TABLESPACE_DATA</code> / <code>TABLESPACE_INDEX</code></td>
-<td style="text-align:left">—</td>
-<td style="text-align:left">Where the tool's small metadata schema lives</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">Where <code>ANON_META</code> lives; the index tablespace defaults to the data one</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ANONYMIZE_ENTITY</code> etc.</td>
+<td style="text-align:left"><code>ANONYMIZE_&lt;CATEGORY&gt;</code></td>
 <td style="text-align:left"><code>y</code></td>
-<td style="text-align:left">The four categories of identifier. Leave all four at <code>y</code> unless you have a specific reason not to</td>
+<td style="text-align:left">Rename the codes of that category (<code>ENTITY</code>, <code>PORTFOLIO</code>, <code>COUNTERPARTY</code>, <code>UNCLASSIFIED_PARTY</code>, <code>BANK_ACCOUNT</code>)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ANONYMIZE_&lt;CATEGORY&gt;_DESCRIPTION</code></td>
+<td style="text-align:left"><code>y</code></td>
+<td style="text-align:left">Mask the labels of that category</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ANONYMIZE_&lt;CATEGORY&gt;_ATTRIBUTES</code></td>
+<td style="text-align:left"><code>y</code></td>
+<td style="text-align:left">Mask its addresses and contact details</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>APPROVE_STRUCTURE_ONLY_ACCOUNTS</code></td>
+<td style="text-align:left"><code>y</code></td>
+<td style="text-align:left">A <code>w_compte_banque</code> structure node with no <code>compte_banque</code> row is a bank account. Set <code>n</code> only for a client where it is not</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>PARALLEL_DEGREE</code></td>
 <td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">Parallelism for the big history tables. Set to <code>1</code> to disable</td>
+<td style="text-align:left">Parallelism for the large history tables; <code>1</code> disables it</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>MIN_CODE_LENGTH</code></td>
-<td style="text-align:left"><code>2</code></td>
-<td style="text-align:left">Identifiers shorter than this are left alone, because a one-character value is almost always a checkbox state (<code>O</code>, <code>x</code>, <code>N</code>), not a client code</td>
+<td style="text-align:left"><code>CUSTOM_INVENTORY</code></td>
+<td style="text-align:left"><code>inventory_op_custom.csv</code></td>
+<td style="text-align:left">The site inventory file, in `config`</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>FAIL_ON_MISSING_OBJECT</code></td>
+<td style="text-align:left"><code>n</code></td>
+<td style="text-align:left"><code>y</code> refuses to run while an inventory table or column is missing</td>
 </tr>
 </tbody></table></div>
-<blockquote><p><strong>You can skip this step entirely.</strong> With no configuration file, the tool asks for every value interactively. The file just saves you the typing on later runs.</p></blockquote>
+<p>Leave every switch at <code>y</code> for a full anonymization. A switch at <code>n</code> leaves that client data in place, and the verification can then be no better than INCOMPLETE.</p>
+<p><strong>Without questions.</strong> <code>/auto</code> asks nothing. Everything then comes from the file, and the passwords from the environment:</p>
+<pre><code>set ANON_SYS_PASSWORD=...
+set ANON_OP_PASSWORD=...
+op\run_op_anonymization.bat /auto /dryrun</code></pre>
 <hr>
-<h2 id="5-step-2-rehearse-with-a-dry-run">5. Step 2 — Rehearse with a dry run</h2>
-<p><strong>Always do this first.</strong> A dry run is a full rehearsal on the same code path as the real thing. It touches nothing and it tells you whether the real run will succeed.</p>
-<pre><code>cd Anonymization_v4\op
-run_op_anonymization.bat /dryrun</code></pre>
-<h3 id="what-it-asks-you">What it asks you</h3>
-<p>The tool walks you through five short sections. Press Enter to accept anything shown in brackets.</p>
-<p><strong>1. Load the config file?</strong></p>
-<pre><code>Found: config\anonymization.ini
-  ORACLE_SID ............ TANM7881
-  SYS_PASSWORD .......... (not set - will ask)
-  OP_PASSWORD ........... (not set - will ask)
-  TABLESPACE_DATA ....... USERS
-  ...
+<h2 id="5-step-2---the-dry-run">5. Step 2 - The dry run</h2>
+<p><strong>Always do this first.</strong> A dry run makes every check a run makes, plans every translation, and counts what a run would change - table by table, column by column - on the same code path. It changes nothing.</p>
+<pre><code>op\run_op_anonymization.bat /dryrun</code></pre>
+<h3 id="getting-ready">Getting ready</h3>
+<p>The run finds SQL*Plus, reads the configuration, asks what it leaves blank, connects as SYS and as OP, creates or updates <code>ANON_META</code>, installs the engine and loads the inventory. Each is one line:</p>
+<pre><code> OP Anonymization 0.5.0                                                  dry run
+ -------------------------------------------------------------------------------
 
-Load it? Anything missing is still asked for [Y/n]:</code></pre>
-<p><strong>2. Connection</strong> — SID, the two passwords, the two tablespaces. Anything the config file already supplied is marked <code>[config]</code> and not asked again.</p>
-<p><strong>3. What to anonymize</strong> — the four categories:</p>
-<pre><code> Anonymize entity codes,       prefix E_  [y]:
- Anonymize portfolio codes,    prefix P_  [y]:
- Anonymize counterparty codes, prefix T_  [y]:
- Anonymize bank account codes, prefix CB_ [y]:</code></pre>
-<p><strong>4. Description labels and PII attributes</strong> — before each of these prompts the tool prints <strong>the actual list of columns that prompt governs</strong>, read live from the inventory files:</p>
-<pre><code> Entity - columns affected:
-       tiers.adresse1 - applies to every category
-       tiers.adresse2 - applies to every category
-       ...
-       tiers.telephone [site]
-       tiers.fax [site]
-       tiers.email_adress [site]
-       tiers.nom_pp [site]
-       tiers.prenom_pp [site]
-   Anonymize these? [y]:</code></pre>
-<p><code>[site]</code> marks a column that came from <code>inventory_op_custom.csv</code> — your site added it, rather than it being shipped with the tool.</p>
-<p><strong>5. Run behaviour</strong> — parallel degree, custom inventory filename, and two safety settings. Each shows its default; press Enter four times.</p>
-<p>Then a summary, and the dry run begins.</p>
-<h3 id="what-a-good-dry-run-looks-like">What a good dry run looks like</h3>
-<pre><code>Inventory file: C:\Users\...\AppData\Local\Temp\anon_inventory_13913.sql
-loaded ............ 579 items
-  shipped ......... 561
-  site-specific ... 18
+ Getting ready
+   sqlplus            C:\oracle\product\19.0.0\client_1\bin\sqlplus.exe
+   Configuration      config\anonymization.ini
 
-NULL_OUT       NONE              92
-CODE           ANY              391
-CODE           BANK_ACCOUNT      71
-DESCRIPTION    ANY                2
-DESCRIPTION    BANK_ACCOUNT       1
-SELF_CODE      ANY                5
-SELF_CODE      BANK_ACCOUNT       3
-SELF_CODE      COUNTERPARTY       4
-SELF_CODE      ENTITY             5
-SELF_CODE      PORTFOLIO          5
+ -- Passwords ------------------------------------------------------------------
+   Sent to sqlplus on its input: never on a command line, never written down.
+ &gt; SYS password: ********
+ &gt; OP password: ********
+   Database           OPDB: connected as SYS and as OP (Oracle 19.21)
+   Metadata           ANON_META on tablespace DATA: up to date (0:01)
+   Engine             version 0.5.0 (installed, 0:03)
+   Inventory          576 items (560 shipped, 16 of this site): 429 in this database,
+                      147 not here (they are skipped)
 
---- Preflight -------------------------------------------------
-CHECKBOX    ventiler_corresp_bqe.tiers_entite  (VARCHAR2(1)) - will be left alone
-CHECKBOX    val_ssi_account.tiers_entite  (VARCHAR2(1)) - will be left alone
-NOT NULL    histo_pricing_groupe.description  (cannot be emptied)
-resolved .......... 427
-missing tables .... 68
-missing columns ... 79
-checkbox columns .. 4   (left alone)
-too narrow ........ 0
-wrong type ........ 0
-not nullable ...... 1</code></pre>
-<h3 id="how-to-read-that">How to read that</h3>
+   What is anonymized (config\anonymization.ini)
+   Category                  Rename codes   Labels   Attributes
+   Entity (E_)               yes            yes      yes
+   Portfolio (P_)            yes            yes      yes
+   Counterparty (T_)         yes            yes      yes
+   Unclassified party (X_)   yes            yes      yes
+   Bank account (CB_)        yes            yes      yes
+   Free text                 always emptied
+   Every switch is on: a full anonymization.</code></pre>
+<p>A missing SQL*Plus, a wrong alias or a wrong password is a line here, before anything else happens. Items "not here" are normal: the inventory covers several KTP/CTI versions, and no database has every table.</p>
+<h3 id="the-checks">The checks</h3>
+<p>The first step plans the run and makes its checks, then shows them as a table:</p>
+<pre><code> 1 of 2  Checking and planning (read-only)                         done    0:41
+         2,941 identities: 920 parties, 2,021 bank accounts
+
+   Check                                 Needed     Now
+   Identity tables                       required   ok
+       tiers 1,094 rows, structure 4,230 rows, compte_banque 2,007 rows
+   Data not anonymized before            required   ok
+       no code in tiers, compte_banque or structure has the form of a replacement
+   Earlier translations                  required   ok
+       none on this database: every translation is new
+   Replacements unique                   required   ok
+       2,941 replacements, each used once, none equal to an original code
+   Replacements fit their columns        required   ok
+       429 columns checked; the widest replacement has 10 characters
+   Bank accounts only on the structure   info       14 nodes
+   Free text that cannot be emptied      info       1 column
+   Inventory objects in this database   optional   147 not here
+
+   Every required check is met: a run can go ahead as things are.</code></pre>
+<p>A <strong>required</strong> check that is not met stops the run there, with what happens and what to do. An <strong>info</strong> check says what the run will do with what it found.</p>
+<h3 id="counting-what-a-run-would-change">Counting what a run would change</h3>
+<p>One line for each kind of work, rewritten in place while it counts:</p>
+<pre><code> 2 of 2  Counting what a run would change
+         Free text              [####################] 100%   39 tables       31,204,331 rows   2:58
+         Identifiers            [###########.........]  58%   148 of 252 columns . histo_operation.entite 45% . 4,120,388 rows . 2:41 left</code></pre>
+<p><code>Ctrl+C</code> stops it after the table or column it works on.</p>
+<h3 id="the-end-of-a-dry-run">The end of a dry run</h3>
+<pre><code> ===============================================================================
+  A run would change 41,862,770 rows in 158 tables.
+  It would end REVIEW REQUIRED: 1,204 values in 3 columns would be left for review.
+  About 31 minutes, a rough estimate. Nothing was changed.
+ ===============================================================================
+   What                          Columns   Rows to change   Of them X_
+   Free text emptied                  61       31,204,331            -
+   Identifiers renamed               252        9,412,118       41,203
+   Labels masked                       3            5,077            -
+   Attributes masked                  21           18,940            -
+   Left as they are, for review        3            1,204            -</code></pre>
+<p>Then the identities by category, the <strong>unclassified parties (X_)</strong> by reason, what would be <strong>left for review</strong>, and <strong>Good to know</strong>. The run folder and its <code>report.html</code> follow (section 7).</p>
+<p><strong>What to act on before the real run:</strong></p>
+<ul>
+<li><strong>Left for review</strong> - values whose role the data does not settle (a value that is a party AND a bank account in a column that can hold both). A run leaves them as they are, and its verification says REVIEW REQUIRED while they remain.</li>
+<li><strong>Unclassified parties (X_)</strong> - section 9.</li>
+<li>A required check not met - the dry run says what to do.</li>
+</ul>
+<p>Run a dry run again after any change to an inventory CSV: it is the cheap way to find a typo in a column name.</p>
+<hr>
+<h2 id="6-step-3---the-run">6. Step 3 - The run</h2>
+<pre><code>op\run_op_anonymization.bat</code></pre>
+<p>The same getting ready and the same checks, on the database as it is now. If they pass, the run says what it will change and asks:</p>
+<pre><code> ===============================================================================
+  Ready. This replaces the client data of OP on OPDB:
+  - 2,941 identities get their E_, P_, T_, X_ or CB_ value, in 252 identifier columns; their labels
+    and attributes are masked with it
+  - 61 free-text columns emptied, 24 label and attribute columns masked
+  About 31 minutes, from the dry run R-000001. It cannot be undone: run it on a restored copy
+  only.
+ ===============================================================================
+ &gt; Type YES to start: YES</code></pre>
+<p>Anything but <code>YES</code> ends the run with nothing changed. A run its checks refuse never asks.</p>
+<p>Then:</p>
+<pre><code> 2 of 4  Recording the translations                                done    0:03
+         2,941 new translations recorded
+
+ 3 of 4  Anonymizing
+         triggers of OP: 45 disabled until the end of the run
+         Free text              [####################] 100%   39 tables       31,204,331 rows   9:48
+         Identifiers            [####################] 100%   252 columns      9,412,118 rows  16:31
+         Labels and attributes  [####################] 100%   24 columns          24,017 rows   0:52
+         triggers of OP: 45 enabled again
+ 4 of 4  Verifying (read-only)                                     done    1:54
+
+ ===============================================================================
+  DONE   41,861,566 rows changed in 29:47. Verification: PASS.
+         Every protection was on, no original value was found where the inventory covers, and
+         nothing was left for review.
+ ===============================================================================</code></pre>
+<p>The translations are recorded <strong>before</strong> anything in OP changes. Each table or column is then changed in its own transaction, and the triggers of OP are disabled for the work and enabled again at its end - also when it fails or is stopped.</p>
+<h3 id="the-verdict">The verdict</h3>
 <div class="tw"><table><thead><tr>
-<th style="text-align:left">Line</th>
-<th style="text-align:left">What it means</th>
-<th style="text-align:left">Act on it?</th>
+<th style="text-align:left">Verdict</th>
+<th style="text-align:left">Exit code</th>
+<th style="text-align:left">Means</th>
 </tr></thead><tbody>
 <tr>
-<td style="text-align:left"><code>loaded 579 items</code></td>
-<td style="text-align:left">The inventory parsed correctly</td>
-<td style="text-align:left">No</td>
+<td style="text-align:left"><strong>PASS</strong></td>
+<td style="text-align:left">0</td>
+<td style="text-align:left">Every protection on, no original value found, nothing left for review</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>missing tables 68</code>, <code>missing columns 79</code></td>
-<td style="text-align:left">Those objects do not exist on this instance</td>
-<td style="text-align:left"><strong>No — this is normal.</strong> The shipped inventory covers several KTP/CTI versions, and no single instance has every table. They are skipped, not failed.</td>
+<td style="text-align:left"><strong>FAIL</strong></td>
+<td style="text-align:left">2</td>
+<td style="text-align:left">An original value is still where it should have been replaced. Do not hand over the copy</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>checkbox columns 4</code></td>
-<td style="text-align:left">One-character columns the tool will deliberately leave alone, because a single character is a checkbox state rather than a client code</td>
-<td style="text-align:left">No</td>
+<td style="text-align:left"><strong>REVIEW REQUIRED</strong></td>
+<td style="text-align:left">3</td>
+<td style="text-align:left">Values were left as they are on purpose, because their role is not settled. Decide on them (<code>report.html</code>, "Left for review")</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>too narrow 0</code>, <code>wrong type 0</code></td>
-<td style="text-align:left">Every target column can physically hold a generated identifier</td>
-<td style="text-align:left">Only if non-zero — then the run would stop, and the message names the columns</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>not nullable 1</code></td>
-<td style="text-align:left">A free-text column is mandatory, so it cannot be emptied. It is overwritten with the word <code>ANONYMIZED</code> instead</td>
-<td style="text-align:left">No</td>
+<td style="text-align:left"><strong>INCOMPLETE</strong></td>
+<td style="text-align:left">4</td>
+<td style="text-align:left">Nothing exposed where protection was on, but a switch was off</td>
 </tr>
 </tbody></table></div>
-<p><strong>The dry run exits non-zero if anything would fail.</strong> A clean dry run means the real run will get through the preflight.</p>
-<p>Run a dry run again any time you edit an inventory CSV. It is the cheap way to find a typo in a column name before a 40-minute run finds it for you.</p>
+<p>Every run ends with its exit code in words, for example <code>Exit code 0: done, verified: PASS.</code></p>
 <hr>
-<h2 id="6-step-3-run-it">6. Step 3 — Run it</h2>
-<pre><code>run_op_anonymization.bat</code></pre>
-<p>Same prompts. Then:</p>
-<pre><code>This will irreversibly modify schema OP on TANM7881.
-Type YES to proceed:</code></pre>
-<p>Type <code>YES</code> in capitals. Anything else cancels and changes nothing.</p>
-<h3 id="what-you-will-see">What you will see</h3>
-<p>Abridged. The figures below are from a real run against a 44-million-row test instance; yours will differ.</p>
-<pre><code>triggers disabled: 45
-
---- Identifier mapping ----------------------------------------
-ENTITY                        GENERATED   76 mappings
-PORTFOLIO                     GENERATED   32 mappings
-COUNTERPARTY                  GENERATED   761 mappings
-BANK_ACCOUNT                  GENERATED   2,016 mappings
-total                                     2,885 mappings
-
---- Free text and PII -----------------------------------------
-tiers.nom                                 OK        869 rows
-tiers.adresse                             OK        869 rows
-...
-
---- Identifiers -----------------------------------------------
-histo_flux.tiers                          OK        8,441,203 rows
-histo_position.entite                     OK        6,220,118 rows
-tp_users.entity                           SKIPPED
-tp_wv_mailing_rule.entity                 NOOP      no rows matched
-...
-
---- Labels and entity attributes ------------------------------
-structure.[description]                   OK        1,863 rows
-tiers.[description]                       OK        869 rows
-tiers.[adresse1,adresse2,...,adresse5]    OK        569 rows
-triggers enabled: 45
-
-==============================================================
-Run summary (EXECUTE)
-==============================================================
-applied ........... 156
-no rows matched ... 236
-skipped ........... 152   (not present on this instance)
-disabled .......... 0     (excluded by configuration)
-errors ............ 0
-rows affected ..... 44,460,155
-step time ......... 1,757s
-==============================================================</code></pre>
-<p>Then verification and the report run automatically:</p>
-<pre><code>Verifying coverage...
- RESULT: PASS
-
-Building report...
-Report written to logs/report_20260901_142233.html
-
-====================================================================
- COMPLETE - verified clean
-
- Report:  logs\report_&lt;timestamp&gt;.html      (open in a browser)
- Full output: logs\
-====================================================================</code></pre>
-<h3 id="the-four-per-item-statuses">The four per-item statuses</h3>
+<h2 id="7-the-run-folder-and-reporthtml">7. The run folder and report.html</h2>
+<p>Every run - dry runs, refused and failed runs included - leaves a folder `op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;`:</p>
 <div class="tw"><table><thead><tr>
-<th style="text-align:left">Status</th>
-<th style="text-align:left">Meaning</th>
-<th style="text-align:left">Worry?</th>
+<th style="text-align:left">File</th>
+<th style="text-align:left"></th>
 </tr></thead><tbody>
 <tr>
-<td style="text-align:left"><code>OK</code></td>
-<td style="text-align:left">Applied, <em>n</em> rows changed</td>
-<td style="text-align:left">No</td>
+<td style="text-align:left"><code>report.html</code></td>
+<td style="text-align:left">The result: opened in your browser at the end (<code>/no-open</code> leaves it closed)</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>NOOP</code></td>
-<td style="text-align:left">Applied, <strong>zero</strong> rows changed</td>
-<td style="text-align:left"><strong>Sometimes.</strong> Normal for a column that was already clean. On a column you expected to change, it means the column name is wrong or that category is disabled.</td>
+<td style="text-align:left"><code>report.txt</code></td>
+<td style="text-align:left">What the engine printed, line by line</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>SKIPPED</code></td>
-<td style="text-align:left">The table or column does not exist here</td>
-<td style="text-align:left">No, unless you expected it to exist</td>
+<td style="text-align:left"><code>verify.txt</code></td>
+<td style="text-align:left">What the verification printed (a run)</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>DISABLED</code></td>
-<td style="text-align:left">Turned off by your configuration</td>
-<td style="text-align:left">No</td>
+<td style="text-align:left"><code>console.log</code></td>
+<td style="text-align:left">Every line of the screen, and the engine's</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ERROR</code></td>
-<td style="text-align:left">Anything else</td>
-<td style="text-align:left"><strong>Yes — the run failed</strong></td>
+<td style="text-align:left"><code>results.txt</code></td>
+<td style="text-align:left">The figures <code>report.html</code> is built from - counts only</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>manifest.txt</code></td>
+<td style="text-align:left">The run in <code>key=value</code> lines: settings, steps and their times, checks, verdict, exit code</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>inventory.sql</code></td>
+<td style="text-align:left">The inventory as it was loaded</td>
 </tr>
 </tbody></table></div>
-<p>To list what matched nothing:</p>
-<pre><code>SELECT object_name, phase FROM anon_meta.anon_step_log
- WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)
-   AND status = 'NOOP';</code></pre>
+<p><code>report.html</code> is one self-contained file: it can be printed, attached to a ticket or sent as it is. It holds <strong>counts and names of tables and columns only - never a client identifier</strong>. It shows:</p>
+<ul>
+<li>the verdict in a word and the result in one sentence, with the main figures;</li>
+<li>what was done (or, for a dry run, what a run would change), by kind of work;</li>
+<li>the verification, part by part (a run);</li>
+<li>what was left for review, column by column;</li>
+<li>the unclassified parties (X_) by reason - for a dry run with what to do about each reason and one query per reason that lists them, with a Copy button;</li>
+<li>the identities by category, the checks, the switches used, the duration of each step;</li>
+<li>Good to know, and Next;</li>
+<li>folded: every column of the inventory with its figures and a filter, what is not in this database, and the full text output.</li>
+</ul>
+<p>It reads what the run and the verification recorded; it re-checks nothing.</p>
 <hr>
-<h2 id="7-watching-a-long-run">7. Watching a long run</h2>
-<p>SQL*Plus only prints its output when a whole block finishes, so the window goes quiet for long stretches. That is normal — the run is working. Progress is written to the database as it happens, so you can watch it from a second window:</p>
-<pre><code>sqlplus op/&lt;password&gt;@&lt;TNS&gt; @tests\manual\monitor_op_progress.sql</code></pre>
-<p>Re-run it whenever you want a fresh picture. It takes no locks and cannot interfere.</p>
-<hr>
-<h2 id="8-step-4-the-report">8. Step 4 — The report</h2>
-<p>The run writes <code>op\logs\report_&lt;timestamp&gt;.html</code>. Open it in any browser — it is a single self-contained file with no dependencies, so you can email it or attach it to a ticket.</p>
-<h3 id="what-is-in-it">What is in it</h3>
-<p><strong>A verdict banner</strong> — <code>PASS</code> or <code>FAIL</code>, with the headline numbers.</p>
-<p><strong>Six summary tiles</strong> — columns in scope, verified clean, rows exposed, columns not present on this instance, identifiers mapped, rows changed.</p>
-<p><strong>Coverage by treatment</strong> — a row for each of the four rules (<code>CODE</code>, <code>NULL_OUT</code>, <code>DESCRIPTION</code>, <code>SELF_CODE</code>) showing how many columns each covers and how they fared.</p>
-<p><strong>Shipped inventory</strong> — every column from <code>inventory_op.csv</code>, grouped by table, with rows, clean, exposed and a status.</p>
-<p><strong>Custom-added inventory</strong> — the same for <code>inventory_op_custom.csv</code>.</p>
-<p><strong>Not checked on this instance</strong> — the tables that do not exist here, grouped, with the reason.</p>
-<p><strong>Mapping integrity</strong> — that the generated identifiers are unique and the lookup is complete.</p>
-<h3 id="the-one-number-that-matters">The one number that matters</h3>
-<p><strong>Exposed</strong> — rows still holding an original client value. On a clean run this is <strong>0</strong> everywhere. Anything else is shaded red and sorted to the top of its table so you cannot miss it.</p>
-<h3 id="why-clean-exposed-and-not-anonymized-not-anonymized">Why "Clean / Exposed" and not "anonymized / not anonymized"</h3>
-<p>Because an identifier column legitimately holds values that were never client data — currency codes, product codes, system references. Those correctly have no generated prefix. Counting them as "not anonymized" would show alarming figures on a perfectly clean database. <strong>Exposed</strong> means something precise: the value is still one of the originals recorded in the mapping.</p>
-<h3 id="regenerating-the-report">Regenerating the report</h3>
-<p>It reads stored results and re-checks nothing, so you can regenerate it at any time:</p>
-<pre><code>sqlplus op/&lt;password&gt;@&lt;TNS&gt; @verify\generate_report.sql</code></pre>
-<p>It always reflects the most recent verification run. If you want fresh numbers, run <code>verify\verify_op_coverage.sql</code> first.</p>
-<hr>
-<h2 id="9-if-something-goes-wrong">9. If something goes wrong</h2>
-<h3 id="the-single-most-important-thing-to-know">The single most important thing to know</h3>
-<p><strong>It is safe to re-run.</strong> Fix the cause and run it again — no restore, no special flag, no <code>--resume</code>.</p>
-<p>Every operation is written so that doing it twice is the same as doing it once, and the identifier mapping is <strong>kept</strong> between runs rather than regenerated. A run that failed at 5% and one that failed at 95% both converge on the same correct result when re-run.</p>
-<p>The cost is time: a re-run re-scans every table, so expect it to take about as long as the original even though it changes almost nothing.</p>
-<h3 id="the-one-case-where-you-must-not-re-run">The one case where you must NOT re-run</h3>
-<p><strong>After restoring the database.</strong> The mapping in <code>anon_meta</code> refers to values the restore has just put back, so the two are out of step. Clear it first:</p>
+<h2 id="8-stopping-a-run-and-when-something-goes-wrong">8. Stopping a run, and when something goes wrong</h2>
+<h3 id="ctrlc">Ctrl+C</h3>
+<p><code>Ctrl+C</code> asks the run to stop <strong>after the table or column it is working on</strong>. The run completes that one, enables the triggers of OP again, and ends <strong>STOPPED</strong> (exit code 5). Every table or column done is complete; nothing is half done.</p>
+<p><strong>Closing the window during a run is not safe:</strong> the triggers of OP could stay disabled. If it happens, run this from SQL*Plus as OP:</p>
+<pre><code>sqlplus op/&lt;password&gt;@&lt;database&gt; @op\sql\run\recover.sql &lt;run id&gt;</code></pre>
+<p>While the run is still working in the database it changes nothing - the run then ends by itself and enables the triggers again. Otherwise it records the run as failed and enables the triggers of OP again. Then a new run resumes.</p>
+<h3 id="a-new-run-resumes">A new run resumes</h3>
+<p><strong>It is safe to run again.</strong> Fix the cause and run the same command: no restore, no flag. The translations recorded so far are kept, so every identity gets the same replacement as before, and what is already done is found done. A run after a stop or a failure therefore converges on the same result as one that never stopped. It takes about as long as the first, because every table is read again.</p>
+<h3 id="when-you-must-not-simply-run-again">When you must NOT simply run again</h3>
+<p><strong>After restoring the database again.</strong> <code>ANON_META</code> then holds translations of values the restore has put back. A run uses them - the same originals get the same replacements - which is what you want on a new import of the same client. To start from nothing instead:</p>
 <pre><code>DROP USER anon_meta CASCADE;
 DROP USER atrace CASCADE;</code></pre>
-<p>Then start over from the dry run.</p>
+<h3 id="how-a-run-ends-when-it-does-not-complete">How a run ends when it does not complete</h3>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Screen</th>
+<th style="text-align:left">Exit</th>
+<th style="text-align:left">Means</th>
+<th style="text-align:left">What to do</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>NOT STARTED   ...: not met.</code></td>
+<td style="text-align:left">1</td>
+<td style="text-align:left">A required check refused the run. Nothing was changed</td>
+<td style="text-align:left">What the check says - for example, import the raw data again when the copy was anonymized before. Then a dry run</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>NOT STARTED   You did not type YES.</code></td>
+<td style="text-align:left">1</td>
+<td style="text-align:left">Not confirmed. Nothing was changed</td>
+<td style="text-align:left">Run again when ready</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>FAILED   ...</code></td>
+<td style="text-align:left">1</td>
+<td style="text-align:left">An error, named on the screen and in <code>report.txt</code></td>
+<td style="text-align:left">Remove the cause and run again: it resumes</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>STOPPED   On request ...</code></td>
+<td style="text-align:left">5</td>
+<td style="text-align:left">Ctrl+C</td>
+<td style="text-align:left">Run again: it resumes</td>
+</tr>
+</tbody></table></div>
 <h3 id="common-problems">Common problems</h3>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left">What you see</th>
@@ -393,142 +409,162 @@ DROP USER atrace CASCADE;</code></pre>
 <th style="text-align:left">What to do</th>
 </tr></thead><tbody>
 <tr>
-<td style="text-align:left"><code>ORA-03114: not connected</code></td>
-<td style="text-align:left">The network dropped the session mid-run</td>
-<td style="text-align:left">Re-run from a host on the database's network. Nothing is corrupted; the mapping survived.</td>
+<td style="text-align:left"><code>sqlplus not found</code></td>
+<td style="text-align:left">No Oracle client in <code>PATH</code> or <code>ORACLE_HOME\bin</code></td>
+<td style="text-align:left">Install the client, or add its <code>bin</code> folder to <code>PATH</code></td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ORA-20010 No category is enabled</code></td>
-<td style="text-align:left">All four <code>ANONYMIZE_*</code> flags are <code>n</code></td>
-<td style="text-align:left">Set at least one to <code>y</code></td>
+<td style="text-align:left"><code>the connection as SYS ... failed: ORA-12154</code></td>
+<td style="text-align:left">The database alias is unknown</td>
+<td style="text-align:left">Check <code>ORACLE_SID</code> and <code>tnsnames.ora</code>, or use <code>host:port/service</code></td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ORA-20011 column(s) cannot hold a generated identifier</code></td>
-<td style="text-align:left">A target column is too narrow or not text</td>
-<td style="text-align:left">Nothing was changed. <code>SELECT object_name, message FROM anon_meta.anon_step_log WHERE status='ERROR'</code> names them</td>
+<td style="text-align:left"><code>... failed: ORA-01017</code></td>
+<td style="text-align:left">Wrong password</td>
+<td style="text-align:left">It is asked again, three times at most</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ORA-20013 core entity tables are not shaped as expected</code></td>
-<td style="text-align:left">No <code>structure</code> / <code>tiers</code> / <code>compte_banque</code> in the expected form</td>
-<td style="text-align:left">You are probably connected to the wrong database</td>
+<td style="text-align:left"><code>Inventory  it cannot be used as written</code></td>
+<td style="text-align:left">A CSV row pairs a rule with a category that cannot apply, or a column option is misspelt</td>
+<td style="text-align:left">The lines are named; correct them (in <code>inventory_op_custom.csv</code> for a site row)</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ORA-20020 The inventory is empty</code></td>
-<td style="text-align:left"><code>inventory_op.csv</code> was not found, or every line is a comment</td>
-<td style="text-align:left">Check the file is where the config says</td>
+<td style="text-align:left"><code>Data not anonymized before - NOT MET</code></td>
+<td style="text-align:left">This copy was anonymized before</td>
+<td style="text-align:left">Import the raw data again</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>Replacements fit their columns - NOT MET</code></td>
+<td style="text-align:left">A column cannot hold a generated value: too narrow, or not text</td>
+<td style="text-align:left">Correct the rule of the column named, or leave it out of the inventory</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ORA-20023 anon_inventory is held by another session</code></td>
-<td style="text-align:left">A previous run left a session open</td>
-<td style="text-align:left">The message names the holding session; end it, then re-run</td>
+<td style="text-align:left">A previous session still holds it</td>
+<td style="text-align:left"><code>tests\manual\check_locks.sql</code> as SYS names the holder</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ORA-20030 code_map is empty</code> (during verify)</td>
-<td style="text-align:left">The anonymization has not run, or <code>anon_meta</code> was dropped</td>
-<td style="text-align:left">Run the anonymization first</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ORA-20070 verify_result is empty</code> (during report)</td>
-<td style="text-align:left">You asked for a report before verifying</td>
-<td style="text-align:left">Run <code>verify\verify_op_coverage.sql</code> first</td>
-</tr>
-<tr>
-<td style="text-align:left">Lots of <code>SKIPPED</code></td>
-<td style="text-align:left">Normal — the inventory spans several KTP versions</td>
-<td style="text-align:left">Confirm with <code>tests\manual\check_tables_exist.sql</code> if you want to be sure</td>
-</tr>
-<tr>
-<td style="text-align:left">A <code>NOOP</code> you did not expect</td>
-<td style="text-align:left">Wrong column name in the inventory, or that category is off</td>
-<td style="text-align:left">Check the spelling against the data dictionary</td>
-</tr>
-<tr>
-<td style="text-align:left">Much slower than 40 minutes</td>
+<td style="text-align:left">Much slower than expected</td>
 <td style="text-align:left">Usually stale statistics on a <code>histo_*</code> table, or <code>PARALLEL_DEGREE=1</code></td>
-<td style="text-align:left">Query the slowest steps (below)</td>
+<td style="text-align:left">The duration of each step is in <code>report.html</code></td>
 </tr>
 </tbody></table></div>
-<pre><code>-- the ten slowest steps of the last run
-SELECT object_name, rows_affected, ROUND(elapsed_ms/1000) AS secs
-  FROM anon_meta.anon_step_log
- WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)
- ORDER BY elapsed_ms DESC FETCH FIRST 10 ROWS ONLY;
-
--- everything that errored
-SELECT phase, object_name, message
-  FROM anon_meta.anon_step_log
- WHERE run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)
-   AND status = 'ERROR';</code></pre>
-<h3 id="if-the-run-fails-before-it-starts">If the run fails before it starts</h3>
-<p>The generated inventory file is <strong>kept</strong> rather than deleted, and its path is printed. Open it — a malformed line in it points straight at the CSV row that caused the problem. (This is how a batch quoting bug was found that had corrupted roughly 500 of 579 <code>INSERT</code> statements.)</p>
+<hr>
+<h2 id="9-unclassified-parties-x_">9. Unclassified parties (X_)</h2>
+<p>A party is unclassified when the data does not say which kind of party it is. It still gets its own replacement, <code>X_0000001</code>, written everywhere its code is used - nothing is left in clear - but the reason is worth knowing before the real run:</p>
+<div class="tw"><table><thead><tr>
+<th style="text-align:left">Reason</th>
+<th style="text-align:left">Means</th>
+<th style="text-align:left">What would classify it</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">missing master</td>
+<td style="text-align:left">The code is a party - a <code>w_tiers</code> node, or a value in a party column - but <code>tiers</code> has no row for it</td>
+<td style="text-align:left">Add the <code>tiers</code> row; a code left over from a deleted party can stay X_</td>
+</tr>
+<tr>
+<td style="text-align:left">no structure</td>
+<td style="text-align:left">The <code>tiers</code> row has no structure node, and its flag is not N</td>
+<td style="text-align:left">Add its <code>w_tiers</code> node, or set the flag to N for an archived counterparty</td>
+</tr>
+<tr>
+<td style="text-align:left">no party screen</td>
+<td style="text-align:left">Its nodes are on other screens only</td>
+<td style="text-align:left">Add a <code>w_tiers</code> node if it belongs in the party tree</td>
+</tr>
+<tr>
+<td style="text-align:left">unknown flag</td>
+<td style="text-align:left"><code>flag_portefeuille</code> is neither O nor N</td>
+<td style="text-align:left">Set it to O or N</td>
+</tr>
+<tr>
+<td style="text-align:left">unknown classification</td>
+<td style="text-align:left">Flag N, but its <code>w_tiers</code> nodes have no classification</td>
+<td style="text-align:left">Set the classification on its node</td>
+</tr>
+</tbody></table></div>
+<p>The dry run's <code>report.html</code> lists, for each reason, a query that lists those parties, ready to copy. The queries read that dry run's plan: run them before the next run starts. <strong>What they return is client codes: keep it on the database's machine.</strong></p>
 <hr>
 <h2 id="10-adding-a-column-of-your-own">10. Adding a column of your own</h2>
-<p>You do not need to edit any SQL. Add a line to <code>config\inventory_op_custom.csv</code>:</p>
-<pre><code>my_new_table,entity_code,CODE,ANY,CUSTOM,Added for the 2026 module
+<p>You do not edit any SQL. Add a line to <code>config\inventory_op_custom.csv</code>:</p>
+<pre><code>my_new_table,entity_code,CODE,PARTY,CUSTOM,entity of the new module
+my_new_table,account_code,CODE,BANK_ACCOUNT,CUSTOM,
 my_new_table,contact_email,NULL_OUT,NONE,CUSTOM,</code></pre>
-<p>The fields are <code>table_name,column_name,rule,category,source,notes</code>.</p>
+<p>The fields are <code>table_name,column_name,rule,category,source,notes</code>. No commas in the notes.</p>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left">Rule</th>
-<th style="text-align:left">What happens to the column</th>
+<th style="text-align:left">Category</th>
+<th style="text-align:left">What happens</th>
 </tr></thead><tbody>
 <tr>
 <td style="text-align:left"><code>CODE</code></td>
-<td style="text-align:left">The identifier is replaced from the mapping. Use <code>ANY</code> as the category, or <code>BANK_ACCOUNT</code> if the column references <code>compte_banque.code</code></td>
+<td style="text-align:left"><code>PARTY</code></td>
+<td style="text-align:left">Party codes are replaced with their party's translation</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left"><code>BANK_ACCOUNT</code></td>
+<td style="text-align:left">Bank-account codes are replaced with their account's translation</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>CODE</code></td>
+<td style="text-align:left"><code>MIXED</code></td>
+<td style="text-align:left">Both, once reviewed; a value that is a party AND an account is left for review</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>NULL_OUT</code></td>
-<td style="text-align:left">Emptied. Use category <code>NONE</code>. For free text and PII</td>
+<td style="text-align:left"><code>NONE</code></td>
+<td style="text-align:left">Emptied - the marker <code>ANONYMIZED</code> where the column cannot be empty</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>SELF_CODE</code></td>
-<td style="text-align:left">Overwritten with the anonymized code of its own row. Use when the column must stay populated (<code>NOT NULL</code>, or a format check)</td>
+<td style="text-align:left"><code>PARTY</code>, <code>BANK_ACCOUNT</code> or one party category</td>
+<td style="text-align:left">Overwritten with the owner's replacement; an empty field stays empty</td>
 </tr>
 </tbody></table></div>
-<p>Then dry-run to confirm it resolves, and run for real. The engine, the verifier and the report all pick it up automatically — there is no second list to keep in step.</p>
-<p>A row here also <strong>overrides</strong> the shipped inventory for the same table and column, which is how a wrong classification gets corrected without editing the shipped file.</p>
+<p>A row here also <strong>replaces</strong> the shipped row for the same table and column. Then a dry run: it checks the line and counts what it would change. The engine, the verification and the report all pick it up - there is no second list to keep in step.</p>
 <hr>
 <h2 id="11-after-the-copy-is-handed-over">11. After the copy is handed over</h2>
-<p><code>anon_meta.code_map</code> maps every anonymized identifier back to the real one. It is kept so a failed run can resume and so verification can be re-run — <strong>not</strong> as a key to hold on to.</p>
-<p>Once the copy is verified and handed over, remove it:</p>
+<p><code>anon_meta.code_map</code> maps every replacement back to the real code. It is kept so that a run can resume and the verification can be repeated - <strong>not</strong> as a key to hold on to. Once the copy is verified and handed over - and the EPF anonymization, which reads it, has run - remove it:</p>
 <pre><code>DROP USER anon_meta CASCADE;
-DROP USER atrace CASCADE;   -- only once EPF has also run, if it is going to</code></pre>
+DROP USER atrace CASCADE;</code></pre>
+<p>Keep the run folders: they hold counts only, and say what was done to the copy.</p>
 <hr>
 <h2 id="12-quick-reference">12. Quick reference</h2>
-<pre><code>cd Anonymization_v4\op
-
-run_op_anonymization.bat /dryrun      rehearse, change nothing
-run_op_anonymization.bat              run for real (asks for YES)
-run_op_anonymization.bat /auto        no prompts, use anonymization.ini as-is
-run_op_anonymization.bat /auto /force no prompts at all, including the YES</code></pre>
+<pre><code>op\run_op_anonymization.bat /dryrun           what a run would change; changes nothing
+op\run_op_anonymization.bat                   the run: checks, then asks for YES
+op\run_op_anonymization.bat /auto             asks nothing (still asks for YES)
+op\run_op_anonymization.bat /auto /force      asks nothing at all
+op\run_op_anonymization.bat /verbose          every line of the engine on the screen
+op\run_op_anonymization.bat /no-open          report.html not opened at the end
+op\run_op_anonymization.bat /help             every option</code></pre>
 <div class="tw"><table><thead><tr>
 <th style="text-align:left"></th>
 <th style="text-align:left"></th>
 </tr></thead><tbody>
 <tr>
-<td style="text-align:left">Run log</td>
-<td style="text-align:left"><code>op\logs\op_anon_&lt;timestamp&gt;.log</code></td>
+<td style="text-align:left">Run folder</td>
+<td style="text-align:left">`op\logs&lt;date&gt;_&lt;time&gt;_R-&lt;run&gt;`</td>
 </tr>
 <tr>
-<td style="text-align:left">Report</td>
-<td style="text-align:left"><code>op\logs\report_&lt;timestamp&gt;.html</code></td>
+<td style="text-align:left">Passwords without questions</td>
+<td style="text-align:left"><code>ANON_SYS_PASSWORD</code>, <code>ANON_OP_PASSWORD</code></td>
 </tr>
 <tr>
-<td style="text-align:left">Re-verify</td>
-<td style="text-align:left"><code>sqlplus op/&lt;pwd&gt;@&lt;TNS&gt; @verify\verify_op_coverage.sql</code></td>
+<td style="text-align:left">Verify again</td>
+<td style="text-align:left"><code>sqlplus op/&lt;pwd&gt;@&lt;database&gt; @op\verify\verify_op_coverage.sql</code></td>
 </tr>
 <tr>
-<td style="text-align:left">Rebuild the report</td>
-<td style="text-align:left"><code>sqlplus op/&lt;pwd&gt;@&lt;TNS&gt; @verify\generate_report.sql</code></td>
+<td style="text-align:left">Stop a run from another session</td>
+<td style="text-align:left"><code>sqlplus op/&lt;pwd&gt;@&lt;database&gt; @op\sql\run\stop.sql &lt;run id&gt;</code></td>
 </tr>
 <tr>
-<td style="text-align:left">Watch a running job</td>
-<td style="text-align:left"><code>sqlplus op/&lt;pwd&gt;@&lt;TNS&gt; @tests\manual\monitor_op_progress.sql</code></td>
+<td style="text-align:left">After a closed window</td>
+<td style="text-align:left"><code>sqlplus op/&lt;pwd&gt;@&lt;database&gt; @op\sql\run\recover.sql &lt;run id&gt;</code></td>
 </tr>
 <tr>
-<td style="text-align:left">Exit code</td>
-<td style="text-align:left"><code>0</code> = success and verified clean; anything else = failure</td>
+<td style="text-align:left">Exit codes</td>
+<td style="text-align:left"><code>0</code> PASS (a dry run: completed) - <code>1</code> failed or not started - <code>2</code> FAIL - <code>3</code> REVIEW REQUIRED - <code>4</code> INCOMPLETE - <code>5</code> stopped</td>
 </tr>
 </tbody></table></div>
-<h3 id="a-note-on-credentials">A note on credentials</h3>
-<p>Passwords are passed to SQL*Plus as command-line arguments, so they are briefly visible in the process list to anyone who can see it on the same host. That is normal for an internal DBA tool, but worth knowing before running on a shared jump box. Leaving passwords out of <code>anonymization.ini</code> keeps them off disk at least.</p>
 </div></body></html>

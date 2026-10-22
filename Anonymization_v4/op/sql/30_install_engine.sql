@@ -48,9 +48,12 @@
 -- translation of the one domain its text belongs to, and is left for review
 -- when it is both.
 --
--- v4 before this used one unrestricted lookup (code_map_any) for everything
--- but bank-account columns. A party with no party mapping then picked up a
--- bank account's CB_ value, and an account node picked up a party's E_ value.
+-- WATCHING A RUN. The engine's own lines (DBMS_OUTPUT) appear only when a
+-- call ends, so a run also writes, as it goes and in autonomous transactions:
+-- one row per inventory item in anon_meta.anon_step_log, where it is now in
+-- anon_meta.anon_progress, and each check it made before changing anything in
+-- anon_meta.anon_check. The session's module names the run (ANON R-000001).
+-- A second session reads them while the run works.
 -- ============================================================================
 
 SET DEFINE OFF
@@ -59,9 +62,12 @@ SET ECHO OFF
 
 CREATE OR REPLACE PACKAGE op.anon_engine AS
 
-   -- Prefixes for generated identifiers. E_/P_/T_/CB_ kept from v3 so
-   -- anonymized data looks the same as it always has. X_ is new: a party whose
-   -- category the data cannot establish.
+   -- The version of the tool. Recorded with every run (anon_run.tool_version)
+   -- and shown on its screen and in its report.
+   c_version CONSTANT VARCHAR2(10) := '0.5.0';
+
+   -- Prefixes for generated identifiers, one per category. X_ is a party
+   -- whose category the data cannot establish.
    c_prefix_entity       CONSTANT VARCHAR2(4) := 'E_';
    c_prefix_portfolio    CONSTANT VARCHAR2(4) := 'P_';
    c_prefix_counterparty CONSTANT VARCHAR2(4) := 'T_';
@@ -118,15 +124,27 @@ CREATE OR REPLACE PACKAGE op.anon_engine AS
       p_approve_structure_only IN VARCHAR2 DEFAULT 'Y');
 
    PROCEDURE start_run;
+
+   -- p_status: COMPLETED, FAILED, REFUSED (the checks found the run unsafe),
+   -- CANCELLED (not confirmed) or STOPPED (asked to stop, and stopped
+   -- between two columns).
    PROCEDURE finish_run(p_status IN VARCHAR2, p_error IN VARCHAR2 DEFAULT NULL);
    FUNCTION  current_run_id RETURN NUMBER;
+   FUNCTION  tool_version RETURN VARCHAR2;
+
+   -- Asks a run to stop. Called from another session: the run reads it
+   -- between two columns, completes the column it is working on, and ends
+   -- STOPPED. What it did stays done; a new run resumes from there.
+   PROCEDURE request_stop(p_run_id IN NUMBER);
 
    -- Everything that must be known before a single target row changes:
    --   1. resolve every inventory row against the data dictionary and check
    --      that what it writes fits the column
    --   2. capture the identities, classify them, decide each one's single
    --      translation - reusing, never regenerating - and check the result
-   -- Raises if anything would make the run unsafe. A dry run stops after
+   -- Each check is recorded by name in anon_meta.anon_check, met or not.
+   -- Raises ORA-20011, -20012, -20013 or -20016 when the run is unsafe: the
+   -- run is then refused, and nothing has changed. A dry run stops after
    -- estimating against this same plan.
    PROCEDURE preflight;
 
@@ -135,12 +153,20 @@ CREATE OR REPLACE PACKAGE op.anon_engine AS
    -- regenerated - that is what makes a failed run resumable.
    PROCEDURE generate_code_map;
 
-   -- Walk the inventory and apply it.
+   -- Walk the inventory and apply it. Before each table or column it reads
+   -- the stop request: once one is made it raises ORA-20018, and every column
+   -- done so far is complete.
    PROCEDURE apply_inventory;
 
    PROCEDURE set_triggers(p_enable IN BOOLEAN);
 
    PROCEDURE print_summary;
+
+   -- How long a run would take, from a completed dry run: seconds, then '|',
+   -- then what the figure is based on - the last completed run on this
+   -- database that changed enough rows to measure ('R-000002'), or 'default'
+   -- for a default rate. A rough estimate, said as such wherever it is shown.
+   FUNCTION estimate(p_dry_run_id IN NUMBER) RETURN VARCHAR2;
 
 END anon_engine;
 /
@@ -178,6 +204,17 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
    -- with status ERROR, so the full list is queryable afterwards.
    g_blocking          PLS_INTEGER := 0;
 
+   -- Translations that could not be numbered (allocate_maps), for the check
+   -- that says so.
+   g_overflow          VARCHAR2(1000);
+
+   -- The phase anon_progress shows now, and when it began.
+   g_phase             VARCHAR2(20);
+   g_phase_started     TIMESTAMP;
+
+   -- Raised between two items once a stop was requested (request_stop).
+   c_stopped           CONSTANT PLS_INTEGER := -20018;
+
 
    -- =========================================================================
    -- Helpers
@@ -191,8 +228,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
 
 
    -- No ELSE branch that returns a value: an unknown category must never be
-   -- treated as one of the others. That is the trap the old engine's
-   -- ELSE 4 priority set - anything unrecognised tied with BANK_ACCOUNT.
+   -- treated as one of the others.
    FUNCTION prefix_of(p_category IN VARCHAR2) RETURN VARCHAR2 IS
    BEGIN
       RETURN CASE p_category
@@ -262,16 +298,15 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       PRAGMA AUTONOMOUS_TRANSACTION;
    BEGIN
       INSERT INTO anon_meta.anon_step_log
-         (run_id, phase, object_name, rule, status, rows_affected, elapsed_ms, message, x_rows)
+         (run_id, step_id, phase, object_name, rule, status, rows_affected, elapsed_ms, message, x_rows)
       VALUES
-         (g_run_id, p_phase, p_object, p_rule, p_status, p_rows, p_ms, SUBSTR(p_message, 1, 4000),
-          p_x_rows);
+         (g_run_id, anon_meta.seq_step_log.NEXTVAL, p_phase, p_object, p_rule, p_status, p_rows, p_ms,
+          SUBSTR(p_message, 1, 4000), p_x_rows);
       COMMIT;
 
       -- Preflight is logged but NOT counted. It reports on every inventory item
       -- before the work starts, and the apply phase then reports on the same
-      -- items again - so counting both made every missing object appear twice.
-      -- On TANM7881 that showed "skipped 304" for 152 actual objects.
+      -- items again: counting both would show every missing object twice.
       --
       -- The summary describes the WORK done, so it counts the phases that do
       -- work: MAPPING, NULL_OUT, CODE, DESCRIPTION, SELF_CODE, TRIGGERS.
@@ -359,6 +394,99 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       say('    BLOCKED     ' || p_object);
       say('                ' || p_message);
    END block;
+
+
+   -- One check made before anything changes, by name, met or not. Autonomous
+   -- so that a refused run keeps its checks. p_seq orders them in the table
+   -- the screen and the report show.
+   PROCEDURE record_check(
+      p_seq     IN NUMBER,
+      p_code    IN VARCHAR2,
+      p_title   IN VARCHAR2,
+      p_needed  IN VARCHAR2,
+      p_status  IN VARCHAR2,
+      p_state   IN VARCHAR2,
+      p_measure IN VARCHAR2,
+      p_happens IN VARCHAR2 DEFAULT NULL,
+      p_todo    IN VARCHAR2 DEFAULT NULL)
+   IS
+      PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+      MERGE INTO anon_meta.anon_check c
+      USING (SELECT g_run_id AS run_id, p_code AS code FROM dual) s
+         ON (c.run_id = s.run_id AND c.code = s.code)
+       WHEN MATCHED THEN UPDATE SET
+            c.seq = p_seq, c.title = p_title, c.needed = p_needed, c.status = p_status,
+            c.state = SUBSTR(p_state, 1, 60), c.measure = SUBSTR(p_measure, 1, 1000),
+            c.what_happens = SUBSTR(p_happens, 1, 1000), c.what_to_do = SUBSTR(p_todo, 1, 1000),
+            c.checked_at = SYSTIMESTAMP
+       WHEN NOT MATCHED THEN INSERT
+            (run_id, seq, code, title, needed, status, state, measure, what_happens, what_to_do)
+            VALUES (g_run_id, p_seq, p_code, p_title, p_needed, p_status, SUBSTR(p_state, 1, 60),
+                    SUBSTR(p_measure, 1, 1000), SUBSTR(p_happens, 1, 1000), SUBSTR(p_todo, 1, 1000));
+      COMMIT;
+   END record_check;
+
+
+   -- Where the run is now (anon_meta.anon_progress), for a second session to
+   -- read while the run works, and the same in the session's action
+   -- (v$session.action). Autonomous: it never commits the run's own work.
+   --   p_phase         PLAN | MAPPING | NULL_OUT | CODE | LABELS | DONE
+   --   p_stage         what the engine does, in words
+   --   p_done/p_total  items of the phase done, and planned
+   --   p_object        the table or column worked on now
+   --   p_weight...     the same weighed by table rows (table_weight)
+   PROCEDURE progress(
+      p_phase        IN VARCHAR2,
+      p_stage        IN VARCHAR2,
+      p_done         IN NUMBER   DEFAULT NULL,
+      p_total        IN NUMBER   DEFAULT NULL,
+      p_object       IN VARCHAR2 DEFAULT NULL,
+      p_weight_done  IN NUMBER   DEFAULT NULL,
+      p_weight       IN NUMBER   DEFAULT NULL,
+      p_weight_total IN NUMBER   DEFAULT NULL)
+   IS
+      PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+      IF g_run_id IS NULL THEN
+         RETURN;
+      END IF;
+      IF g_phase IS NULL OR g_phase <> p_phase THEN
+         g_phase         := p_phase;
+         g_phase_started := SYSTIMESTAMP;
+      END IF;
+
+      MERGE INTO anon_meta.anon_progress p
+      USING (SELECT g_run_id AS run_id FROM dual) s
+         ON (p.run_id = s.run_id)
+       WHEN MATCHED THEN UPDATE SET
+            p.phase = p_phase, p.stage = SUBSTR(p_stage, 1, 100), p.items_done = p_done,
+            p.items_total = p_total, p.object_name = SUBSTR(p_object, 1, 300),
+            p.object_weight = p_weight, p.weight_done = p_weight_done, p.weight_total = p_weight_total,
+            p.phase_started = g_phase_started, p.object_started = SYSTIMESTAMP,
+            p.updated_at = SYSTIMESTAMP
+       WHEN NOT MATCHED THEN INSERT
+            (run_id, phase, stage, items_done, items_total, object_name, object_weight, weight_done,
+             weight_total, phase_started, object_started, updated_at)
+            VALUES (g_run_id, p_phase, SUBSTR(p_stage, 1, 100), p_done, p_total, SUBSTR(p_object, 1, 300),
+                    p_weight, p_weight_done, p_weight_total, g_phase_started, SYSTIMESTAMP, SYSTIMESTAMP);
+      COMMIT;
+
+      DBMS_APPLICATION_INFO.SET_ACTION(SUBSTR(NVL(p_object, p_stage), 1, 64));
+   END progress;
+
+
+   -- Raises ORA-20018 once a stop was requested for this run (request_stop).
+   -- Read between two items only, so every item is either done or not begun.
+   PROCEDURE check_stop IS
+      v_requested VARCHAR2(1);
+   BEGIN
+      SELECT MAX(stop_requested) INTO v_requested FROM anon_meta.anon_run WHERE run_id = g_run_id;
+      IF v_requested = 'Y' THEN
+         RAISE_APPLICATION_ERROR(c_stopped,
+            'Stopped on request, between two columns. Every column done so far is complete.');
+      END IF;
+   END check_stop;
 
 
    FUNCTION column_exists(p_table IN VARCHAR2, p_column IN VARCHAR2) RETURN BOOLEAN IS
@@ -479,6 +607,31 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
    END n;
 
 
+   -- "1 code has", "3 codes have": a count with the words that agree with it.
+   FUNCTION counted(p IN NUMBER, p_one IN VARCHAR2, p_many IN VARCHAR2) RETURN VARCHAR2 IS
+   BEGIN
+      RETURN n(p) || ' ' || CASE WHEN p = 1 THEN p_one ELSE p_many END;
+   END counted;
+
+
+   -- How much of a phase's work one table is, for its progress: its rows as
+   -- the optimizer statistics know them, plus 1. A table without statistics
+   -- counts as 10,000 rows; one that is not here, or a view, as 1. The phase
+   -- totals in apply_inventory weigh tables the same way.
+   FUNCTION table_weight(p_table IN VARCHAR2) RETURN NUMBER IS
+      v_rows NUMBER;
+      v_n    PLS_INTEGER;
+   BEGIN
+      SELECT MAX(num_rows), COUNT(*) INTO v_rows, v_n
+        FROM all_tables
+       WHERE owner = 'OP' AND table_name = UPPER(p_table);
+      IF v_n = 0 THEN
+         RETURN 1;
+      END IF;
+      RETURN NVL(v_rows, 10000) + 1;
+   END table_weight;
+
+
    -- Width of the widest replacement a rule with this inventory category can
    -- write. A party column holds E_/P_/T_/X_ values, an account column CB_.
    FUNCTION needed_width(p_category IN VARCHAR2) RETURN PLS_INTEGER IS
@@ -573,7 +726,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
 
       g_fail_on_missing        := flag(p_fail_on_missing, 'FAIL_ON_MISSING_OBJECT', 'N') = 'Y';
       -- Allowed unless refused: a w_compte_banque node with no compte_banque
-      -- row is a bank account by default (decided 2026-10-20).
+      -- row is a bank account by default.
       g_approve_structure_only := flag(p_approve_structure_only,
                                        'APPROVE_STRUCTURE_ONLY_ACCOUNTS', 'Y') = 'Y';
    END configure;
@@ -614,11 +767,17 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
                || '","approve_structure_only_accounts":"'
                || CASE WHEN g_approve_structure_only THEN 'Y' ELSE 'N' END || '"}';
 
-      INSERT INTO anon_meta.anon_run (run_id, run_mode, status, db_name, os_user, config_json)
+      INSERT INTO anon_meta.anon_run (run_id, run_mode, status, db_name, os_user, config_json, tool_version)
       VALUES (g_run_id, g_mode, 'RUNNING',
               SYS_CONTEXT('USERENV', 'DB_NAME'),
               SYS_CONTEXT('USERENV', 'OS_USER'),
-              v_config);
+              v_config, c_version);
+
+      -- The session names the run, so that a second session can find it in
+      -- v$session - and the progress of a long statement in
+      -- v$session_longops.
+      DBMS_APPLICATION_INFO.SET_MODULE('ANON R-' || LPAD(g_run_id, 6, '0'), 'starting');
+      g_phase := NULL;
 
       -- The switches in a form SQL can join to: the plan, the verifier and the
       -- report all read what THIS run used.
@@ -651,16 +810,15 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
           || CASE WHEN g_approve_structure_only THEN 'y' ELSE 'n' END);
       say('');
 
-      -- The switches used to be nested: ANONYMIZE_<CATEGORY>=n switched off its
-      -- descriptions and attributes as well. They are now independent, so a
-      -- configuration written for the old behaviour can mask more than its
-      -- author expected. Say so, on every run where it applies.
+      -- The three switches of a category are independent: ANONYMIZE_<CATEGORY>=n
+      -- does not switch off its descriptions and attributes. Said on every run
+      -- where it applies, so that nobody reads more into the n than it does.
       FOR i IN 1 .. v_cats.COUNT LOOP
          IF g_id(v_cats(i)) = 'N' AND (g_desc(v_cats(i)) = 'Y' OR g_attr(v_cats(i)) = 'Y') THEN
-            say('  NOTE  ANONYMIZE_' || v_cats(i) || '=n now switches off ONLY the renaming of');
+            say('  NOTE  ANONYMIZE_' || v_cats(i) || '=n switches off ONLY the renaming of');
             say('        identifiers. Its descriptions and attributes are still masked, because');
-            say('        their own switches are y. Older versions skipped all three. To leave');
-            say('        everything of this category untouched, set all three switches to n.');
+            say('        their own switches are y. To leave everything of this category');
+            say('        untouched, set all three switches to n.');
             say('');
          END IF;
       END LOOP;
@@ -681,6 +839,8 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
              error_text  = SUBSTR(p_error, 1, 4000)
        WHERE run_id = g_run_id;
       COMMIT;
+      progress('DONE', LOWER(p_status));
+      DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL);
    END finish_run;
 
 
@@ -688,6 +848,24 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
    BEGIN
       RETURN g_run_id;
    END current_run_id;
+
+
+   FUNCTION tool_version RETURN VARCHAR2 IS
+   BEGIN
+      RETURN c_version;
+   END tool_version;
+
+
+   PROCEDURE request_stop(p_run_id IN NUMBER) IS
+   BEGIN
+      UPDATE anon_meta.anon_run
+         SET stop_requested = 'Y'
+       WHERE run_id = p_run_id AND status = 'RUNNING';
+      IF SQL%ROWCOUNT = 0 THEN
+         RAISE_APPLICATION_ERROR(-20019, 'Run ' || p_run_id || ' is not running: nothing to stop.');
+      END IF;
+      COMMIT;
+   END request_stop;
 
 
    -- =========================================================================
@@ -708,10 +886,26 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
       v_nullable       VARCHAR2(1);
       v_needed         PLS_INTEGER;
       v_object         VARCHAR2(300);
+      v_tables_absent  PLS_INTEGER;
+      -- The first columns of each finding, named in its check.
+      v_unfit          VARCHAR2(1000);
+      v_masked_names   VARCHAR2(1000);
+      v_measure        VARCHAR2(1000);
+
+      PROCEDURE note(p_list IN OUT VARCHAR2, p_name IN VARCHAR2) IS
+      BEGIN
+         IF p_list IS NULL THEN
+            p_list := p_name;
+         ELSIF LENGTH(p_list) < 300 THEN
+            p_list := p_list || ', ' || p_name;
+         ELSIF SUBSTR(p_list, -5) <> ', ...' THEN
+            p_list := p_list || ', ...';
+         END IF;
+      END note;
    BEGIN
       -- Every inventory row is processed by its rule. There is no exception for
-      -- narrow columns or short values any more: a column listed in the
-      -- inventory is a column someone decided holds client data. A control
+      -- narrow columns or short values: a column listed in the inventory is a
+      -- column someone decided holds client data. A control
       -- field that must not be touched is left OUT of the inventory, where the
       -- decision is visible - not guessed from its width.
       FOR r IN (SELECT table_name, column_name, rule, category
@@ -740,8 +934,9 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
          IF r.rule IN ('CODE', 'DESCRIPTION', 'SELF_CODE') THEN
             -- A column that receives a generated identifier has to be able to
             -- hold one: character typed, and wide enough for the widest value
-            -- its domain can produce. v3 checked neither, so a mismatch
-            -- surfaced as ORA-12899 or ORA-01722 partway through a run.
+            -- its domain can produce. Checked here so that a mismatch stops
+            -- the run before anything changes, not with ORA-12899 or
+            -- ORA-01722 partway through it.
             v_needed := needed_width(r.category);
 
             -- DESCRIPTION and SELF_CODE find their owner through the table's
@@ -754,12 +949,14 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
 
             ELSIF v_type NOT IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
                v_wrong_type := v_wrong_type + 1;
+               note(v_unfit, v_object || ' (' || v_type || ')');
                log_step('PREFLIGHT', v_object, r.rule, 'ERROR', NULL, NULL,
                         'column is ' || v_type || '; a generated identifier is text');
                say('    WRONG TYPE  ' || v_object || '  (' || v_type || ')');
 
             ELSIF v_width < v_needed THEN
                v_too_narrow := v_too_narrow + 1;
+               note(v_unfit, v_object || ' (' || v_width || ' characters)');
                log_step('PREFLIGHT', v_object, r.rule, 'ERROR', NULL, NULL,
                         'column holds ' || v_width || ' chars; ' || r.rule || ' ' || r.category
                      || ' writes values of up to ' || v_needed || '. Correct the inventory rule or '
@@ -780,6 +977,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
             -- clean - the run does not start.
             IF v_nullable = 'N' AND v_type NOT IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
                v_unmaskable := v_unmaskable + 1;
+               note(v_unfit, v_object || ' (NOT NULL ' || v_type || ')');
                log_step('PREFLIGHT', v_object, r.rule, 'ERROR', NULL, NULL,
                         'NOT NULL ' || v_type || ' - it can be neither emptied nor masked. Remove it '
                      || 'from the inventory with a recorded decision, or change the schema.');
@@ -787,6 +985,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
             ELSE
                IF v_nullable = 'N' THEN
                   v_masked := v_masked + 1;
+                  note(v_masked_names, v_object);
                   log_step('PREFLIGHT', v_object, r.rule, 'OK', NULL, NULL,
                            'NOT NULL - overwritten with ''' || SUBSTR(c_mask_text, 1, v_width)
                         || ''' instead of emptied');
@@ -806,6 +1005,7 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
             EXCEPTION
                WHEN OTHERS THEN
                   v_bad_scope := v_bad_scope + 1;
+                  note(v_unfit, v_object || ' ([only-where: ...] cannot be applied)');
                   log_step('PREFLIGHT', v_object, r.rule, 'ERROR', NULL, NULL,
                            'its [only-where: ...] cannot be applied here: ' || SQLERRM);
                   say('    NO SCOPE    ' || v_object || '  (' || SQLERRM || ')');
@@ -826,6 +1026,63 @@ CREATE OR REPLACE PACKAGE BODY op.anon_engine AS
 
       g_blocking := g_blocking + v_too_narrow + v_wrong_type + v_unmaskable + v_bad_scope;
       p_missing  := v_missing_table + v_missing_column;
+
+      -- The checks. Column names only.
+      IF v_too_narrow + v_wrong_type + v_unmaskable + v_bad_scope = 0 THEN
+         record_check(5, 'REPLACEMENTS_FIT', 'Replacements fit their columns', 'REQUIRED', 'MET', 'ok',
+                      counted(v_ok, 'column', 'columns') || ' checked; the widest replacement has '
+                   || needed_width('MIXED') || ' characters');
+      ELSE
+         v_measure := RTRIM(
+              CASE WHEN v_too_narrow > 0 THEN counted(v_too_narrow, 'column too narrow', 'columns too narrow') || ', ' END
+           || CASE WHEN v_wrong_type > 0 THEN counted(v_wrong_type, 'column not of a character type', 'columns not of a character type') || ', ' END
+           || CASE WHEN v_unmaskable > 0 THEN counted(v_unmaskable, 'NOT NULL free-text column that is not text', 'NOT NULL free-text columns that are not text') || ', ' END
+           || CASE WHEN v_bad_scope  > 0 THEN counted(v_bad_scope, '[only-where: ...] that cannot be applied', '[only-where: ...] that cannot be applied') || ', ' END,
+              ', ');
+         record_check(5, 'REPLACEMENTS_FIT', 'Replacements fit their columns', 'REQUIRED', 'NOT_MET', 'NOT MET',
+                      v_measure || ': ' || v_unfit,
+                      'A value that does not fit its column would stop the run partway, or the column would '
+                   || 'keep its client data.',
+                      'Correct the rule of these columns in config/inventory_op_custom.csv, or the schema. '
+                   || 'report.txt lists each one.');
+      END IF;
+
+      IF v_masked = 0 THEN
+         record_check(7, 'FREE_TEXT_NOT_NULL', 'Free text that cannot be emptied', 'INFO', 'MET', 'none',
+                      'every free-text column can be emptied');
+      ELSE
+         record_check(7, 'FREE_TEXT_NOT_NULL', 'Free text that cannot be emptied', 'INFO', 'NOTE',
+                      v_masked || CASE WHEN v_masked = 1 THEN ' column' ELSE ' columns' END,
+                      v_masked_names || CASE WHEN v_masked = 1 THEN ' is' ELSE ' are' END
+                   || ' NOT NULL: overwritten with ' || c_mask_text || ' instead of emptied');
+      END IF;
+
+      SELECT COUNT(DISTINCT i.table_name) INTO v_tables_absent
+        FROM anon_meta.anon_inventory i
+       WHERE NOT EXISTS (SELECT 1 FROM all_tab_columns c
+                          WHERE c.owner = 'OP' AND c.table_name = i.table_name);
+      IF p_missing = 0 THEN
+         record_check(8, 'INVENTORY_PRESENT', 'Inventory objects in this database',
+                      CASE WHEN g_fail_on_missing THEN 'REQUIRED' ELSE 'OPTIONAL' END, 'MET', 'all here',
+                      'every table and column of the inventory is in this database');
+      ELSE
+         v_measure := counted(p_missing, 'item of the inventory is', 'items of the inventory are') || ' not in this database: '
+                   || v_tables_absent || CASE WHEN v_tables_absent = 1 THEN ' table' ELSE ' tables' END
+                   || ' and ' || v_missing_column
+                   || CASE WHEN v_missing_column = 1 THEN ' column' ELSE ' columns' END
+                   || ' of tables that are here.';
+         IF g_fail_on_missing THEN
+            record_check(8, 'INVENTORY_PRESENT', 'Inventory objects in this database', 'REQUIRED', 'NOT_MET',
+                         'NOT MET', v_measure,
+                         'FAIL_ON_MISSING_OBJECT=y: a run does not start while an inventory object is missing.',
+                         'Check that this is the database you meant; or set FAIL_ON_MISSING_OBJECT=n to skip '
+                      || 'what is not here.');
+         ELSE
+            record_check(8, 'INVENTORY_PRESENT', 'Inventory objects in this database', 'OPTIONAL', 'NOTE',
+                         p_missing || ' not here',
+                         v_measure || ' They are skipped (FAIL_ON_MISSING_OBJECT=n).');
+         END IF;
+      END IF;
    END check_inventory;
 
 
@@ -1026,13 +1283,13 @@ WITH pmap AS (
      LEFT JOIN anon_meta.code_map cm ON cm.category = ii.map_category AND cm.old_code = ii.old_code
 ), c AS (
    SELECT f.*,
-          -- Section 2A, in its exclusive order. A missing master is X_ even for
-          -- a Compte/w_tiers node; an O flag needs a w_tiers node of any
-          -- classification; ENTITY wins over another classification on the
-          -- same party; a NULL classification is not a counterparty. A flag N
-          -- tiers row with no structure node at all - an archived party,
-          -- removed from the tree - is a counterparty (part 2, item 7, agreed
-          -- 2026-10-22); one whose only nodes are on other screens is not.
+          -- The classification, tested in this order. A missing master is X_
+          -- even for a Compte/w_tiers node; an O flag needs a w_tiers node of
+          -- any classification; ENTITY wins over another classification on
+          -- the same party; a NULL classification is not a counterparty. A
+          -- flag N tiers row with no structure node at all - an archived
+          -- party, removed from the tree - is a counterparty; one whose only
+          -- nodes are on other screens is not.
           CASE WHEN domain = 'ACCOUNT'                                 THEN 'BANK_ACCOUNT'
                WHEN n_master = 0                                       THEN 'UNCLASSIFIED_PARTY'
                WHEN flag_state = 'O' AND party_node = 1                THEN 'PORTFOLIO'
@@ -1092,6 +1349,11 @@ SELECT :run_id, domain, k,
    EXCEPTION
       WHEN OTHERS THEN
          IF SQLCODE = -12899 THEN
+            record_check(1, 'IDENTITY_TABLES', 'Identity tables', 'REQUIRED', 'NOT_MET', 'NOT MET',
+                         'an identifier in tiers, compte_banque or structure is longer than 80 characters',
+                         'anon_meta records identifiers of up to 80 characters: this one cannot be translated.',
+                         'Look for the long value in tiers.code, compte_banque.code and structure.code; it is '
+                      || 'most likely not an identifier.');
             RAISE_APPLICATION_ERROR(-20016,
                'An identifier in tiers, compte_banque or structure is longer than the 80 '
             || 'characters anon_meta can record. Nothing has been changed.');
@@ -1221,6 +1483,9 @@ SELECT :run_id, domain, k,
                block(LOWER(v_cat) || ' mapping',
                      v_need || ' new ' || v_prefix || ' identifiers do not fit after the existing '
                   || v_base || ' in ' || v_digits || ' digits.', v_need);
+               g_overflow := SUBSTR(g_overflow || CASE WHEN g_overflow IS NOT NULL THEN '; ' END
+                                 || v_need || ' new ' || v_prefix || ' values do not fit after the existing '
+                                 || v_base || ' in ' || v_digits || ' digits', 1, 1000);
             ELSE
                MERGE INTO anon_meta.identity_plan p
                USING (SELECT domain, old_code,
@@ -1250,106 +1515,176 @@ SELECT :run_id, domain, k,
 
 
    -- Everything that makes the plan unsafe stops the run before any target row
-   -- changes. Everything that is merely unusual is reported.
+   -- changes. Everything that is merely unusual is reported. Each finding is
+   -- recorded with the check it belongs to (record_check).
    PROCEDURE validate_plan IS
-      v_n NUMBER;
+      v_like       NUMBER;
+      v_other      NUMBER;
+      v_seen       NUMBER;
+      v_conflict   NUMBER;
+      v_missing    NUMBER;
+      v_existing   NUMBER;
+      v_superseded NUMBER;
+      v_struct_new NUMBER;
+      v_struct_all NUMBER;
+      v_taken      NUMBER;
+      v_equal      NUMBER;
+      v_unowned    NUMBER;
+      v_codes      NUMBER;
+      v_measure    VARCHAR2(1000);
    BEGIN
       -- Original text that looks exactly like a generated replacement. Either
       -- the data was anonymized before without the mapping that would prove it,
       -- or a real code collides with the generated format. Both are unsafe:
       -- the first would translate a translation, the second would make an
       -- original indistinguishable from a replacement.
-      SELECT COUNT(*) INTO v_n
+      SELECT COUNT(*) INTO v_like
         FROM anon_meta.identity_plan p
        WHERE p.run_id = g_run_id
          AND p.identity_status = 'NEW'
          AND REGEXP_LIKE(p.old_code, '^(E|P|T|X|CB)_[0-9]{' || c_code_digits || '}$')
          AND NOT EXISTS (SELECT 1 FROM anon_meta.code_map c WHERE c.new_code = p.old_code);
-      IF v_n > 0 THEN
+      IF v_like > 0 THEN
          block('identity inventory',
-               v_n || ' identifier(s) in tiers, compte_banque, structure or a reference column look '
+               v_like || ' identifier(s) in tiers, compte_banque, structure or a reference column look '
             || 'like generated replacements but no mapping owns them. This copy looks already '
-            || 'anonymized without trustworthy provenance - reimport the raw data.', v_n);
+            || 'anonymized without trustworthy provenance - reimport the raw data.', v_like);
       END IF;
 
       -- A replacement from code_map found where an original should be, and not
       -- one this domain's translations can explain: an account node holding a
       -- party's E_ value, a tiers row holding a CB_ value, or a translation
-      -- from an earlier version whose roles cannot be trusted. Lookup logic
+      -- made by an earlier version whose roles cannot be trusted. Lookup logic
       -- cannot undo a substitution that has already happened.
-      SELECT COUNT(*) INTO v_n
+      SELECT COUNT(*) INTO v_other
         FROM anon_meta.identity_plan p
        WHERE p.run_id = g_run_id
          AND p.identity_status = 'NEW'
          AND EXISTS (SELECT 1 FROM anon_meta.code_map c WHERE c.new_code = p.old_code);
-      IF v_n > 0 THEN
+      IF v_other > 0 THEN
          block('mapping history',
-               v_n || ' master or structure row(s) already hold a replacement value that is not '
+               v_other || ' master or structure row(s) already hold a replacement value that is not '
             || 'their own domain''s translation. This copy was anonymized before with incompatible '
-            || 'mappings. Reimport the raw data; a repair in place needs a reviewed migration.', v_n);
+            || 'mappings. Reimport the raw data; a repair in place needs a reviewed migration.', v_other);
       END IF;
 
-      SELECT COUNT(*) INTO v_n
+      SELECT COUNT(CASE WHEN seen_renamed = 'Y' THEN 1 END) INTO v_seen
+        FROM anon_meta.identity_plan WHERE run_id = g_run_id;
+      IF v_like + v_other = 0 THEN
+         record_check(2, 'NOT_ANONYMIZED', 'Data not anonymized before', 'REQUIRED', 'MET', 'ok',
+                      CASE WHEN v_seen = 0
+                           THEN 'no code in tiers, compte_banque or structure has the form of a replacement'
+                           ELSE counted(v_seen, 'identity already holds its', 'identities already hold their') || ' own replacement, from an earlier '
+                             || 'run on this same data: this run resumes it' END);
+      ELSE
+         record_check(2, 'NOT_ANONYMIZED', 'Data not anonymized before', 'REQUIRED', 'NOT_MET', 'NOT MET',
+                      RTRIM(CASE WHEN v_like > 0 THEN counted(v_like, 'code has', 'codes have') || ' the form of a replacement and no '
+                                 || 'recorded translation; ' END
+                         || CASE WHEN v_other > 0 THEN counted(v_other, 'row of tiers, compte_banque or structure holds', 'rows of tiers, compte_banque and structure hold')
+                                 || ' a replacement that is not the translation of their own kind of code' END,
+                            '; '),
+                      'This copy of OP was anonymized before, without the translations that would prove it or '
+                   || 'with translations of another kind. A run on it would translate translations, and its '
+                   || 'result could not be verified.',
+                      'Import the raw data of OP again. The translations recorded here stay, '
+                   || 'and are reused where they are consistent.');
+      END IF;
+
+      SELECT COUNT(CASE WHEN map_status = 'CONFLICT' THEN 1 END),
+             COUNT(CASE WHEN map_status = 'MISSING' THEN 1 END),
+             COUNT(CASE WHEN map_status = 'EXISTING' THEN 1 END),
+             NVL(SUM(superseded_maps), 0)
+        INTO v_conflict, v_missing, v_existing, v_superseded
         FROM anon_meta.identity_plan
-       WHERE run_id = g_run_id AND map_status = 'CONFLICT';
-      IF v_n > 0 THEN
+       WHERE run_id = g_run_id;
+      IF v_conflict > 0 THEN
          block('mapping history',
-               v_n || ' party identit(ies) have two or more earlier translations in code_map and '
+               v_conflict || ' party identit(ies) have two or more earlier translations in code_map and '
             || 'none matches their category now. One party must have exactly one translation; '
-            || 'choosing one would silently change values already written.', v_n);
+            || 'choosing one would silently change values already written.', v_conflict);
       END IF;
-
-      SELECT COUNT(*) INTO v_n
-        FROM anon_meta.identity_plan
-       WHERE run_id = g_run_id AND map_status = 'MISSING';
-      IF v_n > 0 THEN
+      IF v_missing > 0 THEN
          block('mapping history',
-               v_n || ' recorded identit(ies) point at a translation that is no longer in '
-            || 'code_map. Their provenance is lost.', v_n);
+               v_missing || ' recorded identit(ies) point at a translation that is no longer in '
+            || 'code_map. Their provenance is lost.', v_missing);
+      END IF;
+      IF v_conflict + v_missing = 0 THEN
+         record_check(3, 'EARLIER_TRANSLATIONS', 'Earlier translations', 'REQUIRED', 'MET', 'ok',
+                      CASE WHEN v_existing = 0 THEN 'none on this database: every translation is new'
+                           ELSE v_existing || ' recorded before and reused, none in conflict' END
+                   || CASE WHEN v_superseded > 0 THEN '; ' || counted(v_superseded, 'earlier translation', 'earlier translations')
+                           || ' superseded (kept, never used)' END);
+      ELSE
+         record_check(3, 'EARLIER_TRANSLATIONS', 'Earlier translations', 'REQUIRED', 'NOT_MET', 'NOT MET',
+                      RTRIM(CASE WHEN v_conflict > 0 THEN counted(v_conflict, 'party has', 'parties have') || ' two or more earlier '
+                                 || 'translations, none matching its category now; ' END
+                         || CASE WHEN v_missing > 0 THEN counted(v_missing, 'recorded identity points', 'recorded identities point') || ' at a '
+                                 || 'translation that is no longer in code_map' END, '; '),
+                      'One identity must have exactly one translation. Choosing one would silently change '
+                   || 'values already written.',
+                      'Review anon_meta.code_map for these identities with the DBA before any run '
+                   || '(tests/manual/inspect_code_map.sql); a run does not choose for them.');
       END IF;
 
-      -- Account nodes with no account master: an extension of the account
-      -- population the legacy package never renamed. Allowed by default; a
-      -- client where they are not bank accounts sets the switch to n.
-      SELECT COUNT(*) INTO v_n
+      -- Account nodes with no account master. Bank accounts by default; a
+      -- client where they are not sets APPROVE_STRUCTURE_ONLY_ACCOUNTS=n.
+      SELECT COUNT(CASE WHEN identity_status = 'NEW' THEN 1 END), COUNT(*)
+        INTO v_struct_new, v_struct_all
         FROM anon_meta.identity_plan
        WHERE run_id = g_run_id
-         AND identity_status = 'NEW'
          AND domain = 'ACCOUNT'
          AND membership = 'STRUCTURE_ONLY';
-      IF v_n > 0 AND NOT g_approve_structure_only THEN
+      IF v_struct_new > 0 AND NOT g_approve_structure_only THEN
          block('account scope',
-               v_n || ' w_compte_banque structure node(s) have no compte_banque row, and '
+               v_struct_new || ' w_compte_banque structure node(s) have no compte_banque row, and '
             || 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=n says they are not bank accounts here. Set '
             || 'APPROVE_STRUCTURE_ONLY_ACCOUNTS=y to anonymize them as bank accounts. Scope review '
-            || 'needed before any update.', v_n);
+            || 'needed before any update.', v_struct_new);
+         record_check(6, 'STRUCTURE_ONLY_ACCOUNTS', 'Bank accounts only on the structure', 'REQUIRED',
+                      'NOT_MET', 'NOT MET',
+                      v_struct_new || CASE WHEN v_struct_new = 1 THEN ' w_compte_banque node has'
+                                           ELSE ' w_compte_banque nodes have' END || ' no compte_banque row',
+                      'The setting says such nodes are not bank accounts here (APPROVE_STRUCTURE_ONLY_ACCOUNTS'
+                   || ' is n), so the run cannot tell what they are.',
+                      'After a review of what these nodes are, set APPROVE_STRUCTURE_ONLY_ACCOUNTS to y in '
+                   || 'config/anonymization.ini to anonymize them as bank accounts.');
+      ELSIF v_struct_all = 0 THEN
+         record_check(6, 'STRUCTURE_ONLY_ACCOUNTS', 'Bank accounts only on the structure', 'INFO', 'MET',
+                      'none', 'every w_compte_banque node has its compte_banque row');
+      ELSE
+         record_check(6, 'STRUCTURE_ONLY_ACCOUNTS', 'Bank accounts only on the structure', 'INFO', 'NOTE',
+                      v_struct_all || CASE WHEN v_struct_all = 1 THEN ' node' ELSE ' nodes' END,
+                      v_struct_all || CASE WHEN v_struct_all = 1 THEN ' w_compte_banque node has'
+                                           ELSE ' w_compte_banque nodes have' END
+                   || ' no compte_banque row: anonymized as bank accounts (APPROVE_STRUCTURE_ONLY_ACCOUNTS'
+                   || CASE WHEN g_approve_structure_only THEN ' is y' ELSE ' is n; recorded before' END || ')');
       END IF;
 
       -- Every replacement - kept or new - must be unique, and must not equal
       -- any original. Either failure would let one value mean two things.
-      SELECT COUNT(*) INTO v_n
+      SELECT COUNT(*) INTO v_taken
         FROM anon_meta.identity_plan p
        WHERE p.run_id = g_run_id
          AND p.map_status = 'NEW'
          AND EXISTS (SELECT 1 FROM anon_meta.code_map c WHERE c.new_code = p.new_code);
-      IF v_n > 0 THEN
-         block('mapping', v_n || ' planned replacement(s) already exist in code_map.', v_n);
+      IF v_taken > 0 THEN
+         block('mapping', v_taken || ' planned replacement(s) already exist in code_map.', v_taken);
       END IF;
 
-      SELECT COUNT(*) INTO v_n
+      SELECT COUNT(*) INTO v_equal
         FROM anon_meta.identity_plan p
        WHERE p.run_id = g_run_id
          AND p.new_code IS NOT NULL
          AND EXISTS (SELECT 1 FROM anon_meta.identity_plan q
                       WHERE q.run_id = g_run_id AND q.old_code = p.new_code);
-      IF v_n > 0 THEN
-         block('mapping', v_n || ' replacement(s) equal an original identifier.', v_n);
+      IF v_equal > 0 THEN
+         block('mapping', v_equal || ' replacement(s) equal an original identifier.', v_equal);
       END IF;
 
       -- Every identity that needs a translation has exactly one, of its own
       -- domain. Guaranteed by construction; checked because the consequence of
       -- being wrong is a silent leak.
-      SELECT COUNT(*) INTO v_n
+      SELECT COUNT(*) INTO v_unowned
         FROM anon_meta.identity_plan
        WHERE run_id = g_run_id
          AND (id_on = 'Y' OR desc_on = 'Y' OR attr_on = 'Y')
@@ -1358,8 +1693,27 @@ SELECT :run_id, domain, k,
               OR (domain = 'PARTY'   AND map_category NOT IN ('ENTITY', 'PORTFOLIO',
                                                               'COUNTERPARTY', 'UNCLASSIFIED_PARTY')))
          AND map_status NOT IN ('CONFLICT', 'MISSING');
-      IF v_n > 0 THEN
-         block('mapping', v_n || ' identit(ies) needing a translation have none of their own domain.', v_n);
+      IF v_unowned > 0 THEN
+         block('mapping', v_unowned || ' identit(ies) needing a translation have none of their own domain.',
+               v_unowned);
+      END IF;
+
+      SELECT COUNT(new_code) INTO v_codes FROM anon_meta.identity_plan WHERE run_id = g_run_id;
+      IF v_taken + v_equal + v_unowned = 0 AND g_overflow IS NULL THEN
+         record_check(4, 'REPLACEMENTS_UNIQUE', 'Replacements unique', 'REQUIRED', 'MET', 'ok',
+                      counted(v_codes, 'replacement', 'replacements') || ', each used once, none equal to an original code');
+      ELSE
+         v_measure := RTRIM(CASE WHEN v_taken > 0 THEN counted(v_taken, 'planned replacement is', 'planned replacements are') || ' already in '
+                                 || 'code_map; ' END
+                         || CASE WHEN v_equal > 0 THEN counted(v_equal, 'replacement equals', 'replacements equal') || ' an original code; ' END
+                         || CASE WHEN v_unowned > 0 THEN counted(v_unowned, 'identity has no translation of its', 'identities have no translation of their')
+                                 || ' own kind; ' END
+                         || g_overflow, '; ');
+         record_check(4, 'REPLACEMENTS_UNIQUE', 'Replacements unique', 'REQUIRED', 'NOT_MET', 'NOT MET',
+                      v_measure,
+                      'Two identities would share one value, or a value would be both an original and a '
+                   || 'replacement: the result could not be told apart from client data.',
+                      'Keep report.txt and anon_meta as they are and report it: this is not expected.');
       END IF;
    END validate_plan;
 
@@ -1650,6 +2004,9 @@ SELECT :run_id, domain, k,
         FROM all_users WHERE username = 'OP';
       EXECUTE IMMEDIATE 'SELECT (SELECT COUNT(*) FROM op.tiers), (SELECT COUNT(*) FROM op.structure), '
                      || '(SELECT COUNT(*) FROM op.compte_banque) FROM dual' INTO v_t, v_s, v_b;
+      record_check(1, 'IDENTITY_TABLES', 'Identity tables', 'REQUIRED', 'MET', 'ok',
+                   'tiers ' || n(v_t) || ' rows, structure ' || n(v_s) || ' rows, compte_banque '
+                || n(v_b) || ' rows');
       SELECT COUNT(CASE WHEN domain = 'PARTY' THEN 1 END),
              COUNT(CASE WHEN domain = 'ACCOUNT' THEN 1 END),
              COUNT(CASE WHEN identity_status = 'NEW' THEN 1 END)
@@ -1679,6 +2036,11 @@ SELECT :run_id, domain, k,
       IF NOT column_exists('compte_banque', 'code')      THEN v_missing := v_missing || ' compte_banque.code';      END IF;
 
       IF v_missing IS NOT NULL THEN
+         record_check(1, 'IDENTITY_TABLES', 'Identity tables', 'REQUIRED', 'NOT_MET', 'NOT MET',
+                      'missing in OP:' || v_missing,
+                      'The identities are read from tiers, structure and compte_banque: without these columns '
+                   || 'there is nothing to translate.',
+                      'Check that this is the OP schema of the application, and that its import is complete.');
          RAISE_APPLICATION_ERROR(-20013,
             'The core entity tables are not shaped as expected on this instance. Missing:'
          || v_missing || '. Identifiers are derived from these, so nothing can be mapped. '
@@ -1693,14 +2055,20 @@ SELECT :run_id, domain, k,
                              WHERE run_mode = 'EXECUTE' AND status = 'COMPLETED'), -1);
       COMMIT;
 
+      progress('PLAN', 'looking for codes found only in references', 2, 7);
       harvest_references;
+      progress('PLAN', 'capturing the identities', 3, 7);
       capture_identities;
+      progress('PLAN', 'looking for earlier translations', 4, 7);
       adopt_existing_maps;
+      progress('PLAN', 'planning the translations', 5, 7);
       apply_switches;
       allocate_maps;
       COMMIT;
 
+      progress('PLAN', 'checking the plan', 6, 7);
       validate_plan;
+      progress('PLAN', 'counting the identities', 7, 7);
       report_plan;
    END build_plan;
 
@@ -1710,7 +2078,9 @@ SELECT :run_id, domain, k,
    BEGIN
       say('  --- Preflight -------------------------------------------------');
       g_blocking := 0;
+      g_overflow := NULL;
 
+      progress('PLAN', 'checking the inventory against the database', 1, 7);
       check_inventory(v_missing);
       build_plan;
 
@@ -1856,6 +2226,8 @@ SELECT tree, old_code, MAX(new_code), MAX(kind)
       v_start   NUMBER;
    BEGIN
       say('  --- Identifier mapping ----------------------------------------');
+      progress('MAPPING', CASE WHEN g_dry_run THEN 'preparing the lookups' ELSE 'recording the translations' END,
+               0, 2);
 
       FOR i IN 1 .. v_cats.COUNT LOOP
          v_cat   := v_cats(i);
@@ -1914,6 +2286,7 @@ SELECT tree, old_code, MAX(new_code), MAX(kind)
          COMMIT;
       END IF;
 
+      progress('MAPPING', 'preparing the lookups', 1, 2);
       build_lookups;
       say('');
    END generate_code_map;
@@ -2675,16 +3048,27 @@ SELECT tree, old_code, MAX(new_code), MAX(kind)
 
 
    PROCEDURE apply_inventory IS
-      v_rows NUMBER;
+      v_rows   NUMBER;
+      v_folder BOOLEAN;
+      v_total  NUMBER;
+      v_done   NUMBER;
+      v_wtotal NUMBER;
+      v_wdone  NUMBER;
+      v_weight NUMBER;
+      v_stage  VARCHAR2(40);
    BEGIN
       -- Order is not arbitrary.
       --
       -- 1. NULL_OUT first. Clearing the free text on the big history tables up
-      --    front is what keeps the whole run inside 20-40 minutes.
+      --    front keeps the largest statements at the start of the run.
       -- 2. CODE second.
       -- 3. DESCRIPTION and SELF_CODE last. They find their owner by original
-      --    or replacement, so they no longer depend on step 2 having run - the
-      --    order is kept so that the log reads the way it always has.
+      --    or replacement, so they do not depend on step 2 having run - the
+      --    order is kept so that the log reads in the same order every time.
+      --
+      -- Each phase reports its progress (progress) before every table or
+      -- column, weighed by the rows of the tables (table_weight), and reads
+      -- the stop request (check_stop).
 
       -- ORDER BY MIN(seq) keeps the inventory's own order, so the sequence of
       -- work matches the CSV and the log reads in the same order as the file.
@@ -2693,35 +3077,83 @@ SELECT tree, old_code, MAX(new_code), MAX(kind)
       -- same name as the column shadows it in ORDER BY, which turns MIN(seq)
       -- into MIN(MIN(seq)) and fails with ORA-00935.
       say('  --- Free text and PII -----------------------------------------');
+      SELECT COUNT(*) INTO v_rows
+        FROM anon_meta.anon_inventory WHERE table_name = 'STRUCTURE' AND column_name = 'DESCRIPTION';
+      v_folder := v_rows > 0;
+      v_stage  := CASE WHEN g_dry_run THEN 'counting free text' ELSE 'emptying free text' END;
+
+      -- The progress of each phase counts what is in this database: the
+      -- tables of free text, the identifier columns, the label and attribute
+      -- columns. What is not here is logged SKIPPED and takes no time.
+      SELECT COUNT(*), NVL(SUM(CASE WHEN t.table_name IS NULL THEN 1 ELSE NVL(t.num_rows, 10000) + 1 END), 0)
+        INTO v_total, v_wtotal
+        FROM (SELECT DISTINCT table_name FROM anon_meta.anon_inventory WHERE rule = 'NULL_OUT') i
+        JOIN (SELECT DISTINCT table_name FROM all_tab_columns WHERE owner = 'OP') h ON h.table_name = i.table_name
+        LEFT JOIN all_tables t ON t.owner = 'OP' AND t.table_name = i.table_name;
+      IF v_folder THEN
+         v_total  := v_total + 1;
+         v_wtotal := v_wtotal + table_weight('STRUCTURE');
+      END IF;
+      v_done  := 0;
+      v_wdone := 0;
       FOR t IN (SELECT table_name
                   FROM anon_meta.anon_inventory
                  WHERE rule = 'NULL_OUT'
                  GROUP BY table_name
                  ORDER BY MIN(seq)) LOOP
-         apply_null_out(t.table_name);
+         check_stop;
+         IF table_exists(t.table_name) THEN
+            v_weight := table_weight(t.table_name);
+            progress('NULL_OUT', v_stage, v_done, v_total, LOWER(t.table_name), v_wdone, v_weight, v_wtotal);
+            apply_null_out(t.table_name);
+            v_done  := v_done + 1;
+            v_wdone := v_wdone + v_weight;
+         ELSE
+            apply_null_out(t.table_name);
+         END IF;
       END LOOP;
 
       -- The folder rows' text, when the inventory covers structure.description.
-      SELECT COUNT(*) INTO v_rows
-        FROM anon_meta.anon_inventory WHERE table_name = 'STRUCTURE' AND column_name = 'DESCRIPTION';
-      IF v_rows > 0 THEN
+      IF v_folder THEN
+         check_stop;
+         progress('NULL_OUT', v_stage, v_done, v_total, 'structure.description', v_wdone,
+                  table_weight('STRUCTURE'), v_wtotal);
          apply_folder_text;
       END IF;
       say('');
 
       say('  --- Identifiers -----------------------------------------------');
+      v_stage := CASE WHEN g_dry_run THEN 'counting identifiers' ELSE 'renaming identifiers' END;
+      SELECT COUNT(*), NVL(SUM(CASE WHEN t.table_name IS NULL THEN 1 ELSE NVL(t.num_rows, 10000) + 1 END), 0)
+        INTO v_total, v_wtotal
+        FROM anon_meta.anon_inventory i
+        JOIN all_tab_columns c ON c.owner = 'OP' AND c.table_name = i.table_name AND c.column_name = i.column_name
+        LEFT JOIN all_tables t ON t.owner = 'OP' AND t.table_name = i.table_name
+       WHERE i.rule = 'CODE';
+      v_done  := 0;
+      v_wdone := 0;
       FOR r IN (SELECT table_name, column_name, category
                   FROM anon_meta.anon_inventory
                  WHERE rule = 'CODE'
                  ORDER BY seq) LOOP
-         apply_code(r.table_name, r.column_name, r.category);
+         check_stop;
+         IF column_exists(r.table_name, r.column_name) THEN
+            v_weight := table_weight(r.table_name);
+            progress('CODE', v_stage, v_done, v_total, LOWER(r.table_name || '.' || r.column_name),
+                     v_wdone, v_weight, v_wtotal);
+            apply_code(r.table_name, r.column_name, r.category);
+            v_done  := v_done + 1;
+            v_wdone := v_wdone + v_weight;
+         ELSE
+            apply_code(r.table_name, r.column_name, r.category);
+         END IF;
       END LOOP;
 
       -- Record which translations are now applied to identifiers IN THIS DATA:
       -- renamed by this run, or found already renamed by an earlier run on the
-      -- same data. EPF cascades only those. A translation used only to mask a
-      -- label must not rename anything downstream - and neither must one that
-      -- was applied to a previous import of the data, now replaced by raw data.
+      -- same data. EPF carries only those over. A translation used only to mask
+      -- a label must not rename anything downstream - and neither must one that
+      -- was applied to an earlier import of the data, since replaced.
       IF NOT g_dry_run THEN
          UPDATE anon_meta.code_map c
             SET c.id_applied =
@@ -2745,16 +3177,46 @@ SELECT tree, old_code, MAX(new_code), MAX(kind)
       say('');
 
       say('  --- Labels and attributes -------------------------------------');
+      v_stage := CASE WHEN g_dry_run THEN 'counting labels and attributes' ELSE 'masking labels and attributes' END;
+      -- Counted by column: one statement covers the columns of a table that
+      -- share a rule and a category, and weighs as its table.
+      SELECT COUNT(*), NVL(SUM(w), 0)
+        INTO v_total, v_wtotal
+        FROM (SELECT i.table_name, i.column_name,
+                     CASE WHEN ROW_NUMBER() OVER (PARTITION BY i.table_name, i.category, i.rule ORDER BY i.seq) = 1
+                          THEN CASE WHEN t.table_name IS NULL THEN 1 ELSE NVL(t.num_rows, 10000) + 1 END
+                          ELSE 0 END AS w
+                FROM anon_meta.anon_inventory i
+                JOIN all_tab_columns c ON c.owner = 'OP' AND c.table_name = i.table_name AND c.column_name = i.column_name
+                LEFT JOIN all_tables t ON t.owner = 'OP' AND t.table_name = i.table_name
+               WHERE i.rule IN ('DESCRIPTION', 'SELF_CODE'));
+      v_done  := 0;
+      v_wdone := 0;
+      progress('LABELS', v_stage, v_done, v_total, NULL, v_wdone, NULL, v_wtotal);
       IF NOT g_dry_run THEN
          capture_baseline;
       END IF;
-      FOR g IN (SELECT table_name, category, rule
-                  FROM anon_meta.anon_inventory
-                 WHERE rule IN ('DESCRIPTION', 'SELF_CODE')
-                 GROUP BY table_name, category, rule
-                 ORDER BY MIN(seq)) LOOP
-         apply_self_code(g.table_name, g.category, g.rule);
+      FOR g IN (SELECT i.table_name, i.category, i.rule,
+                       COUNT(c.column_name) AS here
+                  FROM anon_meta.anon_inventory i
+                  LEFT JOIN all_tab_columns c
+                         ON c.owner = 'OP' AND c.table_name = i.table_name AND c.column_name = i.column_name
+                 WHERE i.rule IN ('DESCRIPTION', 'SELF_CODE')
+                 GROUP BY i.table_name, i.category, i.rule
+                 ORDER BY MIN(i.seq)) LOOP
+         check_stop;
+         IF g.here > 0 THEN
+            v_weight := table_weight(g.table_name);
+            progress('LABELS', v_stage, v_done, v_total, LOWER(g.table_name) || ' (' || LOWER(g.rule) || ')',
+                     v_wdone, v_weight, v_wtotal);
+            apply_self_code(g.table_name, g.category, g.rule);
+            v_done  := v_done + g.here;
+            v_wdone := v_wdone + v_weight;
+         ELSE
+            apply_self_code(g.table_name, g.category, g.rule);
+         END IF;
       END LOOP;
+      progress('LABELS', v_stage, v_done, v_total, NULL, v_wdone, NULL, v_wtotal);
       say('');
    END apply_inventory;
 
@@ -2881,6 +3343,56 @@ SELECT tree, old_code, MAX(new_code), MAX(kind)
       print_unclassified_by_table;
       say('');
    END print_summary;
+
+
+   -- A run takes, roughly: the planning the dry run took; the writing, at
+   -- the rate of the last completed run on this database (rows changed per
+   -- second of work), or else the dry run's own scans plus the rows to change
+   -- at a default rate; and the verification, about one more pass of scans.
+   FUNCTION estimate(p_dry_run_id IN NUMBER) RETURN VARCHAR2 IS
+      c_work        CONSTANT VARCHAR2(100) := ',NULL_OUT,CODE,DESCRIPTION,SELF_CODE,';
+      c_default_rps CONSTANT NUMBER := 25000;
+      v_db          VARCHAR2(30);
+      v_started     DATE;
+      v_planned     DATE;
+      v_plan_s      NUMBER;
+      v_count_s     NUMBER;
+      v_rows        NUMBER;
+      v_basis       NUMBER;
+      v_rows_e      NUMBER;
+      v_work_e      NUMBER;
+      v_write_s     NUMBER;
+   BEGIN
+      SELECT MAX(db_name), MAX(CAST(started_at AS DATE)) INTO v_db, v_started
+        FROM anon_meta.anon_run WHERE run_id = p_dry_run_id;
+      SELECT MIN(CAST(logged_at AS DATE)),
+             NVL(SUM(CASE WHEN INSTR(c_work, ',' || phase || ',') > 0 THEN elapsed_ms END), 0) / 1000,
+             NVL(SUM(CASE WHEN INSTR(c_work, ',' || phase || ',') > 0 AND status = 'DRYRUN'
+                          THEN rows_affected END), 0)
+        INTO v_planned, v_count_s, v_rows
+        FROM anon_meta.anon_step_log
+       WHERE run_id = p_dry_run_id AND phase NOT IN ('PREFLIGHT', 'METADATA', 'TRIGGERS');
+      v_plan_s := GREATEST(NVL((v_planned - v_started) * 86400, 0), 0);
+
+      SELECT MAX(r.run_id) INTO v_basis
+        FROM anon_meta.anon_run r
+       WHERE r.run_mode = 'EXECUTE' AND r.status = 'COMPLETED' AND r.db_name = v_db
+         AND (SELECT NVL(SUM(s.rows_affected), 0) FROM anon_meta.anon_step_log s
+               WHERE s.run_id = r.run_id AND s.status = 'OK'
+                 AND INSTR(c_work, ',' || s.phase || ',') > 0) >= 10000;
+
+      IF v_basis IS NOT NULL THEN
+         SELECT SUM(CASE WHEN status = 'OK' THEN rows_affected END), SUM(elapsed_ms) / 1000
+           INTO v_rows_e, v_work_e
+           FROM anon_meta.anon_step_log
+          WHERE run_id = v_basis AND INSTR(c_work, ',' || phase || ',') > 0;
+         v_write_s := v_rows * v_work_e / v_rows_e;
+         RETURN ROUND(v_plan_s + v_write_s + v_count_s) || '|R-' || LPAD(v_basis, 6, '0');
+      END IF;
+
+      v_write_s := v_count_s + v_rows / c_default_rps;
+      RETURN ROUND(v_plan_s + v_write_s + v_count_s) || '|default';
+   END estimate;
 
 END anon_engine;
 /

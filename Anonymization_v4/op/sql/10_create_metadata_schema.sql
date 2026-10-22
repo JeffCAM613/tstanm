@@ -4,12 +4,11 @@
 -- Creates the schema that holds the code mapping, the identity inventory, the
 -- loaded coverage inventory and the run log. Run as SYS.
 --
--- IDEMPOTENT. Existing objects are kept, not recreated. This is deliberate and
--- is the fix for the worst defect in v3, which dropped the whole schema at the
--- start of every run: that regenerated the code mapping with fresh random
--- values, so a run that failed partway left renamed rows whose original values
--- could no longer be recovered. Here the mapping survives, and a re-run resumes
--- against it.
+-- IDEMPOTENT. Existing objects are kept, never recreated. The code mapping is
+-- the only record of what the original values were: were it regenerated, a run
+-- that stopped partway would leave renamed rows whose originals could no
+-- longer be recovered. It survives every run, and a new run resumes against
+-- it.
 --
 -- Objects created by an earlier version are MIGRATED in place: missing columns
 -- are added and constraints are widened. Nothing that records an original value
@@ -61,6 +60,12 @@ GRANT CREATE PROCEDURE TO op;
 GRANT SELECT ANY TABLE, INSERT ANY TABLE, UPDATE ANY TABLE, DELETE ANY TABLE TO op;
 GRANT ALTER ANY TRIGGER TO op;
 
+-- Read access to the run's own session, for the live view: the progress of a
+-- long statement (v$session_longops) of the session whose module names the
+-- run. Nothing else in these views is read.
+GRANT SELECT ON sys.v_$session         TO op;
+GRANT SELECT ON sys.v_$session_longops TO op;
+
 -- ----------------------------------------------------------------------------
 -- code_map - old identifier to new identifier, per category.
 --
@@ -72,9 +77,10 @@ GRANT ALTER ANY TRIGGER TO op;
 -- party and a bank account at once, and each keeps its own replacement. The
 -- replacement is unique across every category.
 --
---   run_id      the run that allocated the row. NULL for a row allocated by a
---               version before the typed identity inventory - such a row is
---               reused only when it agrees with the identity's category.
+--   run_id      the run that allocated the row. NULL for a row allocated by an
+--               earlier version, before identities were recorded by domain -
+--               such a row is reused only when it agrees with the identity's
+--               category.
 --   id_applied  'Y' once a completed EXECUTE run has renamed this identity's
 --               identifiers. A row created only to mask labels or attributes
 --               stays NULL, so nothing downstream (EPF) renames with it.
@@ -152,9 +158,16 @@ END;
 -- ----------------------------------------------------------------------------
 -- anon_run - one row per run.
 --
---   config_json   the resolved switches and options
---   dataset_json  what the run found: database, schema and identity counts.
---                 Counts only - never an identifier.
+--   status          RUNNING, then COMPLETED; FAILED on an error; REFUSED when
+--                   the checks found the run unsafe (nothing changed);
+--                   CANCELLED when it was not confirmed; STOPPED when it was
+--                   asked to stop (Ctrl+C) and did so between two columns
+--   config_json     the resolved switches and options
+--   dataset_json    what the run found: database, schema and identity counts.
+--                   Counts only - never an identifier.
+--   tool_version    the version of the engine that made the run
+--   stop_requested  Y once a stop was asked for; the engine reads it between
+--                   two columns
 -- ----------------------------------------------------------------------------
 DECLARE
    v_exists NUMBER;
@@ -175,10 +188,13 @@ BEGIN
             config_json  VARCHAR2(2000),
             error_text   VARCHAR2(4000),
             dataset_json VARCHAR2(2000),
+            tool_version VARCHAR2(20),
+            stop_requested VARCHAR2(1),
             CONSTRAINT pk_anon_run PRIMARY KEY (run_id)
                USING INDEX TABLESPACE &tbs_index,
             CONSTRAINT ck_anon_run_mode   CHECK (run_mode IN ('EXECUTE','DRYRUN')),
-            CONSTRAINT ck_anon_run_status CHECK (status IN ('RUNNING','COMPLETED','FAILED'))
+            CONSTRAINT ck_anon_run_status CHECK (status IN ('RUNNING','COMPLETED','FAILED',
+                                                            'REFUSED','CANCELLED','STOPPED'))
          ) TABLESPACE &tbs_data ]';
       EXECUTE IMMEDIATE 'CREATE SEQUENCE anon_meta.seq_anon_run START WITH 1 INCREMENT BY 1 NOCACHE';
       DBMS_OUTPUT.PUT_LINE('  created anon_meta.anon_run');
@@ -201,7 +217,6 @@ END;
 --   NOOP      applied, 0 rows changed - already clean, or nothing matched.
 --             Worth looking at: on a column you expected to change, this is the
 --             signal that the column name is wrong or the mapping is empty.
---             v3 printed nothing at all in this case.
 --   SKIPPED   table or column does not exist here (ORA-00942 / ORA-00904)
 --   DISABLED  excluded by configuration
 --   REVIEW    n rows deliberately left unchanged because their role or domain
@@ -272,7 +287,8 @@ END;
 /
 
 -- ----------------------------------------------------------------------------
--- Typed identity model: migrations of the objects above, and the new tables.
+-- Migrations of the objects above, and the tables added since they were first
+-- created.
 --
 -- Everything in this block is idempotent: a column or table is only added when
 -- missing, so it upgrades a schema created by an earlier version and does
@@ -281,7 +297,8 @@ END;
 DECLARE
    -- Item declarations must all precede the first subprogram in a declarative
    -- section.
-   v_n NUMBER;
+   v_n    NUMBER;
+   v_cond VARCHAR2(4000);
 
    PROCEDURE add_column(p_table IN VARCHAR2, p_column IN VARCHAR2, p_definition IN VARCHAR2) IS
       v_n NUMBER;
@@ -317,11 +334,95 @@ DECLARE
 BEGIN
    add_column('code_map', 'run_id',     'NUMBER');
    add_column('code_map', 'id_applied', 'VARCHAR2(1)');
-   add_column('anon_run', 'dataset_json', 'VARCHAR2(2000)');
+   add_column('anon_run', 'dataset_json',   'VARCHAR2(2000)');
+   add_column('anon_run', 'tool_version',   'VARCHAR2(20)');
+   add_column('anon_run', 'stop_requested', 'VARCHAR2(1)');
+
+   -- The run statuses REFUSED, CANCELLED and STOPPED, on a table created with
+   -- RUNNING, COMPLETED and FAILED only.
+   SELECT MAX(search_condition_vc) INTO v_cond
+     FROM dba_constraints
+    WHERE owner = 'ANON_META' AND table_name = 'ANON_RUN' AND constraint_name = 'CK_ANON_RUN_STATUS';
+   IF v_cond IS NULL OR INSTR(v_cond, 'STOPPED') = 0 THEN
+      IF v_cond IS NOT NULL THEN
+         EXECUTE IMMEDIATE 'ALTER TABLE anon_meta.anon_run DROP CONSTRAINT ck_anon_run_status';
+      END IF;
+      EXECUTE IMMEDIATE q'[ALTER TABLE anon_meta.anon_run ADD CONSTRAINT ck_anon_run_status CHECK
+         (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'REFUSED', 'CANCELLED', 'STOPPED'))]';
+      DBMS_OUTPUT.PUT_LINE('  migrated anon_meta.anon_run: statuses REFUSED, CANCELLED and STOPPED');
+   END IF;
+
    -- Of the rows a CODE step changed (or a dry run would change), how many got
    -- an unclassified party's X_ value. Counts only; the run summary and the
    -- report add them up by table.
    add_column('anon_step_log', 'x_rows', 'NUMBER');
+
+   -- The order the rows were written in, from a sequence: the live view reads
+   -- only the rows after the last one it has shown.
+   add_column('anon_step_log', 'step_id', 'NUMBER');
+   SELECT COUNT(*) INTO v_n FROM dba_sequences WHERE sequence_owner = 'ANON_META' AND sequence_name = 'SEQ_STEP_LOG';
+   IF v_n = 0 THEN
+      EXECUTE IMMEDIATE 'CREATE SEQUENCE anon_meta.seq_step_log START WITH 1 INCREMENT BY 1 CACHE 100 ORDER';
+      DBMS_OUTPUT.PUT_LINE('  created anon_meta.seq_step_log');
+   END IF;
+   create_index('ix_step_log_step',
+      'CREATE INDEX anon_meta.ix_step_log_step ON anon_meta.anon_step_log(run_id, step_id)');
+
+   -- anon_progress - where a run is now. One row per run, rewritten by the
+   -- engine before each planning stage, table or column; read by the live
+   -- view in a second session while the run works.
+   --
+   --   phase           PLAN | MAPPING | NULL_OUT | CODE | LABELS | DONE
+   --   stage           what the engine does, in words
+   --   items_done      tables or columns of the phase done, of items_total
+   --   object_name     the table or column worked on now
+   --   weight_done     the same, weighed by the rows of their tables (the
+   --   weight_total    optimizer statistics), so that a bar moves with the
+   --   object_weight   work rather than with the number of small tables
+   create_table('anon_progress', q'[
+      CREATE TABLE anon_meta.anon_progress (
+         run_id          NUMBER        NOT NULL,
+         phase           VARCHAR2(20)  NOT NULL,
+         stage           VARCHAR2(100),
+         items_done      NUMBER,
+         items_total     NUMBER,
+         object_name     VARCHAR2(300),
+         object_weight   NUMBER,
+         weight_done     NUMBER,
+         weight_total    NUMBER,
+         phase_started   TIMESTAMP,
+         object_started  TIMESTAMP,
+         updated_at      TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+         CONSTRAINT pk_anon_progress PRIMARY KEY (run_id) USING INDEX TABLESPACE &tbs_index
+      )]');
+
+   -- anon_check - the checks a run makes before it changes anything, met or
+   -- not, by name. The run's screen and report show them as a table: what
+   -- was measured and, for one not met, what happens and what to do.
+   --
+   --   needed   REQUIRED - not met, the run does not start
+   --            OPTIONAL - not met, the run goes on and says so
+   --            INFO     - says what the run will do with what it found
+   --   status   MET | NOT_MET | NOTE (an INFO check that found something)
+   --   state    the short state shown in the table ("14 nodes")
+   --   measure  what was measured. Counts and column names only.
+   create_table('anon_check', q'[
+      CREATE TABLE anon_meta.anon_check (
+         run_id        NUMBER         NOT NULL,
+         seq           NUMBER         NOT NULL,
+         code          VARCHAR2(30)   NOT NULL,
+         title         VARCHAR2(100)  NOT NULL,
+         needed        VARCHAR2(10)   NOT NULL,
+         status        VARCHAR2(10)   NOT NULL,
+         state         VARCHAR2(60),
+         measure       VARCHAR2(1000),
+         what_happens  VARCHAR2(1000),
+         what_to_do    VARCHAR2(1000),
+         checked_at    TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+         CONSTRAINT pk_anon_check PRIMARY KEY (run_id, code) USING INDEX TABLESPACE &tbs_index,
+         CONSTRAINT ck_anon_check_needed CHECK (needed IN ('REQUIRED', 'OPTIONAL', 'INFO')),
+         CONSTRAINT ck_anon_check_status CHECK (status IN ('MET', 'NOT_MET', 'NOTE'))
+      )]');
 
    -- What the inventory's notes say about a column, in a form the engine and
    -- the verifier read directly. Filled by 21_validate_inventory.sql from the
@@ -426,8 +527,8 @@ BEGIN
    --
    -- Built by preflight from identity_inventory plus whatever new identities
    -- the run found. A dry run estimates against this plan and an EXECUTE run
-   -- applies it, so the two cannot disagree - and a dry run's figures no
-   -- longer depend on whatever an earlier run left in code_map.
+   -- applies it, so the two cannot disagree - and a dry run's figures do not
+   -- depend on whatever an earlier run left in code_map.
    --
    -- The plan of the latest completed EXECUTE run is kept: the verifier checks
    -- the result against it, because after the run the original values are
@@ -438,8 +539,6 @@ BEGIN
    --                    category only when master data changed since capture.
    --   map_status       EXISTING | NEW | NONE (no translation needed) |
    --                    CONFLICT | MISSING - the last two block the run
-   --   parent_role      no longer used: a structure.pere follows the parent
-   --                    node of its own tree (node_lookup). Kept for older runs.
    --   seen_renamed     Y when a master or node row of this identity already
    --                    holds its replacement - renamed by an earlier run on
    --                    this same data
@@ -462,7 +561,6 @@ BEGIN
          has_account_node       VARCHAR2(1),
          entity_overlap         VARCHAR2(1),
          class_now              VARCHAR2(20),
-         parent_role            VARCHAR2(10),
          seen_renamed           VARCHAR2(1),
          map_category           VARCHAR2(20),
          new_code               VARCHAR2(80),
@@ -575,20 +673,23 @@ BEGIN
 
    -- unclassified_reason - why a party is UNCLASSIFIED_PARTY (X_), in words.
    --
-   -- One row per x_reason: the general reason, what would let the data
-   -- classify the party, and a query that lists the parties of one run with
-   -- that reason (:run_id). The run output, the report and anyone querying
-   -- the metadata read the same text. Refreshed below on every run.
+   -- One row per x_reason: the reason in one line (brief) and in full (why),
+   -- what would let the data classify the party, and a query that lists the
+   -- parties of one run with that reason (:run_id). The run output, the
+   -- report and anyone querying the metadata read the same text. Refreshed
+   -- below on every run.
    create_table('unclassified_reason', q'[
       CREATE TABLE anon_meta.unclassified_reason (
          x_reason    VARCHAR2(30)   NOT NULL,
          sort_order  NUMBER         NOT NULL,
          label       VARCHAR2(40)   NOT NULL,
+         brief       VARCHAR2(200),
          why         VARCHAR2(1000) NOT NULL,
          fix         VARCHAR2(1000) NOT NULL,
          list_sql    VARCHAR2(4000) NOT NULL,
          CONSTRAINT pk_unclassified_reason PRIMARY KEY (x_reason) USING INDEX TABLESPACE &tbs_index
       )]');
+   add_column('unclassified_reason', 'brief', 'VARCHAR2(200)');
 
    -- reference_harvest - codes found only in references, per run.
    --
@@ -643,6 +744,7 @@ END;
 MERGE INTO anon_meta.unclassified_reason d
 USING (
    SELECT 'MISSING_MASTER' AS x_reason, 1 AS sort_order, 'missing master' AS label,
+          'the code is a party, but tiers has no row for it' AS brief,
           'The code is a party - a w_tiers node in the structure tree, a value in a party '
        || 'column, or a confirmed reference - but tiers has no row for it, so there is no '
        || 'flag_portefeuille to tell a portfolio from an entity or a counterparty. A code '
@@ -664,6 +766,7 @@ USING (
      FROM dual
    UNION ALL
    SELECT 'NO_STRUCTURE', 2, 'no structure',
+          'the tiers row has no structure node, and its flag is not N',
           'The tiers row has no node in the structure tree, and its flag_portefeuille is not N. '
        || 'Flagged N it would be an archived party, a counterparty (T_); but a portfolio (flag O) '
        || 'is told by its w_tiers node, and an empty or unknown flag says nothing. A '
@@ -679,6 +782,7 @@ USING (
      FROM dual
    UNION ALL
    SELECT 'NO_PARTY_SCREEN', 3, 'no party screen',
+          'the party has structure nodes, but none on the w_tiers screen',
           'The tiers row has structure nodes, but none on the w_tiers screen. A node on '
        || 'another screen, or a folder row with no screen, does not classify a party.',
           'Add a w_tiers node if it belongs in the party tree; otherwise leave it X_.',
@@ -693,6 +797,7 @@ USING (
      FROM dual
    UNION ALL
    SELECT 'UNKNOWN_FLAG', 4, 'unknown flag',
+          'flag_portefeuille is neither O nor N',
           'flag_portefeuille is neither O nor N - empty, another value, or different on two '
        || 'tiers rows with the same code - so it is not known whether the party is a portfolio.',
           'Set flag_portefeuille to O (portfolio) or N (entity or counterparty); remove a '
@@ -706,6 +811,7 @@ USING (
      FROM dual
    UNION ALL
    SELECT 'UNKNOWN_CLASSIFICATION', 5, 'unknown classification',
+          'flag N, but its w_tiers nodes have no classification',
           'flag_portefeuille is N, but every w_tiers node of the party has an empty structure '
        || 'classification - so it is neither an entity (Entite) nor a counterparty (another '
        || 'classification).',
@@ -723,10 +829,10 @@ USING (
      FROM dual
 ) s
 ON (d.x_reason = s.x_reason)
-WHEN MATCHED THEN UPDATE SET d.sort_order = s.sort_order, d.label = s.label, d.why = s.why,
-                             d.fix = s.fix, d.list_sql = REPLACE(s.list_sql, CHR(13))
-WHEN NOT MATCHED THEN INSERT (x_reason, sort_order, label, why, fix, list_sql)
-                      VALUES (s.x_reason, s.sort_order, s.label, s.why, s.fix,
+WHEN MATCHED THEN UPDATE SET d.sort_order = s.sort_order, d.label = s.label, d.brief = s.brief,
+                             d.why = s.why, d.fix = s.fix, d.list_sql = REPLACE(s.list_sql, CHR(13))
+WHEN NOT MATCHED THEN INSERT (x_reason, sort_order, label, brief, why, fix, list_sql)
+                      VALUES (s.x_reason, s.sort_order, s.label, s.brief, s.why, s.fix,
                               REPLACE(s.list_sql, CHR(13)));
 COMMIT;
 
@@ -738,8 +844,7 @@ COMMIT;
 -- DELETE takes a row lock per row, generates undo, and has no timeout: if
 -- anything holds the table the statement waits forever, the run looks hung, and
 -- if that session is then killed the client reports ORA-03114, which reads as a
--- network fault. On TANM7881 a 0-row DELETE succeeded and every 579-row DELETE
--- killed the session.
+-- network fault.
 --
 -- TRUNCATE is DDL: instant, no undo, no row locks, and it resets the table and
 -- its index. If the table is already held it fails immediately with ORA-00054
@@ -797,10 +902,9 @@ END;
 -- ----------------------------------------------------------------------------
 -- ref_tables_modif - compatibility view for the EPF pipeline.
 --
--- EPF phase B reads atrace.ref_tables_modif to cascade OP renames into
--- OPPAYMENTS. Until EPF is ported (see epf/README.md) it still expects that
--- schema and shape, so expose the mapping in the old form rather than making
--- the EPF scripts a special case in the engine.
+-- The EPF anonymization reads atrace.ref_tables_modif to carry the OP renames
+-- into OPPAYMENTS. It expects that schema and shape, so the mapping is exposed
+-- in that form rather than making the EPF scripts a special case here.
 --
 -- Exactly ONE row per identity - its own translation, typed by domain. EPF looks
 -- values up with scalar subqueries per (table_name, old_value), which raise
@@ -860,8 +964,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.verify_result      TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.verify_key         TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.reference_harvest  TO op;
 GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.node_lookup        TO op;
+GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.anon_progress      TO op;
+GRANT SELECT, INSERT, UPDATE, DELETE ON anon_meta.anon_check         TO op;
 GRANT SELECT                          ON anon_meta.unclassified_reason TO op;
 GRANT SELECT                          ON anon_meta.seq_anon_run      TO op;
+GRANT SELECT                          ON anon_meta.seq_step_log      TO op;
 GRANT SELECT                          ON atrace.ref_tables_modif     TO op;
 
 PROMPT === Metadata schema ready ===

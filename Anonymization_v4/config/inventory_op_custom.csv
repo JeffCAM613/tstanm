@@ -1,5 +1,5 @@
 # ============================================================================
-# KTP OP Anonymization - Site-Specific Coverage Additions
+# OP Anonymization - Site-specific coverage
 # ============================================================================
 # Extend anonymization coverage WITHOUT editing inventory_op.csv or any SQL.
 # Rows here are merged with inventory_op.csv at load time and treated
@@ -43,7 +43,7 @@
 #               one category. Use PARTY to cover every party - an unclassified
 #               (X_) party is covered only by PARTY or UNCLASSIFIED_PARTY.
 #
-# ANY is no longer accepted - name the domain.
+# ANY is not accepted - name the domain.
 #
 # ----------------------------------------------------------------------------
 # HOW TO CHOOSE
@@ -68,38 +68,28 @@
 # some KTP versions.
 #
 # ALWAYS run a dry run after editing this file:
-#     run_op_anonymization.bat /dryrun
-# It reports, per row, whether the object was found, whether generated codes fit
-# the column width, and how many rows would change.
+#     op\run_op_anonymization.bat /dryrun
+# It checks every row - whether the object is in the database, whether the
+# replacements fit the column - and counts the rows a run would change.
 # ============================================================================
 
 table_name,column_name,rule,category,source,notes
 
 # ############################################################################
-# ############################################################################
 # ##                                                                        ##
-# ##   TRANSFERRED FROM inventory_op.csv ON 2026-08-10                      ##
+# ##   PERSONAL ATTRIBUTES OF PARTIES AND BANK ACCOUNTS                     ##
 # ##                                                                        ##
-# ##   PENDING REVIEW WITH THE ORIGINAL DEVELOPER                           ##
-# ##   See docs/08_open_questions.md, item 1.                               ##
-# ##                                                                        ##
-# ############################################################################
 # ############################################################################
 #
 # WHAT THESE ARE
-#   The per-entity PII attribute columns. In the original package these were
-#   chosen through five free-form slots per category in config.ini:
-#
-#       Ent1=telephone   Ent2=fax   Ent3=email_adress   Ent4=nom_pp ...
-#
-#   Each slot held a COLUMN NAME to overwrite with that entity's anonymized
-#   code, or 'n' to skip it. They were a SITE CHOICE, not vendor behaviour -
-#   which is why they live here rather than in the shipped inventory.
+#   The contact, personal and grouping columns of tiers and compte_banque that
+#   hold personal data at this site. Each is overwritten with its owner's
+#   replacement (SELF_CODE); an empty field stays empty. Which of these
+#   columns hold personal data is a choice of each site, which is why they are
+#   listed here rather than in the shipped inventory.
 #
 # STATUS
-#   ACTIVE. Moving them changed their location and nothing else; the columns
-#   below are exactly what the old config.ini selected, so behaviour is
-#   unchanged from previous runs.
+#   ACTIVE.
 #
 # HOW TO MAKE ONE OPTIONAL
 #   Comment out its line. That is the per-column control.
@@ -108,57 +98,50 @@ table_name,column_name,rule,category,source,notes
 #       ANONYMIZE_ENTITY_ATTRIBUTES=n
 #       ANONYMIZE_UNCLASSIFIED_PARTY_ATTRIBUTES=n
 #
-# NOT MOVED
-#   tiers.adresse1-adresse5 stayed in inventory_op.csv. They were never one of
-#   the five slots - the vendor package always cleared them as part of the
-#   description flag, so they are vendor default rather than a site choice.
+# NOT HERE
+#   tiers.adresse1-adresse5 are in inventory_op.csv: an address is personal
+#   data at every site.
 #
-# CHANGED 2026-10-20 - every tiers row below now applies to EVERY party
-#   Each was limited to the one category whose old slot selected it: phone and
-#   names to entities only, birth department to portfolios only, telex to
-#   counterparties only. A party the data cannot classify - UNCLASSIFIED_PARTY,
-#   X_ - matched none of them, so its contact details were never masked. Its
-#   category is unknown, so only a rule covering every party protects it; and
-#   a rule is per column, so it covers the other categories too. Each owner is
-#   still gated by its own category's ATTRIBUTES switch.
-#   To return a column to one category, change PARTY back to that category -
-#   X_ owners then keep that column's real value.
+# EVERY PARTY
+#   The tiers rows below apply to every party (category PARTY), unclassified
+#   (X_) parties included: a party whose category the data cannot establish
+#   has contact details like any other, and only a rule covering every party
+#   protects them. Each owner is still gated by its own category's ATTRIBUTES
+#   switch. To limit a column to one category, change PARTY to that category -
+#   the owners of the other categories, X_ included, then keep its value.
 # ----------------------------------------------------------------------------
 
-# --- Contact and personal details   (was Ent1=telephone Ent2=fax Ent3=email_adress Ent4=nom_pp Ent5=prenom_pp)
-tiers,telephone,SELF_CODE,PARTY,CUSTOM,was Ent1 - entities only until 2026-10-20
-tiers,fax,SELF_CODE,PARTY,CUSTOM,was Ent2 - entities only until 2026-10-20
-tiers,email_adress,SELF_CODE,PARTY,CUSTOM,was Ent3 - vendor spelling not a typo
-tiers,nom_pp,SELF_CODE,PARTY,CUSTOM,was Ent4 - surname of a natural person
-tiers,prenom_pp,SELF_CODE,PARTY,CUSTOM,was Ent5 - given name of a natural person
+# --- Contact and personal details
+tiers,telephone,SELF_CODE,PARTY,CUSTOM,phone number
+tiers,fax,SELF_CODE,PARTY,CUSTOM,fax number
+tiers,email_adress,SELF_CODE,PARTY,CUSTOM,email address - the column is spelt this way
+tiers,nom_pp,SELF_CODE,PARTY,CUSTOM,surname of a natural person
+tiers,prenom_pp,SELF_CODE,PARTY,CUSTOM,given name of a natural person
 
-# --- Grouping and personal attributes   (was Fold1=groupe_1 Fold2=groupe_2 Fold3=groupe_3 Fold4=flag_pp Fold5=dpt_naissance)
-tiers,groupe_1,SELF_CODE,PARTY,CUSTOM,was Fold1 - portfolios only until 2026-10-20
-tiers,groupe_2,SELF_CODE,PARTY,CUSTOM,was Fold2 - portfolios only until 2026-10-20
-tiers,groupe_3,SELF_CODE,PARTY,CUSTOM,was Fold3 - portfolios only until 2026-10-20
-# EXCLUDED 2026-10-20 - tiers.flag_pp is the natural-person checkbox (O/N),
-# VARCHAR2(1). It says whether a party is a person; it identifies no one, and
-# a one-character column cannot hold any replacement - listed, preflight would
-# stop the run. It used to be skipped silently by a checkbox rule that no
-# longer exists; the decision is now here, where it can be seen and reversed.
-# tiers,flag_pp,SELF_CODE,PARTY,CUSTOM,was Fold4 - natural-person flag
-tiers,dpt_naissance,SELF_CODE,PARTY,CUSTOM,was Fold5 - department of birth
+# --- Grouping and personal attributes
+tiers,groupe_1,SELF_CODE,PARTY,CUSTOM,grouping
+tiers,groupe_2,SELF_CODE,PARTY,CUSTOM,grouping
+tiers,groupe_3,SELF_CODE,PARTY,CUSTOM,grouping
+# EXCLUDED - tiers.flag_pp is the natural-person checkbox (O/N), VARCHAR2(1).
+# It says whether a party is a person; it identifies no one, and a
+# one-character column can hold no replacement - listed, the checks would stop
+# the run. The decision is here, where it can be seen and reversed.
+# tiers,flag_pp,SELF_CODE,PARTY,CUSTOM,natural-person flag
+tiers,dpt_naissance,SELF_CODE,PARTY,CUSTOM,department of birth
 
-# --- Classification attributes   (was Tier1=sector Tier2=seniority Tier3=telex Tier4=type_interne Tier5=n)
-tiers,sector,SELF_CODE,PARTY,CUSTOM,was Tier1 - counterparties only until 2026-10-20
-tiers,seniority,SELF_CODE,PARTY,CUSTOM,was Tier2 - counterparties only until 2026-10-20
-tiers,telex,SELF_CODE,PARTY,CUSTOM,was Tier3 - counterparties only until 2026-10-20
-tiers,type_interne,SELF_CODE,PARTY,CUSTOM,was Tier4 - counterparties only until 2026-10-20
-# Tier5 was 'n' - no fifth column was selected
+# --- Classification attributes
+tiers,sector,SELF_CODE,PARTY,CUSTOM,sector
+tiers,seniority,SELF_CODE,PARTY,CUSTOM,seniority
+tiers,telex,SELF_CODE,PARTY,CUSTOM,telex
+tiers,type_interne,SELF_CODE,PARTY,CUSTOM,internal type
 
-# --- BANK ACCOUNT: grouping attributes             (was Cpte1=groupe_1 Cpte2=groupe_2 Cpte3=groupe_3 Cpte4=n Cpte5=n)
-compte_banque,groupe_1,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte1
-compte_banque,groupe_2,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte2
-compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte3
-# Cpte4 and Cpte5 were 'n' - no fourth or fifth column was selected
+# --- Bank accounts: grouping attributes
+compte_banque,groupe_1,SELF_CODE,BANK_ACCOUNT,CUSTOM,grouping
+compte_banque,groupe_2,SELF_CODE,BANK_ACCOUNT,CUSTOM,grouping
+compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,grouping
 
 # ############################################################################
-# ##   END OF TRANSFERRED ROWS                                              ##
+# ##   END OF PERSONAL ATTRIBUTES                                           ##
 # ############################################################################
 
 # ----------------------------------------------------------------------------
@@ -185,88 +168,39 @@ compte_banque,groupe_3,SELF_CODE,BANK_ACCOUNT,CUSTOM,was Cpte3
 # ADD YOUR ROWS BELOW THIS LINE
 # ----------------------------------------------------------------------------
 
-# ----------------------------------------------------------------------------
-# CATEGORY CORRECTION - param_cpta_reg_gen.compte_ana
-# ----------------------------------------------------------------------------
-# Found on TANM7881, 2026-08-13, after a full run verified clean. Kept as the
-# record of why the shipped row is now MIXED.
-#
-# inventory_op.csv declared this column CODE / BANK_ACCOUNT, inherited from v3's
-#   merge_codes('param_cpta_reg_gen','compte_ana', p_entity_type => 'COMPTE')
-#
-# so the engine only ever substituted bank-account codes into it. Five rows were
-# left holding original identifiers of another category - live client data.
-#
-# "compte_ana" is compte analytique: an analytical / cost-centre account, not a
-# bank account. v3 classified it from the word "compte" in the name.
-#
-# This file overrode it to ANY until 2026-10-20. ANY no longer exists: the
-# shipped inventory now declares the column MIXED - a reviewed field holding
-# party AND account codes - so the override is retired. A value that is both a
-# party and an account is left unchanged there and reported for review, where
-# ANY silently gave it the party's replacement.
-# param_cpta_reg_gen,compte_ana,CODE,ANY,CUSTOM,was BANK_ACCOUNT - left 5 originals on TANM7881
-# ----------------------------------------------------------------------------
-
 
 # ============================================================================
-# DISCOVERED FROM EPF ANONYMIZATION
+# NOT COVERED YET - BIC components and bank account numbers
 # ============================================================================
-# Columns in the OP schema that the EPF scripts write to, and that this
-# inventory does not cover. Found while planning the v4 EPF port.
-#
-# SOURCE FILE TO REVIEW:
-#   Anonymization_EPF/sql/anonymize_epf_phase9_op_bic_bban.sql
-#
-# Phase 9 exists because OP never anonymized these. It reaches across into
-# op.tiers and op.compte_banque after EPF has built its BIC component map -
-# which means columns OP owns are anonymized by EPF, and OP's own verifier is
-# blind to them. In v4 they belong here.
-#
-# ----------------------------------------------------------------------------
-# STATUS: NOT YET ACTIVE - every line below is commented out.
-#
-# They need two things the engine does not have yet:
+# These columns of OP are anonymized by the EPF anonymization, after it has
+# built its mapping of BIC components; this inventory does not cover them.
+# They need two rules the engine does not have:
 #   COMPOSITE  a BIC is bank(4) + country(2) + location(2) + branch(3), and
-#              each component must map consistently everywhere it appears
-#   DERIVE     a bank account number must stay format-valid, so it cannot be
-#              emptied or replaced with a code - it has to be synthesised
+#              each component must map the same way everywhere it appears
+#   DERIVE     an account number must stay format-valid, so it cannot be
+#              emptied or replaced with a code - it has to be generated
+# The lines stay commented out until the engine has these rules. Once active,
+# they are to be gated by switches that are off by default, so that a site
+# that anonymizes only OP is not surprised by them.
 #
-# They are also to be gated off by default once active, so a site that runs
-# only OP is not surprised by newly-anonymized BIC and account data.
-# Uncomment when the engine supports the rules and the flag column.
-# ----------------------------------------------------------------------------
+# BIC components on op.tiers. 'XXX' in branch_code means head office and is
+# kept.
+# tiers,bank_code,COMPOSITE,BIC_BANK,CUSTOM,BIC bank code
+# tiers,iso_country_code,COMPOSITE,BIC_COUNTRY,CUSTOM,BIC country code
+# tiers,location_code,COMPOSITE,BIC_LOCATION,CUSTOM,BIC location code
+# tiers,branch_code,COMPOSITE,BIC_BRANCH,CUSTOM,BIC branch code - XXX kept
 #
-# BIC components on op.tiers          (phase 9 step 2, ~267 rows)
-#   branch_code 'XXX' means head office and is preserved by the EPF script.
-# tiers,bank_code,COMPOSITE,BIC_BANK,CUSTOM,ANONYMIZE_BIC - from EPF phase 9
-# tiers,iso_country_code,COMPOSITE,BIC_COUNTRY,CUSTOM,ANONYMIZE_BIC - from EPF phase 9
-# tiers,location_code,COMPOSITE,BIC_LOCATION,CUSTOM,ANONYMIZE_BIC - from EPF phase 9
-# tiers,branch_code,COMPOSITE,BIC_BRANCH,CUSTOM,ANONYMIZE_BIC - preserve XXX head office
+# Account numbers on op.compte_banque.
+# compte_banque,numero_banque,DERIVE,ACCOUNT,CUSTOM,bank number
+# compte_banque,numero_guichet,DERIVE,ACCOUNT,CUSTOM,branch number
+# compte_banque,numero_compte,DERIVE,ACCOUNT,CUSTOM,account number
+# compte_banque,numero_cle,DERIVE,ACCOUNT,CUSTOM,account key
+# compte_banque,cle_iban,DERIVE,ACCOUNT,CUSTOM,IBAN key
+# compte_banque,swift_tag25,NULL_OUT,NONE,CUSTOM,
 #
-# Account numbers on op.compte_banque (phase 9 step 3, ~1192 rows)
-#   The EPF script derives these with ORA_HASH(code, N). N is max_bucket, not
-#   a seed - ORA_HASH(code,1) returns 0 or 1 - so its "synthetic" bank and
-#   branch numbers take two and three distinct values across the whole table.
-#   Do not port that expression.
-# compte_banque,numero_banque,DERIVE,ACCOUNT,CUSTOM,ANONYMIZE_ACCOUNT_NUMBERS - from EPF phase 9
-# compte_banque,numero_guichet,DERIVE,ACCOUNT,CUSTOM,ANONYMIZE_ACCOUNT_NUMBERS - from EPF phase 9
-# compte_banque,numero_compte,DERIVE,ACCOUNT,CUSTOM,ANONYMIZE_ACCOUNT_NUMBERS - from EPF phase 9
-# compte_banque,numero_cle,DERIVE,ACCOUNT,CUSTOM,ANONYMIZE_ACCOUNT_NUMBERS - from EPF phase 9
-# compte_banque,cle_iban,DERIVE,ACCOUNT,CUSTOM,ANONYMIZE_ACCOUNT_NUMBERS - from EPF phase 9
-# compte_banque,swift_tag25,NULL_OUT,NONE,CUSTOM,EPF phase 9 sets this to NULL
-#
-# ----------------------------------------------------------------------------
-# AND ONE THAT IS ALREADY IN THE SHIPPED INVENTORY BUT DOES NOTHING
-#
-# inventory_op.csv declares compte_banque.code_bban as CODE,BANK_ACCOUNT. A
-# BBAN is a 23-character account string, never a compte_banque.code, so the
-# lookup cannot match. The TANM7881 run of 2026-08-31 reported it as
-# "NOOP - no rows matched", which is correct behaviour for a rule that can
-# never apply. The column still holds real account numbers.
-#
-# It reads as covered, is counted as covered, and is not. Sitting among 236
-# other NOOPs is why nobody looked. The fix is DERIVE, alongside the other
-# account columns above - not a category change.
-# compte_banque,code_bban,DERIVE,ACCOUNT,CUSTOM,was CODE BANK_ACCOUNT - never matched
+# compte_banque.code_bban is listed in inventory_op.csv as CODE,BANK_ACCOUNT,
+# but a BBAN is a 23-character account string, never a compte_banque code: the
+# rule matches no row, and the column keeps its account numbers. It needs the
+# DERIVE rule too.
+# compte_banque,code_bban,DERIVE,ACCOUNT,CUSTOM,account number string
 # ----------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # ============================================================================
-# KTP OP Anonymization - Coverage Inventory
+# OP Anonymization - Coverage inventory
 # ============================================================================
 # THE SINGLE SOURCE OF TRUTH for what gets anonymized.
 #
@@ -97,15 +97,13 @@
 # anything changes. A site changes a column's options by repeating its line in
 # inventory_op_custom.csv.
 #
-# ANY is no longer accepted: it meant "whichever category's mapping matches the
-# text", which is how a party received a bank account's replacement.
+# ANY is not accepted: every CODE column says which domain it holds.
 #
-# HOW EACH COLUMN WAS TYPED (2026-10-20). From two independent sources: which
-# branch of the original vendor package (02pack_anonym_number.sql) updated the
-# column - the party branches, the account branch, or both - and whether v3
-# restricted it to bank accounts. Not from the column name.
-#   party branches only, or a v4 addition naming a party ........ PARTY
-#   account branch only, or restricted to accounts by v3 ......... BANK_ACCOUNT
+# HOW EACH COLUMN IS TYPED. From what the original anonymization package
+# (02pack_anonym_number.sql) wrote in it - party codes, bank-account codes, or
+# both - and from review. Not from the column name.
+#   party codes only, or a column that names a party ............ PARTY
+#   bank-account codes only, or reviewed as bank accounts ........ BANK_ACCOUNT
 #   both, or a known analytical field ............................ MIXED
 #
 # ----------------------------------------------------------------------------
@@ -183,8 +181,8 @@ compte_banque,compte_previs_glob,CODE,BANK_ACCOUNT,BASE,
 # Small tables holding rules, mappings and settings that reference entities.
 # ============================================================================
 param_marge_titre,entite,CODE,PARTY,BASE,
-ccp_breakdown,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
-clearing_member_breakdown,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+ccp_breakdown,clearing_member,CODE,MIXED,BASE,MIXED - holds party AND bank-account codes
+clearing_member_breakdown,clearing_member,CODE,MIXED,BASE,MIXED - holds party AND bank-account codes
 budget_filtre,entite,CODE,PARTY,BASE,
 budget_regle,entite,CODE,PARTY,BASE,
 compte_devise,entite,CODE,PARTY,BASE,
@@ -243,7 +241,7 @@ param_bafi_cpt,entite,CODE,PARTY,BASE,
 param_clonage,por_maitre,CODE,PARTY,BASE,
 param_clonage,por_clone,CODE,PARTY,BASE,
 param_cpta_reg_gen,portefeuille,CODE,PARTY,BASE,
-param_cpta_reg_gen,compte_ana,CODE,MIXED,BASE,MIXED - analytical account. Held party codes on TANM7881 (was BANK_ACCOUNT)
+param_cpta_reg_gen,compte_ana,CODE,MIXED,BASE,MIXED - analytical account: holds party codes as well as account codes
 param_cpta_reg_ven,banque,CODE,PARTY,BASE,
 param_cpta_reg_ven,entite,CODE,PARTY,BASE,
 param_cpta_reg_ven,portefeuille,CODE,PARTY,BASE,
@@ -252,7 +250,7 @@ param_date,portefeuille,CODE,PARTY,BASE,
 param_date,contrepartie,CODE,PARTY,BASE,
 param_effet_paye,compte,CODE,BANK_ACCOUNT,BASE,
 param_effet_recu,compte,CODE,BANK_ACCOUNT,BASE,
-param_fiche_val_detail,code,CODE,BANK_ACCOUNT,BASE,[only-where: code_tableau in param_fiche_en_valeur.code where type = FicValComp] Only account reports list bank accounts - the others list cash-flow posts. Account branch only in the vendor package (was ANY)
+param_fiche_val_detail,code,CODE,BANK_ACCOUNT,BASE,[only-where: code_tableau in param_fiche_en_valeur.code where type = FicValComp] Only account reports list bank accounts - the others list cash-flow posts
 param_garanti_taux,assureur,CODE,PARTY,BASE,
 param_net_reg,compte_comp,CODE,BANK_ACCOUNT,BASE,
 param_net_reg,compte_pivot,CODE,BANK_ACCOUNT,BASE,
@@ -289,7 +287,7 @@ titre,emetteur,CODE,PARTY,BASE,
 titre,bafi_garant,CODE,PARTY,BASE,
 titre,depositaire,CODE,PARTY,BASE,
 titre,domiciliataire,CODE,PARTY,BASE,
-val_bank_account,code,CODE,BANK_ACCOUNT,BASE,Restricted to accounts by v3 - the vendor package wrote party values (copy of its party block)
+val_bank_account,code,CODE,BANK_ACCOUNT,BASE,Bank-account codes - the original package also wrote party codes here
 val_affilied_code,code_ref,CODE,PARTY,BASE,
 val_third_party,adresse1,CODE,PARTY,BASE,
 val_third_party,code,CODE,PARTY,BASE,
@@ -305,13 +303,11 @@ ventiler_corresp,banque,CODE,PARTY,BASE,
 ventiler_corresp,contrepartie,CODE,PARTY,BASE,
 ventiler_corresp,correspondant_1,CODE,PARTY,BASE,
 ventiler_corresp,correspondant_2,CODE,PARTY,BASE,
-# EXCLUDED 2026-10-20 - a one-character discriminator, not an identifier.
-# VARCHAR2(1) on TANM7881, where identifiers are 4 and 8 characters: it says
-# whether the neighbouring column holds a tiers or an entity. It was listed
-# only because v3 copied every vendor update - and it was skipped silently by
-# a checkbox rule that no longer exists. Listed, a one-character column cannot
-# hold any replacement and preflight would stop the run; the decision belongs
-# here, where it can be seen and reversed.
+# EXCLUDED - a one-character discriminator, not an identifier. VARCHAR2(1),
+# where identifiers are longer: it says whether the neighbouring column holds
+# a tiers or an entity. Listed, a one-character column could hold no
+# replacement and the checks would stop the run; the decision belongs here,
+# where it can be seen and reversed.
 # ventiler_corresp_bqe,tiers_entite,CODE,PARTY,BASE,discriminator - not an identifier
 ventiler_corresp_bqe,contrepartie,CODE,PARTY,BASE,
 ventiler_corresp_bqe,correspondant_1,CODE,PARTY,BASE,
@@ -323,11 +319,11 @@ ventiler_reg_liv,depositaire,CODE,PARTY,BASE,
 ventiler_reg_liv,contrepartie,CODE,PARTY,BASE,
 ventiler_reg_liv,portefeuille,CODE,PARTY,BASE,
 vue_affilie_tiers,code_ref,CODE,PARTY,BASE,
-vue_affilie_compte,code_ref,CODE,BANK_ACCOUNT,BASE,Account branch only in the vendor package (was ANY)
-ventiler_compte,valeur_1,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
-ventiler_compte,valeur_2,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
-ventiler_compte,valeur_3,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
-ventiler_compte,valeur_4,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: the vendor package wrote every category here. Each breakdown holds one kind
+vue_affilie_compte,code_ref,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+ventiler_compte,valeur_1,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: party or bank-account codes. Each breakdown holds one kind
+ventiler_compte,valeur_2,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: party or bank-account codes. Each breakdown holds one kind
+ventiler_compte,valeur_3,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: party or bank-account codes. Each breakdown holds one kind
+ventiler_compte,valeur_4,CODE,MIXED,BASE,[group: code] MIXED - a breakdown value: party or bank-account codes. Each breakdown holds one kind
 virement_compte,compte,CODE,BANK_ACCOUNT,BASE,
 
 # ============================================================================
@@ -377,9 +373,9 @@ histo_matiere,portefeuille,CODE,PARTY,BASE,
 histo_mouv_solde,compte,CODE,BANK_ACCOUNT,BASE,
 histo_mouv_titre_solde,compensateur,CODE,PARTY,BASE,
 histo_mouvement,entite,CODE,PARTY,BASE,
-histo_mouvement,compte,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_mouvement,compte_contrepartie,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+histo_mouvement,compte,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_mouvement,compte_contrepartie,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_operation,clearing_member,CODE,MIXED,BASE,MIXED - holds party AND bank-account codes
 histo_operation,entite,CODE,PARTY,BASE,
 histo_operation,contrepartie,CODE,PARTY,BASE,
 histo_operation,compensateur,CODE,PARTY,BASE,
@@ -395,12 +391,12 @@ histo_operation,corresp_receiver2,CODE,PARTY,BASE,
 histo_operation,corresp_sender1,CODE,PARTY,BASE,
 histo_operation,corresp_sender2,CODE,PARTY,BASE,
 histo_operation,portefeuille_deposit,CODE,PARTY,BASE,
-histo_operation,compte_entite,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,compte_tiers,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,compte_filiale,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,compte_tiers_2,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,compte_entite_2,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_operation,tiers_iban_compte,CODE,BANK_ACCOUNT,BASE,[no-harvest] IBAN or account numbers - not compte_banque codes. Account branch only and restricted by v3 (was ANY)
+histo_operation,compte_entite,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_operation,compte_tiers,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_operation,compte_filiale,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_operation,compte_tiers_2,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_operation,compte_entite_2,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_operation,tiers_iban_compte,CODE,BANK_ACCOUNT,BASE,[no-harvest] IBAN or account numbers - not compte_banque codes
 histo_parapheur,filiale,CODE,PARTY,BASE,
 histo_parapheur_det,filiale,CODE,PARTY,BASE,
 histo_position_tr,entite,CODE,PARTY,BASE,
@@ -421,8 +417,8 @@ histo_reglement,corresp_receiver2,CODE,PARTY,BASE,
 histo_reglement,corresp_sender1,CODE,PARTY,BASE,
 histo_reglement,corresp_sender2,CODE,PARTY,BASE,
 histo_reglement,portefeuille,CODE,PARTY,BASE,
-histo_reglement,compte,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
-histo_reglement,cpty_account,CODE,BANK_ACCOUNT,BASE,Account branch only and restricted by v3 (was ANY)
+histo_reglement,compte,CODE,BANK_ACCOUNT,BASE,Bank-account codes
+histo_reglement,cpty_account,CODE,BANK_ACCOUNT,BASE,Bank-account codes
 histo_titre_solde,compensateur,CODE,PARTY,BASE,
 histo_titre_solde,portefeuille,CODE,PARTY,BASE,
 
@@ -437,7 +433,7 @@ import_evenement,cpty_corresp1,CODE,PARTY,BASE,
 import_evenement,cpty_corresp2,CODE,PARTY,BASE,
 import_evenement,entity_corresp1,CODE,PARTY,BASE,
 import_evenement,entity_corresp2,CODE,PARTY,BASE,
-import_operation,clearing_member,CODE,MIXED,BASE,MIXED - the vendor package wrote party AND account values here
+import_operation,clearing_member,CODE,MIXED,BASE,MIXED - holds party AND bank-account codes
 import_operation,entite,CODE,PARTY,BASE,
 import_operation,contrepartie,CODE,PARTY,BASE,
 import_operation,compensateur,CODE,PARTY,BASE,
@@ -507,25 +503,21 @@ val_security_account,contrepartie,CODE,PARTY,BASE,
 val_ssi_account,portefeuille,CODE,PARTY,BASE,
 val_ssi_account,depositaire,CODE,PARTY,BASE,
 val_ssi_account,compte,CODE,BANK_ACCOUNT,BASE,
-# EXCLUDED 2026-10-20 - a one-character discriminator, not an identifier.
-# VARCHAR2(1) on TANM7881, where identifiers are 4 and 8 characters: it says
-# whether the neighbouring column holds a tiers or an entity. It was listed
-# only because v3 copied every vendor update - and it was skipped silently by
-# a checkbox rule that no longer exists. Listed, a one-character column cannot
-# hold any replacement and preflight would stop the run; the decision belongs
-# here, where it can be seen and reversed.
+# EXCLUDED - a one-character discriminator, not an identifier. VARCHAR2(1),
+# where identifiers are longer: it says whether the neighbouring column holds
+# a tiers or an entity. Listed, a one-character column could hold no
+# replacement and the checks would stop the run; the decision belongs here,
+# where it can be seen and reversed.
 # val_ssi_account,tiers_entite,CODE,PARTY,BASE,discriminator - not an identifier
 val_ssi_corresp,banque,CODE,PARTY,BASE,
 val_ssi_corresp,contrepartie,CODE,PARTY,BASE,
 val_ssi_corresp,correspondant_1,CODE,PARTY,BASE,
 val_ssi_corresp,correspondant_2,CODE,PARTY,BASE,
-# EXCLUDED 2026-10-20 - a one-character discriminator, not an identifier.
-# VARCHAR2(1) on TANM7881, where identifiers are 4 and 8 characters: it says
-# whether the neighbouring column holds a tiers or an entity. It was listed
-# only because v3 copied every vendor update - and it was skipped silently by
-# a checkbox rule that no longer exists. Listed, a one-character column cannot
-# hold any replacement and preflight would stop the run; the decision belongs
-# here, where it can be seen and reversed.
+# EXCLUDED - a one-character discriminator, not an identifier. VARCHAR2(1),
+# where identifiers are longer: it says whether the neighbouring column holds
+# a tiers or an entity. Listed, a one-character column could hold no
+# replacement and the checks would stop the run; the decision belongs here,
+# where it can be seen and reversed.
 # val_ssi_corresp,tiers_entite,CODE,PARTY,BASE,discriminator - not an identifier
 val_third_party_limit,entite,CODE,PARTY,BASE,
 val_third_party_limit,tiers,CODE,PARTY,BASE,
@@ -717,15 +709,12 @@ histo_pricing_groupe,description,NULL_OUT,NONE,BASE,
 histo_operation,tiers_libelle,NULL_OUT,NONE,BASE,Counterparty name held as free text
 import_operation,tiers_libelle,NULL_OUT,NONE,BASE,Counterparty name held as free text
 # tiers_domicile is the beneficiary's bank and branch domiciliation - free text
-# beside tiers_libelle in a payment order. Was CODE,PARTY (as in the vendor
-# package): only the rows that happened to equal a party code were renamed, a
-# few that equalled a bank-account code were flagged, and most - names of banks
-# and branches - stayed in clear. Emptied, as tiers_libelle is (2026-10-22).
+# beside tiers_libelle in a payment order: mostly names of banks and
+# branches, only now and then equal to a code. Emptied, as tiers_libelle is.
 histo_operation,tiers_domicile,NULL_OUT,NONE,BASE,Bank and branch domiciliation held as free text
 import_operation,tiers_domicile,NULL_OUT,NONE,BASE,Bank and branch domiciliation held as free text
 # The label of each line of a valuation report: on a report of bank accounts,
-# the account's name next to its code. Neither the vendor package nor v4 run 1
-# touched it (2026-10-22).
+# the account's name next to its code.
 param_fiche_val_detail,description,NULL_OUT,NONE,BASE,Report line label - a bank account's name on account reports
 import_operation,description,NULL_OUT,NONE,BASE,May contain real entity names
 utilisateur,description,NULL_OUT,NONE,BASE,OP application user description
@@ -820,8 +809,6 @@ uaa_users,phone_number,NULL_OUT,NONE,BASE,
 # screens and reports stay readable: a counterparty shows as T_0000412 rather
 # than blank. Written even when the identifier itself is kept - the label then
 # shows the replacement, never the original code.
-#
-# Was EntD / FoldD / TierD / CpteD in the original config.ini.
 # ============================================================================
 structure,description,DESCRIPTION,NODE_ROLE,BASE,Account node or party node - by its role
 tiers,description,DESCRIPTION,PARTY,BASE,
@@ -837,9 +824,8 @@ compte_banque,description,DESCRIPTION,BANK_ACCOUNT,BASE,
 # PARTY: every party category, unclassified (X_) parties included - an
 # address is personal data whatever the party's category.
 #
-# DECIDED 2026-10-20: addresses follow the ATTRIBUTES switch. The original
-# package cleared them under its description flag (EntD); v4 keeps them with
-# the other personal attributes. Both switches default to y.
+# Addresses follow the ATTRIBUTES switch, with the other personal attributes,
+# not the DESCRIPTION switch. Both default to y.
 # ============================================================================
 tiers,adresse1,SELF_CODE,PARTY,BASE,
 tiers,adresse2,SELF_CODE,PARTY,BASE,
@@ -848,29 +834,12 @@ tiers,adresse4,SELF_CODE,PARTY,BASE,
 tiers,adresse5,SELF_CODE,PARTY,BASE,
 
 # ============================================================================
-# SECTION 11 - MOVED OUT: per-entity PII attribute columns
+# SECTION 11 - PERSONAL ATTRIBUTES: in inventory_op_custom.csv
 # ============================================================================
-# The 17 columns that used to sit here have been TRANSFERRED to
-# config/inventory_op_custom.csv.
-#
-# WHY: they are not vendor defaults. They are whatever this site happened to
-# put in the Ent1-5 / Fold1-5 / Tier1-5 / Cpte1-5 slots of the old config.ini -
-# a site choice, so they belong in the site-specific file rather than in the
-# shipped inventory. They remain ACTIVE; only their location changed.
-#
-# Transferred 2026-08-10. Pending review with the original developer.
-# See docs/08_open_questions.md, item 1.
-#
-# For reference, the rows now living in inventory_op_custom.csv - with the
-# owner category each one had in the old config.ini slot:
-#
-#   was Ent1-5   tiers,telephone / fax / email_adress / nom_pp / prenom_pp
-#   was Fold1-5  tiers,groupe_1 / groupe_2 / groupe_3 / flag_pp / dpt_naissance
-#   was Tier1-4  tiers,sector / seniority / telex / type_interne
-#                (Tier5 was 'n' - no fifth column)
-#   was Cpte1-3  compte_banque,groupe_1 / groupe_2 / groupe_3
-#                (Cpte4 and Cpte5 were 'n' - no fourth or fifth column)
-#
-# Since 2026-10-20 the tiers rows apply to EVERY party (category PARTY) - see
-# the note in inventory_op_custom.csv - and tiers.flag_pp is left out.
+# The contact, personal and grouping columns of tiers and compte_banque -
+# telephone, fax, email_adress, nom_pp, prenom_pp, groupe_1-3, dpt_naissance,
+# sector, seniority, telex, type_interne - are listed in
+# config/inventory_op_custom.csv, not here: which of them hold personal data
+# is a choice of each site. They are ACTIVE as shipped: the tiers rows for
+# every party (PARTY), the compte_banque rows for bank accounts.
 # ============================================================================

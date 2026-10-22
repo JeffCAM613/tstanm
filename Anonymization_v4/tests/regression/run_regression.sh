@@ -80,6 +80,27 @@ asserts()    { local line
                   say "$line"
                done < <(sysfile "$@" | grep -E '^(PASS|FAIL)'); }
 fresh()      { sysfile @tests/regression/fixture_schema.sql >/dev/null && sysfile @tests/regression/fixture_data.sql >/dev/null; }
+# One session as OP, fed its commands on its input as the wrapper feeds its
+# worker: paths are relative to op/. Output in $WORK/session.log.
+session()    { printf '%s\n' "CONNECT op/\"op\"@$SVC" "$@" "EXIT" \
+                 | docker exec -i -w /tmp/v4/op "$CT" sqlplus -L -S /nolog > "$WORK/session.log" 2>&1; }
+last_run()   { val "SELECT MAX(run_id) FROM anon_meta.anon_run"; }
+# results.sql for the last run, as the wrapper reads it: $WORK/results.txt.
+results_of_last_run() {
+  session "@sql/run/results.sql $(last_run)"
+  grep '^ANON_R_' "$WORK/session.log" > "$WORK/results.txt"
+}
+# report.html, written from results.txt and a manifest by the wrapper's own
+# code (anon_html.ps1): $WORK/run/report.html. Args: mode status verdict code.
+html_report() {
+  rm -rf "$WORK/run" && mkdir -p "$WORK/run"
+  cp "$WORK/results.txt" "$WORK/run/results.txt"
+  printf 'run=R-%06d\nmode=%s\ntool_version=test\ndatabase=XEPDB1\nstatus=%s\nverdict=%s\nexit_code=%s\n' \
+         "$(last_run)" "$1" "$2" "$3" "$4" > "$WORK/run/manifest.txt"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference = 'Stop'; . '$(cygpath -w "$V4/op/lib/anon_screen.ps1")';
+     . '$(cygpath -w "$V4/op/lib/anon_html.ps1")'; \$null = Write-HtmlReport '$(cygpath -w "$WORK/run")'" \
+     || ko "report.html could not be written"
+}
 # Raw data again, the metadata kept: what a re-import of the same client does.
 reload_raw() {
   sysrun "BEGIN
@@ -326,6 +347,14 @@ if wanted S13; then
   check "anon_inventory gained the column options" \
         "$(val "SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META' AND table_name = 'ANON_INVENTORY'
                 AND column_name IN ('HARVEST', 'ROW_SCOPE', 'GROUP_BY', 'FOLDER_TREES')")" "4"
+  check "the live view's objects were added: anon_progress, anon_check, step_id, the run's version" \
+        "$(val "SELECT (SELECT COUNT(*) FROM dba_tables WHERE owner = 'ANON_META' AND table_name IN ('ANON_PROGRESS', 'ANON_CHECK'))
+                || '/' || (SELECT COUNT(*) FROM dba_tab_columns WHERE owner = 'ANON_META'
+                            AND (table_name, column_name) IN (('ANON_STEP_LOG', 'STEP_ID'), ('ANON_RUN', 'TOOL_VERSION'),
+                                                              ('ANON_RUN', 'STOP_REQUESTED'), ('UNCLASSIFIED_REASON', 'BRIEF'))) FROM dual")" "2/4"
+  check "anon_run accepts the statuses REFUSED, CANCELLED and STOPPED" \
+        "$(val "SELECT COUNT(*) FROM dba_constraints WHERE owner = 'ANON_META' AND constraint_name = 'CK_ANON_RUN_STATUS'
+                AND search_condition_vc LIKE '%REFUSED%' AND search_condition_vc LIKE '%CANCELLED%' AND search_condition_vc LIKE '%STOPPED%'")" "1"
   check "the earlier run record is kept" "$(val "SELECT COUNT(*) FROM anon_meta.anon_run WHERE config_json LIKE '%min_code_length%'")" "1"
   verify; check "verification: PASS" "$RC" "0"
 fi
@@ -339,7 +368,7 @@ if wanted S14; then
 
   fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE ANY 9001)"
   run_all_on; check "ANY is refused" "$RC" "1"
-  check "  ... with the rows named" "$(grep -c 'ANY is no longer accepted' "$WORK/last.log")" "1"
+  check "  ... with the rows named" "$(grep -c 'ANY is not accepted' "$WORK/last.log")" "1"
 
   fresh; inv_with "$(row ANON_FIXTURE_EXTRA ONE_CHAR CODE ENTITY 9001)"
   run_all_on; check "a single party category on CODE is refused" "$RC" "1"
@@ -509,14 +538,18 @@ if wanted S19; then
                 AND run_id = (SELECT MAX(run_id) FROM anon_meta.anon_run)")" "13"
   check "  ... and no identifier in the run output" "$(grep -cwE "$x_codes" "$WORK/last.log")" "0"
   verify; check "verification: REVIEW REQUIRED (the review fixture)" "$RC" "3"
-  docker exec -w /tmp/v4/op "$CT" sqlplus -L -S "op/op@$SVC" @verify/generate_report.sql > "$WORK/report.log" 2>&1
-  report="$(docker exec -w /tmp/v4/op "$CT" bash -c 'ls -t logs/report_*.html | head -1')"
-  rgrep() { docker exec -w /tmp/v4/op "$CT" grep -c "$@" "$report"; }
-  check "report: an Unclassified parties section" "$(rgrep 'Unclassified parties (X_)</h2>')" "1"
-  check "  ... the reasons in words" "$(rgrep -e 'tell a portfolio from an entity' -e 'not known whether the party is a portfolio')" "2"
-  check "  ... the rows renamed, by table" \
-        "$(rgrep -e '13 identifier rows renamed to X_' -e '<td class="tbl-name">tiers</td><td class="num">1</td><td class="num">5</td>')" "2"
-  check "  ... and no identifier" "$(docker exec -w /tmp/v4/op "$CT" grep -cwE "$x_codes" "$report")" "0"
+  # The figures report.html is built from (results.sql), and report.html itself.
+  results_of_last_run
+  check "results: the reasons in words" \
+        "$(grep -cE '^ANON_R_XWHY\|(MISSING_MASTER|UNKNOWN_FLAG)\|.*(tell a portfolio from an entity|not known whether the party is a portfolio)' "$WORK/results.txt")" "2"
+  check "  ... the rows renamed, by table" "$(grep -cE '^ANON_R_XTABLE\|(tiers\|5|structure\|5|histo_operation\|2|compte_regle\|1)\|1$' "$WORK/results.txt")" "4"
+  check "  ... and no identifier" "$(grep -cwE "$x_codes" "$WORK/results.txt")" "0"
+  html_report EXECUTE COMPLETED 'REVIEW REQUIRED' 3
+  check "report.html: an Unclassified parties section" "$(grep -c 'Unclassified parties (X_)</h2>' "$WORK/run/report.html")" "1"
+  check "  ... the reasons in words" "$(grep -cE 'tell a portfolio from an entity|not known whether the party is a portfolio' "$WORK/run/report.html")" "1"
+  check "  ... the rows renamed, by table" "$(grep -c 'Where their X_ values went: 13 rows in 4 tables' "$WORK/run/report.html")" "1"
+  check "  ... the verdict" "$(grep -c 'class="badge">Done, review required<' "$WORK/run/report.html")" "1"
+  check "  ... and no identifier" "$(grep -cwE "$x_codes" "$WORK/run/report.html")" "0"
 
   fresh
   run EXECUTE "y y y n y" "y y y y y" "y y y y y" y; check "renaming of X_ off: EXECUTE completes" "$RC" "0"
@@ -592,6 +625,83 @@ if wanted S21; then
   check "the breakdowns of one kind are still settled" \
         "$(val "SELECT COUNT(*) FROM op.ventiler_compte WHERE id IN (11, 13) AND valeur_1 <> 'SHRD'")" "2"
   verify; check "verification: REVIEW REQUIRED" "$RC" "3"
+fi
+
+# --- S22 --------------------------------------------------------------------------
+if wanted S22; then
+  section "S22 the run as run_op_anonymization.bat drives it: progress, checks, results, stop, recovery"
+  fresh
+  codes='ENTN|PCUS|CPTN|CPTC|EOVL|POVL|NFLG|IFLG|NSTN|NSTO|NCLN|NCLO|EDUP|SHRD|NMEN|NMCP|NODEONLY|BKDUP|CHLD|BKONLY|BKNULL'
+  on='y y y y y y y y y y y y y y y'
+  sysfile @op/sql/10_create_metadata_schema.sql USERS USERS > /dev/null
+  # A dry run, script by script, in one session - as the wrapper's worker.
+  session '@sql/run/session.sql' '@sql/30_install_engine.sql' '@sql/run/engine.sql' '@/tmp/v4/inv.sql' \
+          '@sql/21_validate_inventory.sql' '@sql/run/inventory.sql' "@sql/run/start.sql DRYRUN $on 1 n y" \
+          '@sql/run/plan.sql' '@sql/run/count.sql'
+  run_id="$(last_run)"
+  check "the session says where it is connected" "$(grep -c '^ANON_SESSION|OP|' "$WORK/session.log")" "1"
+  check "the engine is installed and says its version" "$(grep -cE '^ANON_ENGINE\|VALID\|VALID\|[0-9.]+$' "$WORK/session.log")" "1"
+  check "the inventory, against this database" "$(grep -cE '^ANON_INVENTORY\|576\|560\|16\|' "$WORK/session.log")" "1"
+  check "start.sql opens the run" "$(grep -c "^ANON_RUN|$run_id|" "$WORK/session.log")" "1"
+  check "plan.sql prints the eight checks, the identities and the scope" \
+        "$(grep -c '^ANON_CHECK|' "$WORK/session.log")/$(grep -c '^ANON_IDENTITIES|18|7|25|0$' "$WORK/session.log")/$(grep -c '^ANON_SCOPE|' "$WORK/session.log")" "8/1/1"
+  check "count.sql completes the dry run" "$(grep -c '^ANON_RESULT|COMPLETED$' "$WORK/session.log")" "1"
+  check "the run records its version and status" \
+        "$(val "SELECT status || '/' || NVL2(tool_version, 'versioned', 'no version') FROM anon_meta.anon_run WHERE run_id = $run_id")" "COMPLETED/versioned"
+  check "every check is recorded, the required ones met" \
+        "$(val "SELECT COUNT(*) || '/' || COUNT(CASE WHEN needed = 'REQUIRED' AND status = 'MET' THEN 1 END)
+                FROM anon_meta.anon_check WHERE run_id = $run_id")" "8/5"
+  check "every logged row is numbered, once" \
+        "$(val "SELECT COUNT(*) - COUNT(DISTINCT step_id) FROM anon_meta.anon_step_log WHERE run_id = $run_id")" "0"
+  check "the progress row ends DONE" "$(val "SELECT phase || '/' || stage FROM anon_meta.anon_progress WHERE run_id = $run_id")" "DONE/completed"
+  session "@sql/run/poll.sql $run_id 0 RUN"
+  check "poll.sql: the logged rows, where the run is, its state" \
+        "$(( $(grep -c '^ANON_STEP|' "$WORK/session.log") > 400 ))/$(grep -c '^ANON_PROGRESS|DONE|' "$WORK/session.log")/$(grep -c '^ANON_RUNSTATE|COMPLETED|' "$WORK/session.log")" "1/1/1"
+  last_step="$(val "SELECT MAX(step_id) FROM anon_meta.anon_step_log WHERE run_id = $run_id")"
+  session "@sql/run/poll.sql $run_id $last_step RUN"
+  check "  ... and nothing again once it has caught up" "$(grep -c '^ANON_STEP|' "$WORK/session.log")" "0"
+  results_of_last_run
+  check "results.sql: the run, an estimate, every inventory item, the end" \
+        "$(grep -c "^ANON_R_RUN|$run_id|DRYRUN|COMPLETED|" "$WORK/results.txt")/$(grep -c '^ANON_R_ESTIMATE|' "$WORK/results.txt")/$(grep -c '^ANON_R_ITEM|' "$WORK/results.txt")/$(grep -c '^ANON_R_END' "$WORK/results.txt")" \
+        "1/1/576/1"
+  check "  ... and no identifier" "$(grep -cwE "$codes" "$WORK/results.txt")" "0"
+  html_report DRYRUN COMPLETED 'DRY RUN' 0
+  check "report.html of the dry run: what a run would change" "$(grep -c '<h2>What a run would change</h2>' "$WORK/run/report.html")" "1"
+  check "  ... one query per reason, ready to copy" "$(grep -c '<button type="button">Copy</button>' "$WORK/run/report.html")" "4"
+  check "  ... and no identifier" "$(grep -cwE "$codes" "$WORK/run/report.html")" "0"
+
+  # A run asked to stop: it stops between two columns, before the first.
+  session "@sql/run/start.sql EXECUTE $on 1 n y" '@sql/run/plan.sql' '@sql/run/record.sql' \
+          'COLUMN r NEW_VALUE r' 'SELECT op.anon_engine.current_run_id AS r FROM dual;' '@sql/run/stop.sql &r' '@sql/run/apply.sql'
+  run_id="$(last_run)"
+  check "stop.sql asks the run to stop" "$(grep -c '^ANON_STOP|REQUESTED$' "$WORK/session.log")" "1"
+  check "apply.sql stops between two columns" "$(grep -c '^ANON_RESULT|STOPPED|-20018|' "$WORK/session.log")" "1"
+  check "  ... the run ends STOPPED" \
+        "$(val "SELECT status || '/' || stop_requested FROM anon_meta.anon_run WHERE run_id = $run_id")" "STOPPED/Y"
+  check "  ... nothing in OP was changed, the translations are recorded" \
+        "$(val "SELECT (SELECT COUNT(*) FROM op.tiers WHERE code = 'ENTN') || '/' || (SELECT COUNT(*) FROM anon_meta.code_map) FROM dual")" "1/25"
+  run_all_on; check "a new run resumes and completes" "$RC" "0"
+  check "  ... with the same translations" "$(val "SELECT COUNT(*) FROM anon_meta.code_map")" "25"
+  verify; check "  ... verification: PASS" "$RC" "0"
+
+  # A run that was not confirmed, a run whose session was lost, a refused run.
+  session "@sql/run/start.sql EXECUTE $on 1 n y" '@sql/run/plan.sql' '@sql/run/finish.sql CANCELLED'
+  check "finish.sql: a run not confirmed ends CANCELLED" "$(val "SELECT status FROM anon_meta.anon_run WHERE run_id = $(last_run)")" "CANCELLED"
+  session "@sql/run/start.sql EXECUTE $on 1 n y"
+  run_id="$(last_run)"
+  check "a run whose session is lost stays RUNNING" "$(val "SELECT status FROM anon_meta.anon_run WHERE run_id = $run_id")" "RUNNING"
+  session "@sql/run/recover.sql $run_id"
+  check "  ... recover.sql ends it FAILED" \
+        "$(grep -c '^ANON_RECOVER|ENDED|1|' "$WORK/session.log")/$(val "SELECT status FROM anon_meta.anon_run WHERE run_id = $run_id")" "1/FAILED"
+  # A master row that holds a replacement no translation owns.
+  sysrun "UPDATE op.tiers SET code = 'E_0000999' WHERE ROWNUM = 1;
+          COMMIT;"
+  session "@sql/run/start.sql EXECUTE $on 1 n y" '@sql/run/plan.sql'
+  run_id="$(last_run)"
+  check "plan.sql: a copy anonymized before is REFUSED" "$(grep -c '^ANON_RESULT|REFUSED|-20011|' "$WORK/session.log")" "1"
+  check "  ... the run ends REFUSED, with the check that refused it" \
+        "$(val "SELECT r.status || '/' || c.status FROM anon_meta.anon_run r JOIN anon_meta.anon_check c ON c.run_id = r.run_id
+                WHERE r.run_id = $run_id AND c.code = 'NOT_ANONYMIZED'")" "REFUSED/NOT_MET"
 fi
 
 # --- Result ---------------------------------------------------------------------

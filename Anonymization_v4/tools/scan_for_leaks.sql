@@ -13,8 +13,8 @@
 -- in the inventory. If a table holds client identifiers and was never listed,
 -- both the engine and the verifier are silent about it.
 --
--- That matters here because the inventory was reconstructed from v3, whose
--- scope was assembled by hand over several years.
+-- That matters because the inventory is a list that people maintain: a column
+-- added to the application, or one never listed, is silent everywhere else.
 --
 -- This script ignores the inventory entirely. It walks EVERY character column
 -- in the OP schema and asks one question:
@@ -35,8 +35,8 @@
 -- a currency, a status flag, a product code. Check the samples before acting.
 -- A ONE-CHARACTER identifier matches every column holding that character -
 -- every 'O' or 'X' flag in the schema - so expect noise when the client has one.
--- Every width is scanned: there is no length exception any more, because a
--- real one-character identifier must be found like any other.
+-- Every width is scanned, with no length exception: a real one-character
+-- identifier must be found like any other.
 -- But a column with a high hit count, on a table that references entities, is
 -- almost certainly a gap in the inventory.
 --
