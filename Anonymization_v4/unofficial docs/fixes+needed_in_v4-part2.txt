@@ -1,0 +1,383 @@
+V4 FIX INSTRUCTIONS (POST-RUN #1): RESOLVING THE 6 VERIFIER FINDINGS & LEGACY GAPS
+===================================================================================
+Prepared: 2026-10-22.
+Baseline Run: Run #1 on refreshed raw EPFPG785 (op_anon_20261020_164224.log,
+ report_20261020_170538.html).
+Companion Docs: unofficial docs/25_run1_investigation_walkthrough.md
+ unofficial docs/25_run1_investigation_walkthrough.html
+ tests/manual/audit_histo_operation_tiers_domicile.sql
+Status: implementation instructions only. Do not include raw customer identifiers
+ or credentials in implementation reports or source files.
+
+OVERVIEW OF RUN #1 BASELINE
+---------------------------
+Run #1 on EPFPG785 captured and mapped 21,549 core identities (189 ENTITY E_,
+257 PORTFOLIO P_, 11,625 COUNTERPARTY T_, 9 UNCLASSIFIED_PARTY X_, and 9,469
+BANK_ACCOUNT CB_, including 777 shared party+account texts that each kept their
+own domain translation). All master tables and previously investigated party
+columns passed with 0 exposed rows.
+
+The strict domain verifier flagged exactly 6 remaining items:
+ - 7 FAIL columns (6,325 rows total: 6,282 + 19 + 24)
+ - 3 REVIEW checks (735 rows total: 688 + 39 + 8)
+
+Below are the locked-in engineering decisions, original behaviors, alternatives
+considered, database evidence, and exact implementation rules for all 6 items.
+
+
+===================================================================================
+ITEM 1: HISTO_OPERATION.TIERS_DOMICILE & IMPORT_OPERATION.TIERS_DOMICILE
+ (6,282 FAIL ROWS + 204,935 UNMASKED FREE-TEXT ROWS)
+===================================================================================
+
+1. Original Behavior (Legacy & v4 Run #1)
+ - Legacy Row-by-Row (02pack_anonym_number.sql line 413) and v4 Run #1
+ (inventory_op.csv: CODE,PARTY) treated tiers_domicile (VARCHAR2(50)) as a
+ PARTY identifier lookup (SET tiers_domicile = :new_code WHERE tiers_domicile
+ = :old_code).
+ - Breakdown of all 287,103 rows in OP.HISTO_OPERATION.TIERS_DOMICILE on EPFPG785:
+ * 31,578 rows (11.0%): NULL in raw data.
+ * 44,308 rows (15.4%, 3,568 distinct values): Matched a PARTY code and were
+ replaced with E_ (54 rows), P_ (1 row), or T_ (44,253 rows).
+ * 6,282 rows (2.2%, 347 distinct values): Coincidentally matched a
+ non-managed bank account code (COMPTE_BANQUE.CODE with FLAG_GERE = 'N';
+ 4,732 of these 6,282 rows contain spaces). Because the column was typed
+ CODE,PARTY, the engine left them untouched and the verifier flagged 6,282
+ FAIL rows ("originals of the OTHER domain remain").
+ * 204,935 rows (71.4%, 5,380 distinct values): Unrecorded free-text bank and
+ branch domiciliation strings (203,427 rows [99.3%] contain spaces; 58,848
+ rows are > 20 chars and cannot possibly match OP.TIERS.CODE VARCHAR2(20);
+ 21,439 rows on TANM7882 match OP.TIERS.DESCRIPTION where code <> description).
+ All 204,935 rows were left completely unmasked in cleartext by both Legacy
+ and v4 Run #1.
+
+2. Alternative Considered (Way B: Party + NULL)
+ - Replace exact PARTY code matches (44,308 rows -> E_/P_/T_/X_) first, and set
+ all remaining non-party text (6,282 bank-account matches + 204,935 free-text
+ strings = 211,217 rows) to NULL.
+
+3. Final Decision (Way A: NULL_OUT,NONE)
+ - Change both histo_operation.tiers_domicile and import_operation.tiers_domicile
+ in config/inventory_op.csv from CODE,PARTY to NULL_OUT,NONE.
+ - All 255,525 populated rows in histo_operation.tiers_domicile (and all populated
+ rows in import_operation.tiers_domicile) are cleared to NULL.
+
+4. Reason We Stick to This Decision (tiers_libelle Reference Proof)
+ - In KTP (OP.PACK_PAYMENT lines 676-677, 1616-1617, 2113-2141), tiers_domicile
+ (VARCHAR2(50), beneficiary bank/branch domiciliation text) and tiers_libelle
+ (VARCHAR2(50), beneficiary name/label populated from OP.TIERS.DESCRIPTION) are
+ sibling free-text payment-order fields.
+ - Pre-anonymization Oracle optimizer statistics (SYS.WRI$_OPTSTAT_HISTHEAD_HISTORY
+ saved at 2026-10-20 22:04:18 on EPFPG785) and OP.TIERS on TANM7882 proved:
+ * Before Run #1 nulled out histo_operation.tiers_libelle, it had 256,247
+ populated rows and 11,909 distinct values.
+ * Its LOW_VAL was the exact same PARTY code (T_0000001) as
+ histo_operation.contrepartie and op.tiers.code, and its HIGH_VAL was a
+ free-text company description.
+ * In OP.TIERS (12,074 rows), 5,891 parties (48.8%) had TIERS.DESCRIPTION =
+ TIERS.CODE in raw data, accounting for 233,667 of 282,377 operation rows
+ (82.8%) in HISTO_OPERATION. Thus over 200,000 rows in tiers_libelle held
+ exact PARTY codes alongside ~50,000 free-text descriptions.
+ * Yet Legacy Row-by-Row (02pack_anonym_number.sql lines 417 & 741) simply
+ ran SET tiers_libelle = NULL across the entire column.
+ - Setting tiers_domicile to NULL_OUT,NONE (Way A) is therefore 100% consistent
+ with how Legacy and v4 treat tiers_libelle, eliminates the 204,935-row
+ free-text leak and the 6,282-row verifier FAIL, and requires only a 2-line
+ change in config/inventory_op.csv.
+
+
+===================================================================================
+ITEM 2: HISTO_OPERATION.COMPTE_TIERS (14 FAIL + 119 ORPHAN ROWS),
+ HISTO_REGLEMENT.CPTY_ACCOUNT (1 FAIL + 601 ORPHAN ROWS),
+ AND PARAM_FICHE_VAL_DETAIL (.CODE 4 FAIL ROWS & .DESCRIPTION LEAK)
+===================================================================================
+
+PART 2A: ORPHAN BANK ACCOUNTS IN COMPTE_TIERS, CPTY_ACCOUNT, & OTHER BANK_ACCOUNT COLUMNS
+-----------------------------------------------------------------------------------------
+1. Original Behavior (Legacy & v4 Run #1)
+ - Both Legacy Row-by-Row (02pack_anonym_number.sql lines 2150, 2161) and v4
+ Run #1 rightly classify histo_operation.compte_tiers and
+ histo_reglement.cpty_account as CODE,BANK_ACCOUNT.
+ - However, because BANK_ACCOUNT (CB_) mappings were only built from
+ OP.COMPTE_BANQUE.CODE (+ w_compte_banque structure nodes in v4), any historical
+ bank account whose master row in OP.COMPTE_BANQUE was deleted in the past was
+ left unmasked in cleartext.
+ - Across all 11 true CODE,BANK_ACCOUNT reference columns with unmapped values on
+ EPFPG785, there are 498 distinct deleted/orphan bank account codes across
+ 2,673 rows:
+ * histo_operation.compte_tiers: 133 unmapped rows (22 distinct accounts:
+ 14 match a PARTY code [FAIL], 119 do not)
+ * histo_reglement.cpty_account: 602 unmapped rows (8 distinct accounts:
+ 1 matches a PARTY code [FAIL], 601 do not)
+ * vue_affilie_compte.code_ref: 1,194 unmapped rows (450 distinct accounts:
+ 8 match a PARTY code [FAIL], 1,186 do not)
+ * compte_regle_liv.compte: 28 unmapped rows (25 distinct accounts)
+ * echelle_compte.compte: 2 unmapped rows (1 distinct account)
+ * histo_mouv_solde.compte: 550 unmapped rows (2 distinct accounts)
+ * histo_mouvement.compte: 26 unmapped rows (1 distinct account)
+ * histo_operation.compte_entite_2:52 unmapped rows (1 distinct account)
+ * histo_operation.compte_tiers_2: 18 unmapped rows (2 distinct accounts)
+ * histo_reg_solde.compte: 41 unmapped rows (1 distinct account)
+ * histo_reglement.compte: 27 unmapped rows (1 distinct account)
+ (Note: histo_mouvement.compte_contrepartie has 1,195,066 rows containing only
+ whitespace ' ' and should be excluded via TRIM(col) IS NOT NULL.)
+
+2. Final Decision for Part 2A
+ - Keep histo_operation.compte_tiers, histo_reglement.cpty_account, and the other
+ account columns as CODE,BANK_ACCOUNT.
+ - Harvest distinct non-blank unmapped values from the true CODE,BANK_ACCOUNT
+ reference columns into the ACCOUNT candidate inventory during capture_identities
+ (domain = 'ACCOUNT', category = 'BANK_ACCOUNT', membership = 'REFERENCE_ONLY')
+ so every orphan bank account receives a deterministic CB_ replacement code.
+ - Exclude non-code/scoped columns from account candidate harvesting:
+ * compte_banque.code_bban (holds raw BBAN numbers, not COMPTE_BANQUE.CODE)
+ * histo_operation.tiers_iban_compte (holds raw IBAN/account numbers)
+ * param_fiche_val_detail.code (except where CODE_TABLEAU is of type FicValComp)
+
+3. Reason We Stick to This Decision
+ - Database proof on EPFPG785 shows that in OP.COMPTE_BANQUE (14,200 rows), 702
+ active bank accounts (1,733 rows) have a COMPTE_BANQUE.CODE identical to their
+ owner's OP.TIERS.CODE. Furthermore, the unmapped code on the 14th deal row and
+ 1 settlement row (T_0003796) also appears 3 times in
+ OP.VUE_AFFILIE_COMPTE.CODE_REF (op.affilie_code WHERE nom_table =
+ 'op.compte_banque'), proving 100% that these values are deleted Bank Accounts,
+ not Party references.
+ - Assigning them CB_ codes in the ACCOUNT domain keeps BANK_ACCOUNT columns 100%
+ pure (CB_ only), preserves joins across compte_tiers, cpty_account, and
+ vue_affilie_compte.code_ref, and closes the 2,673-row orphan account leak left
+ by Legacy.
+
+
+PART 2B: PARAM_FICHE_VAL_DETAIL.CODE (4 FAIL ROWS) & .DESCRIPTION (LEGACY GAP)
+------------------------------------------------------------------------------
+1. Original Behavior (Legacy & v4 Run #1)
+ - Legacy Row-by-Row (02pack_anonym_number.sql line 2233) and v4 Run #1
+ (CODE,BANK_ACCOUNT) updated the 7 bank-account rows where CODE_TABLEAU =
+ 'COMPTE' to CB_, and left the remaining rows untouched.
+ - By contrast, Legacy Set-Based v3 (06_op_setbased_anonym.sql on TANM7882) used
+ untyped ANY, which corrupted CODE = 'COM' ("Commissions Bancaires") into
+ E_0000029.
+ - In v4 Run #1, the verifier flagged 4 rows in param_fiche_val_detail.code as
+ FAIL because CODE = 'COM' (2 rows on SUIVI SYRAL & SYRAL ESSAI) and CODE =
+ 'EUROFAC' (2 rows on SUIVI SYRAL & SYRAL ESSAI) happened to match E_0000029 and
+ T_0004083 in OP.TIERS.
+ - Additionally, neither Legacy nor v4 Run #1 masked
+ op.param_fiche_val_detail.description, leaving real bank account descriptions
+ exposed right next to the anonymized CB_ codes on CODE_TABLEAU = 'COMPTE'
+ (7 rows) and header descriptions on SYRAL ESSAI.
+
+2. Final Decision for Part 2B
+ - param_fiche_val_detail.code:
+ * Keep as CODE,BANK_ACCOUNT (never CODE,MIXED).
+ * Scope the CODE,BANK_ACCOUNT update and the verifier check on
+ op.param_fiche_val_detail.code to account-based reports only:
+ EXISTS (SELECT 1 FROM op.param_fiche_en_valeur h
+ WHERE h.code = t.code_tableau AND h.type = 'FicValComp')
+ so that FicValFlu (OP.FLUX_POSTE.CODE) and FicValMrg rows are ignored by
+ the verifier and treated as PASS.
+ - param_fiche_val_detail.description (Legacy Gap):
+ * Add param_fiche_val_detail,description,NULL_OUT,NONE to
+ config/inventory_op.csv.
+
+3. Reason We Stick to This Decision
+ - OP.PARAM_FICHE_EN_VALEUR defines the report type (TYPE):
+ * 'COMPTE' has TYPE = 'FicValComp' (7 rows -> 100% OP.COMPTE_BANQUE.CODE).
+ * 'SUIVI SYRAL' (98 rows) and 'SYRAL ESSAI' (176 rows) have TYPE = 'FicValFlu'
+ (274 rows -> 100% [274/274] exist in OP.FLUX_POSTE.CODE, where 'COM' =
+ "Commissions Bancaires" and 'EUROFAC' = "Flux clients verse au factor").
+ - Scoping param_fiche_val_detail.code to FicValComp prevents corrupting
+ OP.FLUX_POSTE.CODE foreign keys while nulling out param_fiche_val_detail.description
+ eliminates the cleartext bank-name leak left by Legacy.
+
+
+===================================================================================
+ITEM 3: ORPHAN PARTY & ACCOUNT CODES IN COMPTE_BANQUE.ENTITE (3 FAIL / 17 ORPHANS),
+ VUE_AFFILIE_TIERS.CODE_REF (13 FAIL / 1,899 ORPHANS), AND
+ VUE_AFFILIE_COMPTE.CODE_REF (8 FAIL / 1,194 ORPHANS)
+===================================================================================
+
+1. Original Behavior (Legacy & v4 Run #1)
+ - Both Legacy and v4 Run #1 only built PARTY mappings from OP.TIERS +
+ OP.STRUCTURE (ecran = 'w_tiers').
+ - Historical party codes whose master row in OP.TIERS was deleted in the past
+ were left unmasked in cleartext across 8 true CODE,PARTY columns (259 distinct
+ orphan party codes across 1,998 rows on EPFPG785):
+ * compte_banque.entite: 17 unmapped rows (17 distinct parties:
+ 3 match their own row's COMPTE_BANQUE.CODE
+ [FAIL], 14 do not)
+ * vue_affilie_tiers.code_ref: 1,899 unmapped rows (225 distinct parties:
+ 13 rows [5 parties] match an ACCOUNT code
+ [FAIL], 1,886 do not)
+ * compte_regle.portefeuille: 51 unmapped rows (17 distinct parties)
+ * histo_position_tr.entite: 23 unmapped rows (1 distinct party)
+ * histo_reg_solde.portefeuille: 3 unmapped rows (1 distinct party)
+ * import_operation.portefeuille: 3 unmapped rows (1 distinct party)
+ * histo_reglement.portefeuille: 1 unmapped row (1 distinct party)
+ * histo_reglement.tiers: 1 unmapped row (1 distinct party)
+
+2. Final Decision for Item 3
+ - vue_affilie_compte.code_ref (8 FAIL + 1,186 silent orphans):
+ * Solved by Item 2 Part A (harvested into ACCOUNT -> CB_ with
+ membership = 'REFERENCE_ONLY').
+ - compte_banque.entite, vue_affilie_tiers.code_ref, and the 6 other true
+ CODE,PARTY reference columns (16 FAIL + 1,982 silent orphans = 1,998 rows /
+ 259 distinct orphan parties) (Legacy Gap):
+ * Harvest distinct non-blank unmapped values from the true CODE,PARTY
+ reference columns into the PARTY candidate inventory during
+ capture_identities as UNCLASSIFIED_PARTY (X_) with
+ x_reason = 'MISSING_MASTER' and membership = 'REFERENCE_ONLY'.
+ * Exclude the 3 interest-scale condition columns in inventory_op.csv where
+ 0 rows are parties (echelle_condition.code [133 rows],
+ echelle_cond_date.condition [238 rows], echelle_marge.condition [14 rows]).
+
+3. Reason We Stick to This Decision
+ - 100% symmetrical with Item 2 Part A, uses the existing UNCLASSIFIED_PARTY (X_)
+ / MISSING_MASTER / REFERENCE_ONLY model in anon_meta.identity_plan, resolves
+ all 24 FAIL rows in Item 3, and closes the 1,998-row orphan party cleartext
+ leak left by Legacy.
+
+
+===================================================================================
+ITEM 4: STRUCTURE.PERE (688 REVIEW ROWS: 47 BROKEN TREE LINKS + 641 ITEM 5 CHILDREN)
+===================================================================================
+
+1. Original Behavior (Legacy & v4 Run #1)
+ - Legacy Row-by-Row (02pack_anonym_number.sql lines 155, 815, 1474, 2205)
+ updated structure.pere scoped by tree (WHERE pere = :old_code AND structure =
+ 'Entite'/'Compte').
+ - In v4 Run #1, resolve_parent_roles (30_install_engine.sql line 922) ignored
+ the STRUCTURE tree column and grouped globally by old_code across all 26
+ trees. Whenever a parent code existed on w_tiers/w_compte_banque AND also
+ appeared on another tree/screen (has_other_screen_node = 'Y') or in both
+ domains, resolve_parent_roles marked parent_role as AMBIGUOUS or OTHER and
+ left 688 rows of structure.pere untouched:
+ * Group 4A (47 rows on Entite/w_tiers [19], Compte/w_tiers [26], and
+ Compte/w_compte_banque [2]): The parent node in the EXACT SAME STRUCTURE
+ tree IS on w_tiers or w_compte_banque and WAS renamed to E_ (16), P_ (3),
+ T_ (26), or CB_ (2), but child.pere was left unmasked in cleartext —
+ breaking 47 parent-child links!
+ * Group 4B (641 rows): Child rows whose parent node in the same STRUCTURE
+ tree has ecran NOT IN ('w_tiers', 'w_compte_banque') (the 39 parent nodes
+ in Item 5).
+
+2. Final Decision for Item 4
+ - Replace global resolve_parent_roles with same-tree parent resolution:
+ Update every child row's (structure, pere) in OP.STRUCTURE to the exact
+ new_code that its parent node row (p.structure = c.structure AND p.old_code =
+ c.pere) received in structure.code (or keep unchanged when the parent node row
+ in that same STRUCTURE tree was not renamed).
+
+3. Reason We Stick to This Decision
+ - In OP.STRUCTURE (19,328 rows), NDX_STRUCTURE is a UNIQUE index on
+ (STRUCTURE, CODE), and NDX_STRUC_PERE is the index on (STRUCTURE, PERE).
+ - Database proof on EPFPG785 confirmed that out of all 9,907 non-null PERE rows
+ across all 50 (structure, ecran) combinations, 9,907 out of 9,907 (100.000%)
+ exist as a parent node (p.structure = c.structure AND p.code = c.pere) in the
+ exact same STRUCTURE tree (0 exceptions).
+ - Resolving (structure, pere) directly from the parent node in the same
+ STRUCTURE tree repairs all 47 broken links in Group 4A and keeps all 641 child
+ rows in Group 4B 100% synchronized with their parent node in Item 5.
+
+
+===================================================================================
+ITEM 5: STRUCTURE.CODE [OTHER SCREENS] (39 REVIEW ROWS), FOLDER DESCRIPTIONS,
+ AND GLOBAL NULL_OUT FALLBACK RULE FOR NOT NULL COLUMNS
+===================================================================================
+
+1. Original Behavior (Legacy & v4 Run #1)
+ - Legacy Row-by-Row never updated structure.code or structure.description when
+ ecran NOT IN ('w_tiers', 'w_compte_banque').
+ - v4 Run #1 also left those 5,727 rows untouched, but flagged 39 rows in
+ structure.code [other screens] as REVIEW because their CODE string matched a
+ Party or Account code:
+ * Group 5A (12 rows on non-identity reference trees: PosteFlux [2],
+ PrevBudget [2], PosteFin [2], Ecran [2], Titre [3], CondBanque [1]):
+ Financial instrument, cash-flow post, security, and screen codes ('COM' =
+ Commissions Bancaires, 'EUROFAC' = Flux clients verse au factor, 'FRA' =
+ Forward Rate Agreement, 'CDS' = Credit Default Swaps, 'LCP', 'CDN' =
+ Certificat de depot, 'CER', 'MCB', 'CREDIT').
+ * Group 5B (20 folder header rows with ecran IS NULL: 10 in Compta + 10 in
+ Compta_Ato): Accounting chart-of-accounts folder headers named after banks
+ and entities ('BANQUE', 'BNP', 'BSD', 'CAC', 'CANE', 'CDN', 'LCL',
+ 'NATEXIS', 'SG', 'SYRAL').
+ * Group 5C (7 folder header rows with ecran IS NULL: 4 in Compte ['SYRAL',
+ 'TOI', 'TSM', 'TUC'], 1 in Entite ['SYRAL'], 2 in Tiers ['CSM', 'DRC']):
+ Top-level grouping folders named after client entities/subsidiaries
+ (E_0000166, E_0000177, E_0000179, T_0010267, E_0000034, E_0000039).
+ - In addition, structure.description on folder rows (ecran IS NULL) was left
+ unmasked in both Legacy and v4 Run #1, exposing strings like 'Tereos France et
+ ses filiales', 'CC avec TEREOS UCA', 'TSM / TEREOS', 'GROUPE SYRAL', and
+ 'Fournisseurs TEREOS rejets'.
+
+2. Final Decision for Item 5
+ - A. Group 5A (12 rows on non-identity trees: PosteFlux, PrevBudget, PosteFin,
+ Ecran, Titre, CondBanque):
+ * Do NOT rename structure.code on these non-identity trees; ignore them in
+ the verifier (treat as PASS).
+ - B. Groups 5B & 5C (27 folder header rows where ecran IS NULL in Entite,
+ Compte, Tiers, Compta, Compta_Ato):
+ * Anonymize structure.code (and structure.description) on these 27 folder
+ header rows using their existing PARTY mapping (E_/P_/T_/X_) first, or
+ ACCOUNT mapping (CB_) if account-only.
+ * By Item 4's rule, all child PERE rows in the same STRUCTURE tree will
+ automatically update to match their renamed folder header.
+ - C. Remaining Folder Descriptions (structure.description where ecran IS NULL)
+ & Global NULL_OUT Fallback Rule (Legacy Gap):
+ * Mask structure.description on all remaining folder rows where ecran IS
+ NULL.
+ * GLOBAL RULE FOR NULL_OUT COLUMNS: Because OP.STRUCTURE.DESCRIPTION is
+ defined as VARCHAR2(150) NOT NULL (and other columns may vary in
+ nullability across KTP versions), whenever the engine intends to NULL_OUT
+ a column, it must try setting NULL if nullable, and if the column is
+ NOT NULL (or if setting NULL fails with ORA-01407), automatically
+ overwrite it with the obvious marker 'ANONYMIZED'
+ (SUBSTR(c_mask_text, 1, column_width)) silently with NO warnings (PASS).
+
+3. Reason We Stick to This Decision
+ - Group 5A codes ('COM', 'EUROFAC', 'FRA', 'CDS', etc.) are non-sensitive
+ financial/instrument codes; renaming them would corrupt KTP reference trees.
+ - Groups 5B & 5C ('SYRAL', 'TOI', 'TSM', 'TUC', 'CSM', 'DRC', 'BNP', 'NATEXIS',
+ etc.) are genuine client entity and bank codes. We verified on EPFPG785 that
+ renaming all 27 rows produces 0 (STRUCTURE, CODE) collisions, and keeps
+ OP.TIERS_HIERARCHY_LOOKUP (which walks OP.STRUCTURE via CONNECT BY PRIOR
+ s.pere = s.code and queries OP.TIERS WHERE code = row.code) 100% consistent.
+ - Using 'ANONYMIZED' (c_mask_text) as the automatic, warning-free fallback
+ whenever NULL is forbidden by Oracle constraints handles version differences
+ gracefully and removes all cleartext folder descriptions.
+
+
+===================================================================================
+ITEM 6: VENTILER_COMPTE.VALEUR_1 (8 REVIEW ROWS)
+===================================================================================
+
+1. Original Behavior (Legacy & v4 Run #1)
+ - In Legacy Row-by-Row (02pack_anonym_number.sql lines 318 & 2188), the PARTY
+ loop ran before the BANK_ACCOUNT loop and blindly overwrote all 8 shared-code
+ rows in ventiler_compte.valeur_1 with PARTY codes — corrupting the 4 Bank
+ Account rows in CONV_BQ_C, CONV_BQ_D, CPT_BQE_C, CPT_BQE_D into T_0009361.
+ - In v4 Run #1 (CODE,MIXED), the engine anonymized all 1,185 account-only rows
+ to CB_ and all 495 party-only rows to E_/P_/T_, and left the 8 rows whose code
+ exists in both OP.TIERS and OP.COMPTE_BANQUE unchanged as REVIEW.
+
+2. Final Decision for Item 6
+ - Keep ventiler_compte.valeur_1..4 as CODE,MIXED for all single-domain values,
+ and resolve shared (AMBIGUOUS) party+account codes using the domain of their
+ breakdown group (ventiler_compte.code):
+ * Bank breakdown groups (CONV_BQ_C, CONV_BQ_D, CPT_BQE_C, CPT_BQE_D, i.e.,
+ ventiler_compte.code LIKE '%BQ%' or where the group's unambiguous rows are
+ ACCOUNT) -> use ACCOUNT (CB_0007150).
+ * Counterparty / Current-Account breakdown groups (CONV_CC_C, CONV_CC_D,
+ CPT_CC_C, CPT_CC_D, i.e., ventiler_compte.code LIKE '%CC%' or '%SYR%' or
+ where the group's unambiguous rows are PARTY) -> use PARTY (E_0000184).
+
+3. Reason We Stick to This Decision
+ - Database proof on EPFPG785 confirmed that every breakdown group
+ (ventiler_compte.code) in OP.VENTILER_COMPTE is 100% single-domain:
+ * CONV_BQ_C (279 CB_, 0 Party), CONV_BQ_D (278 CB_, 0 Party),
+ CPT_BQE_C (185 CB_, 0 Party), CPT_BQE_D (188 CB_, 0 Party) -> 930 CB_ rows
+ and 0 Party rows.
+ * CONV_CC_C (0 CB_, 64 Party), CONV_CC_D (0 CB_, 65 Party),
+ CPT_CC_C (0 CB_, 68 Party), CPT_CC_D (0 CB_, 49 Party) -> 0 CB_ rows and
+ 246 Party rows.
+ - Resolving shared codes by their breakdown group's domain eliminates all 8
+ REVIEW rows with 100% domain accuracy (0 conflicts, 0 warnings, 100% PASS).
